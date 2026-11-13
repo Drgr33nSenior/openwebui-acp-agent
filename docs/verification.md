@@ -2,6 +2,43 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## CI failure remediation
+
+The hosted run at `859f89d` passed macOS and Windows checks but failed Ubuntu
+26.04 sandbox startup and the production dependency audit. The gateway PR #179
+separately passed its `source` and `gateway-smoke` checks; its opt-in `rag-smoke`
+job was skipped.
+
+The agent now pins Ubuntu 24.04 and 26.04 as separate test targets. The user
+approved the existing bubblewrap AppArmor profile specifically for these
+disposable CI development runners. The workflow validates and loads that
+application profile without changing the global namespace restriction. No
+sandbox assertion, seccomp rule or network boundary was disabled.
+
+The runtime's documented `zod/v3` compatibility import now resolves Zod 4.6.7.
+The runtime dependency tree is bundled: testing proved a root-only override
+does not survive npm installation. The unbundled tarball installed Zod 3.25.76
+and failed audit; the corrected tarball resolves 4.6.7 and audits clean.
+The original dependency licence files are retained. See the corrected advisory
+assessment in sandbox.md; older advisory entries below describe prior builds.
+
+Observed local results with Node 26.11.1 / npm 11.20.0 on macOS:
+
+- `npm ci --ignore-scripts`: passed with the patched dependency resolution.
+- `npm run lint`, `npm run typecheck`, `npm run build`: passed.
+- `npm test`: **148 passed**, no failures or skips; includes real sandbox tests.
+- Prettier check of source, tests, manifests and lockfile: passed.
+- `npm pack`, separate-directory installation with lifecycle scripts disabled,
+  installed runtime schema/advisory regression checks, ACP handshake and real
+  sandbox command: passed.
+- Checkout and installed-tarball `npm audit --omit=dev --audit-level=high`:
+  **zero vulnerabilities**. No advisory was suppressed.
+
+The hosted run for this fix is pending. Windows CI deliberately checks platform
+refusal behavior, package dependencies and initialization only; native Windows
+sandbox and persistence support remain deferred. No new live backend or IDE
+acceptance is claimed.
+
 ## ACP context usage wheel
 
 The agent now requests completion usage and emits stable v1 `usage_update`

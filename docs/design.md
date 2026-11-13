@@ -323,7 +323,7 @@ Research date: 2026-11-13. [Node release policy](https://nodejs.org/en/about/pre
 
 The earlier unmodified upstream auth probe failed because it advertised only the legacy metadata capability. The agent now explicitly negotiates that verified compatibility form. The upstream probe is rerun unchanged; its result is recorded in verification.md. A passing auth-discovery probe still does not validate actual IDE interaction, OS keychain prompts, public package availability or registry installation.
 
-The development lint toolchain currently pulls a vulnerable minimatch range. The lockfile overrides minimatch to fixed 11.0.1; lint and type checking verify compatibility in this project. This override affects development tooling. The 0.1.5 installation audit was clean. Version 0.2.0 adds an upstream runtime/Zod advisory; see the release gate in [sandbox.md](sandbox.md).
+The development lint toolchain currently pulls a vulnerable minimatch range. The lockfile overrides minimatch to fixed 11.0.1; lint and type checking verify compatibility in this project. This override affects development tooling. The 0.1.5 installation audit was clean. Version 0.2.0 introduced a runtime/Zod advisory; the tested compatibility pin and bundled runtime tree now resolve it. See the corrected assessment in [sandbox.md](sandbox.md).
 
 ## Scoped tool approvals (0.1.3)
 
@@ -405,9 +405,10 @@ backend extension.
 
 The new dependency is justified by native OS enforcement and proxy filtering,
 which standard Node APIs cannot supply alone. Apache-2.0 attribution is in NOTICE.
-The locked upstream Zod advisory remains visible in npm audit and CI; it is not
-resolved by application input bounds. This preview is not ready for general
-publication or a complete Codex-equivalence claim.
+The runtime resolves patched Zod 4.6.7 through its documented v3 compatibility
+API. The runtime tree is bundled so this resolution survives installation. Both
+checkout and installed-package audits remain enabled; input bounds are retained.
+This preview is not ready for general publication or a complete Codex-equivalence claim.
 
 ## Administrator policy and advisory review (0.3.0)
 

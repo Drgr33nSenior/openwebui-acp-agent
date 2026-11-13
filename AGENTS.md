@@ -239,9 +239,11 @@ skips. Those counts describe that run; do not present them as new test results.
 Native Windows is a separate sprint. Prepared CI workflows are not observed CI
 executions, and mock services do not establish live backend/IDE compatibility.
 
-The runtime/Zod advisory remains a release blocker. Keep the audit gate and
-report findings. The tested Zod 4 `zod/v3` compatibility API did not establish a
-fix; do not force an override or suppress findings to manufacture a clean audit.
+The pinned runtime uses Zod's v3 compatibility API from patched Zod 4.6.7.
+Keep the version-scoped override, compatibility test, and bundled runtime tree:
+npm ignores dependency-level overrides after publication. Audit both the checkout
+and a separately installed tarball. See the corrected advisory assessment in
+[sandbox.md](docs/sandbox.md); do not suppress new findings or remove input bounds.
 
 Approval advice is opt-in and never authorizes an operation. Automatic model
 approval needs separate evaluation. Live reviewer judgment, complete AI
