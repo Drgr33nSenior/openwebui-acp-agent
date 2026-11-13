@@ -32,6 +32,9 @@ jobs:
           test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = "$restriction_before"
           uname -sr
           bwrap --version
+          sudo cat /sys/kernel/security/apparmor/profiles | grep -E '(bwrap|unprivileged_userns)'
+          bwrap --unshare-user --ro-bind / / --proc /proc --dev /dev /usr/bin/cat /proc/self/attr/current
+          bwrap --unshare-user --unshare-net --ro-bind / / --proc /proc --dev /dev /usr/bin/true
       - run: npm ci --ignore-scripts
       - run: npm run lint
       - run: npm run typecheck
@@ -52,7 +55,7 @@ jobs:
         if: failure() && runner.os == 'Linux'
         shell: bash
         run: |
-          sudo journalctl --kernel --boot --since '-10 minutes' --no-pager --output=cat --grep 'apparmor="DENIED"' | tail -30
+          sudo journalctl -k -b --since '-10 minutes' --no-pager --output=cat --grep 'apparmor="DENIED"' | tail -30
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
