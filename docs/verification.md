@@ -2,6 +2,69 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## Compaction, planning and feature audit
+
+Local macOS verification with Node 26.11.1: **190 tests passed**, including seven
+compaction unit tests, two planning schema tests and ten ACP workflow integration
+tests. `npm test` rebuilt the source. `npm run lint`, `npm run typecheck`, Prettier
+and documentation audits passed. Sanitized output is in
+[test-output-features.txt](test-output-features.txt).
+
+`npm pack` succeeded. An offline installation with lifecycle scripts disabled
+passed `test/package-install.mjs` outside the checkout: clean ACP initialization,
+terminal-auth/logout discovery and a real sandbox command. The installed
+dependency audit reported zero vulnerabilities. No dependency versions changed.
+
+Tests cover manual and automatic summary checkpoints, disabled autocompaction,
+complete tool groups, exact pinned user requests across later turns, original
+transcript retention, failure/cancellation rollback, restoration without replay,
+structured plans in model context and UI restoration, content-only redaction,
+Plan-mode enforcement against forged calls, no MCP startup in Plan mode, session
+isolation, and help/unknown commands without inference. Automatic summary failure
+warns once per turn and retains original context. Successful summaries clear
+stale usage; they do not manufacture a new token count.
+
+The initial full run found six compatibility regressions from placing workflow
+instructions after the latest tool/user message and changing selector ordering.
+Both were corrected while preserving existing assertions. Independent review
+also identified lost pinned requests, absent structured plan context and unsafe
+whole-plan redaction; focused regression tests cover the corrections.
+
+These changes are local and unpublished. The existing PyCharm registration still
+uses the earlier temporary-directory guidance build. Live summary quality, IDE
+plan presentation, Linux execution and complete AI Assistant/Air acceptance for
+this change remain unverified. The original 2 MB transcript budget remains;
+compaction reduces inference context rather than providing unlimited storage.
+See [feature audit and follow-up priorities](feature-audit.md).
+
+## Command temporary-directory guidance
+
+The command tool now tells the model to use private `TMPDIR` storage for scratch
+files within one command and workspace-relative files for artifacts needed by
+later commands. Permission failures from sandboxed commands include an
+actionable `sandboxHint`, while preserving the original exit code and output.
+Ordinary filesystem permissions remain a possible cause. Approval policy and
+sandbox enforcement are unchanged; no automatic retry or scope expansion occurs.
+
+On macOS with Node 26.11.1, all **171 tests passed**. Six new cases verify model
+request guidance, failed-tool feedback, read-only guidance, no misleading hint
+on successful or unsandboxed execution, and temporary-file lifetime. A real OS
+test also confirms that a fresh shared `/tmp` path is denied, while private
+scratch storage works in both sandbox modes and workspace files persist across
+commands. Lint, strict type checking, build, Prettier and documentation audit
+passed. See [sanitized output](test-output-temp-guidance.txt).
+
+This change has not been tested on Linux or in an interactive PyCharm/Air turn.
+Automated tests verify the tool contract, not whether every model follows it.
+
+The packed package passed an external-checkout ACP handshake and real sandbox
+command check; its installed dependency audit reported zero vulnerabilities.
+PyCharm 2026.3 (263.7307.206) now uses local installation
+`0.3.0-temp-guidance-20261113-r1` through the existing Open WebUI (Preview) entry.
+Installed `dist` matches the tested build. The previous launch path was saved for
+rollback, and all other ACP configuration was compared and preserved. Restart
+the agent to test the updated tool instructions in the IDE.
+
 ## Saved-workspace redaction and recovery
 
 Local metadata inspection confirmed that affected sessions contained a literal

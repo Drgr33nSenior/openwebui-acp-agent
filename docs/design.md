@@ -177,7 +177,7 @@ Changing the model invalidates the previous measurement. Cancellation prevents
 late usage delivery. A completed response with a length limit can still report
 its measured count before the existing limit error; no pending tools execute.
 Separate advisory reviews and delegated server chats do not add their counters
-to the main session. This feature adds no compaction or new backend endpoint.
+to the main session. Context reporting is separate from the compaction mechanism below; neither requires a new backend endpoint.
 
 The user's gateway source calculates the input budget from the full serving
 window minus output allowance and scheduler reserve. A bounded source change in
@@ -315,7 +315,7 @@ acceptance remains separate from these tests and installed-code inspection.
 
 ## Remaining engineering limits
 
-This preview has the command sandbox described in [sandbox.md](sandbox.md), but lacks an atomic compare-and-swap editor API, general sensitive-file classifier, Windows ACL support, remote-job rollback, automatic context compaction or credential expiration push notification. File-path checks and re-reads reduce accidental escape/stale writes but cannot eliminate adversarial TOCTOU races. Local MCP framing is now bounded before SDK parsing. Remote MCP HTTP payloads/results still require further transport-level memory hardening. Session aggregate quota accounting is best-effort across processes. These are release review items, not guarantees covered by mocked tests.
+This preview has the command sandbox described in [sandbox.md](sandbox.md), but lacks an atomic compare-and-swap editor API, general sensitive-file classifier, Windows ACL support, remote-job rollback or credential expiration push notification. File-path checks and re-reads reduce accidental escape/stale writes but cannot eliminate adversarial TOCTOU races. Local MCP framing is now bounded before SDK parsing. Remote MCP HTTP payloads/results still require further transport-level memory hardening. Session aggregate quota accounting is best-effort across processes. These are release review items, not guarantees covered by mocked tests.
 
 Research date: 2026-11-13. [Node release policy](https://nodejs.org/en/about/previous-releases) lists Node 26 and 24 as LTS. [ACP SDK source](https://github.com/agentclientprotocol/typescript-sdk), [MCP SDK source](https://github.com/modelcontextprotocol/typescript-sdk), [JetBrains AI Assistant](https://www.jetbrains.com/help/ai-assistant/acp.html), and [Air agent management](https://www.jetbrains.com/help/air/air-in-ides-manage-agents.html) were consulted. Product compatibility is not inferred from these documents.
 
@@ -428,3 +428,43 @@ judgment and deployment behavior remain unverified. The agent adds no telemetry.
 Linux VM testing identified mount ordering, bundled seccomp-helper visibility and
 private proxy-socket scope issues. [Sandbox evidence](sandbox.md) records the
 corrections and the administrator-approved, guest-only AppArmor prerequisite.
+
+
+## Conversation compaction and planning
+
+`src/compaction.ts` builds an inference view from a retained transcript plus a
+validated summary checkpoint. The transcript remains the source for IDE replay;
+compaction never rewrites it or executes its tool calls. Checkpoints contain a
+summary, transcript boundary, count and automatic setting. Boundary validation
+keeps assistant calls and their complete results together. Original leading
+system messages, recent complete history and the last user request within the
+compacted prefix remain available. The latter stays quoted verbatim when a new
+user turn arrives and is supplied to subsequent summaries.
+
+A compaction request uses the configured Open WebUI completion endpoint with an
+explicit empty tools array, a fixed summarization instruction and serialized
+history as untrusted input. It does not enable server tools, create a remote
+chat, or grant permissions. The summary is bounded to 16,000 characters and must
+reduce context; empty, tool-producing, truncated and cancelled responses cannot
+replace the checkpoint. The agent rechecks workspace/policy state before saving.
+The original transcript remains subject to the existing 2 MB storage limit.
+This is model-generated text summarization, not OpenAI encrypted compaction.
+
+Automatic compaction uses reported usage at 80% or a 700,000 serialized-character
+pressure threshold, only with a viable older prefix. It runs before a coding
+request, after all prior tool results have been recorded. Failure warns once per
+turn and retains the original context; existing request limits can still stop
+inference. Successful compaction clears the stale usage snapshot. No invented
+post-compaction token count is sent to ACP. Manual `/compact` and the persisted
+`autocompact` selector use the same mechanism. Both require normal authentication,
+workspace activation and policy checks; manual compaction does not start MCP.
+
+`src/planning.ts` defines bounded task steps and the `update_plan` tool using the
+stable ACP v1 plan schema. Plans are saved separately and replayed as plan
+notifications. The current plan is included as untrusted progress data in each
+coding request, so compaction does not remove its structured state. Only entry
+content is redacted; structural fields and status enums remain intact.
+Plan mode is enforced in tool dispatch, not only in model instructions. It
+permits file inspection and plan updates, and prevents MCP startup. Switching
+back to Code mode does not change grants, sandbox selection or administrator
+policy. Unknown slash commands produce help without model inference.

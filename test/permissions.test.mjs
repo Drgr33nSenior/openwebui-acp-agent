@@ -74,6 +74,7 @@ async function client(
   terminalExit = 0,
   runHook,
   dependencies = {},
+  commandOutput = "ok",
 ) {
   const executed = [];
   const agent = createAgent({
@@ -88,7 +89,7 @@ async function client(
         });
         return JSON.stringify({
           code: terminalExit,
-          output: "ok",
+          output: commandOutput,
           limitedOrCancelled: false,
         });
       },
@@ -745,6 +746,102 @@ async function setMode(c, value) {
     value,
   });
 }
+
+for (const [mode, code, output, expectHint] of [
+  [
+    "workspace",
+    1,
+    "PermissionError: [Errno 1] Operation not permitted: '/tmp/game.js'",
+    true,
+  ],
+  ["read_only", 1, "EACCES: permission denied", true],
+  ["workspace", 0, "An example says Permission denied", false],
+  ["workspace", 2, "SyntaxError: invalid syntax", false],
+]) {
+  test(`sandbox command guidance and failure feedback: ${mode}, exit ${code}`, async () => {
+    const c = await client(
+      await workspace(),
+      () => "once",
+      [],
+      undefined,
+      code,
+      undefined,
+      {},
+      output,
+    );
+    try {
+      await setSandbox(c, mode);
+      const operation = call("run_command", {
+        executable: "fixture",
+        args: [],
+      });
+      await invoke(c, [operation]);
+      const event = c.updates
+        .filter((u) => u.toolCallId === operation.id)
+        .at(-1);
+      const result = JSON.parse(event.content[0].content.text);
+      assert.equal(event.status, code === 0 ? "completed" : "failed");
+      assert.equal(result.code, code);
+      assert.equal(result.output, output);
+      assert.equal(result.limitedOrCancelled, false);
+      assert.equal(Boolean(result.sandboxHint), expectHint);
+      if (expectHint) {
+        assert.match(
+          result.sandboxHint,
+          /TMPDIR, Python tempfile or Node os.tmpdir/,
+        );
+        assert.match(result.sandboxHint, /deleted when the command ends/);
+        assert.match(
+          result.sandboxHint,
+          /do not automatically retry or disable isolation/,
+        );
+        assert.match(
+          result.sandboxHint,
+          mode === "read_only"
+            ? /Workspace writes are disabled/
+            : /use workspace-relative paths/,
+        );
+      }
+      const request = requests.at(-1);
+      assert.deepEqual(
+        JSON.parse(request.messages.find((m) => m.role === "tool").content),
+        result,
+      );
+      const description = request.tools.find(
+        (t) => t.function.name === "run_command",
+      ).function.description;
+      assert.match(description, /cannot be used by later commands/);
+      assert.match(description, /never hard-code shared \/tmp or \/var\/tmp/);
+      assert.equal(c.executed.length, 1);
+    } finally {
+      await c.close();
+    }
+  });
+}
+
+test("unsandboxed permission errors do not receive sandbox guidance", async () => {
+  const c = await client(await workspace());
+  try {
+    await setSandbox(c, "full_access");
+    const operation = call("run_command", {
+      executable: process.execPath,
+      args: [
+        "-e",
+        "console.error('Permission denied (synthetic fixture)'); process.exitCode=1",
+      ],
+    });
+    await invoke(c, [operation]);
+    const event = c.updates.filter((u) => u.toolCallId === operation.id).at(-1);
+    const result = JSON.parse(event.content[0].content.text);
+    assert.equal(event.status, "failed");
+    assert.equal(result.code, 1);
+    assert.match(result.output, /Permission denied/);
+    assert.equal(result.sandboxHint, undefined);
+  } finally {
+    await c.close();
+  }
+});
+
 async function status(c) {
   await c.prompt("/permissions");
   return JSON.parse(c.updates.at(-1).content.text);
@@ -869,7 +966,7 @@ test("Read-only mode blocks writes, commands and MCP startup even with remembere
     assert.equal(c.executed.length, 0);
     assert.deepEqual(
       requests.at(-1).tools.map((t) => t.function.name),
-      ["list_files", "read_file", "search_text"],
+      ["list_files", "read_file", "search_text", "update_plan"],
     );
   } finally {
     await c.close();
@@ -892,6 +989,7 @@ test("Read-only mode blocks writes, commands and MCP startup even with remembere
       "list_files",
       "read_file",
       "search_text",
+      "update_plan",
     ]);
   } finally {
     await d.close();

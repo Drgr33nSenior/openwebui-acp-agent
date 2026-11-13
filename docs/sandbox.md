@@ -36,6 +36,27 @@ Changing the sandbox or scope invalidates the applicable command grant.
 invocation with a justification. There is no automatic retry outside the sandbox.
 An earlier failed command may already have changed files.
 
+## Temporary files and permission failures
+
+Command approval does not expand filesystem access. A command that writes to a
+hard-coded path such as `/tmp/game.js` can fail with `Operation not permitted`
+even in **Allow edits and development commands** mode. Shared `/tmp` and
+`/var/tmp` are outside the default write scope.
+
+For scratch files used within one command, use the supplied `TMPDIR`, Python's
+`tempfile` module or Node's `os.tmpdir()`. Each sandboxed command receives a
+private directory, which is deleted when that command ends. Do not pass those
+paths to later commands. For files needed across commands, use workspace-relative
+paths within the approved scope. The **Read-only filesystem** sandbox still
+forbids workspace writes, but permits private scratch files.
+
+The command tool describes these rules on every model request, including restored
+sessions. Failed sandboxed commands that report a permission error also return a
+`sandboxHint` alongside the original exit code and output. This is guidance,
+not proof that the sandbox caused the error: ordinary filesystem permissions
+can also deny access. The agent does not retry the command, expand access or
+disable isolation in response to this hint.
+
 ## Filesystem and credentials
 
 The policy denies reads of home and common temporary directories, then permits
