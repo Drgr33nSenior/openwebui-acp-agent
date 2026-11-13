@@ -178,15 +178,71 @@ The first ordinary prompt requests workspace activation through ACP. Approval co
 
 Tools list files, read bounded text, search literal text, propose/create/replace text files and execute a program with argv. Edits show old and new content through ACP diff content. The agent re-reads before writing and rejects stale proposals. Client filesystem capabilities take precedence, preserving unsaved editor content. Client denial never triggers a local fallback. Local writes use temporary files and rename. Concurrent hostile filesystem replacement cannot be fully eliminated by these checks; this is not an OS sandbox.
 
-With the default scoped policy, commands initially require approval showing executable, arguments and cwd. Recognized inspection and development commands offer reuse for that exact executable and argument list. These include `ls`, `find` without side-effect predicates, `rg` without subprocess preprocessors or `--hostname-bin`, common text inspection tools, Git inspection commands and test/build tools without options that delete or overwrite other paths (such as `pytest --basetemp` or an output-file option). Only bare program names or programs in standard system directories qualify; a path such as `./tools/cat` always asks. Literal `sh`/`bash`/`zsh -c` or `-lc` forms can also offer reuse when every command is recognized. Shell expansion, redirection, arbitrary scripts, Git mutations, deployment, cleanup and unrecognized forms require approval each time, with an explanation in the request. Full shell scripts remain part of the exact grant; no command prefix is automatically approved. See the [Codex comparison](docs/codex-comparison.md) for the boundaries and remaining gaps. Local commands get a small environment allowlist, a 30-second timeout and a 100 KB output bound. A shell runs only when explicitly selected as the executable. Commands use the agent-owned sandbox runner even when the client offers terminals. A terminal capability does not establish OS isolation. Sandboxed commands receive a private temporary directory and network proxy settings; an unavailable sandbox never silently falls back to unrestricted execution.
+With the default scoped policy, commands initially require approval showing executable, arguments and cwd. Recognized inspection and development commands offer reuse for that exact executable and argument list. These include `ls`, `find` without side-effect predicates, `rg` without subprocess preprocessors or `--hostname-bin`, common text inspection tools, Git inspection commands and test/build tools without options that delete or overwrite other paths (such as `pytest --basetemp` or an output-file option). Only bare program names or programs in standard system directories qualify; a path such as `./tools/cat` always asks. Literal `sh`/`bash`/`zsh -c` or `-lc` forms can also offer reuse when every command is recognized. Shell expansion, redirection, arbitrary scripts, Git mutations, deployment, cleanup and unrecognized forms require approval each time, with an explanation in the request. Full shell scripts remain part of the exact grant; no command prefix is automatically approved. See the [Codex comparison](docs/codex-comparison.md) for the boundaries and remaining gaps. Local commands get a small environment allowlist, a per-call `timeout_ms` (default 120000, maximum 600000) and a 100 KB output bound. A shell runs only when explicitly selected as the executable. Commands use the agent-owned sandbox runner even when the client offers terminals. A terminal capability does not establish OS isolation. Sandboxed commands receive a private temporary directory and network proxy settings; an unavailable sandbox never silently falls back to unrestricted execution.
 
-Tool approvals offer **Allow once**, **Allow for this session**, **Remember for this workspace and backend**, and **Decline** where repeat approval is supported. Edit grants cover text edits inside the approved root; diffs and stale-content checks still apply. Command grants match exact arguments, not prefixes. MCP connection grants cover the disclosed server configuration; MCP tool grants cover that server and tool with any valid arguments, including mutations. Grant only tools whose future calls you intend to permit. Tools from a local HTTP/SSE MCP server, including the IDE bridge (terminal, run configurations), run on this machine outside the sandbox, so each call needs its own approval, like any unsandboxed command.
+Tool approvals offer **Allow once**, **Allow for this session**, **Remember for this workspace and backend**, and **Decline** where repeat approval is supported. Edit grants cover text edits inside the approved root; diffs and stale-content checks still apply. Command grants match exact arguments, not prefixes. MCP connection grants cover the disclosed server configuration; MCP tool grants cover that server and tool with any valid arguments, including mutations. Grant only tools whose future calls you intend to permit. Tools from a local HTTP/SSE MCP server, including the IDE bridge (terminal, run configurations), run on this machine outside the sandbox, so each call needs its own approval, like any unsandboxed command. The narrow exception is `get_file_problems` from the approved, client-supplied JetBrains bridge for the same workspace, described below; other tools and same-named tools on other servers keep their approvals.
 
 Session tool grants expire when the agent disconnects and are not restored from history. Remembered grants survive reconnects in `permissions.json`, separately from workspace trust. Workspace, backend/header, authentication generation and MCP configuration changes invalidate the applicable grants. `/permissions` lists the scope and grant fingerprints without storing raw command arguments or credentials. `/permissions revoke-tools` clears all tool grants for the current workspace/backend across sessions; pending approvals cannot restore a revoked grant. It does not undo completed actions or guarantee cancellation of remote work already started. The IDE controls the presentation of the supplied choices.
 
 A remembered command approval authorizes future executions, not immutable program contents. Scripts and dependencies can change within the sandbox, and allowed workspace writes can still damage the project. Revoke grants before running changed code that you no longer trust. Unsandboxed mode removes the OS boundary.
 
 Discovery applies root and nested `.gitignore`, skips common sensitive paths, `.git`, symlinks and `node_modules`, and limits traversal. All possible credential filename conventions are not covered. Sandboxing does not make a hostile workspace safe or identify every possible secret. Project `.env`, hooks, legacy agent settings and `.mcp.json` are never executed or loaded as configuration. Root `AGENTS.md` is read only after activation and is treated as untrusted guidance.
+
+## Automatic verification after edits
+
+When the model finishes a turn that successfully used `write_file`, the agent
+checks up to ten changed files with the connected JetBrains IDE's
+`get_file_problems` tool. It returns compact, deduplicated diagnostics to the
+model and allows two repair attempts by default. Remaining errors or incomplete
+checks are reported to you. Read-only turns do not trigger this loop; an absent
+bridge skips IDE verification silently. Shell and MCP mutations do not provide
+a changed-file journal and do not trigger this initial implementation.
+
+The IDE connection still needs workspace and connection approval. Only the
+verified, client-supplied bridge for that exact workspace gets the file-problems
+exemption. Calls remain visible in the tool log. Administrator `alwaysAsk` rules
+and the optional advisory reviewer still require approval. Terminal commands,
+run configurations, refactorings and other MCP tools keep their existing rules.
+See [the discovered IDE contract](docs/ide-diagnostics.md).
+
+Add an optional `verify` object to the agent's private `config.json`, preserving
+its existing fields. Project checks are opt-in by exact canonical root:
+
+```json
+{
+  "verify": {
+    "maxFixRounds": 2,
+    "includeWarnings": false,
+    "maxFiles": 10,
+    "maxOutputChars": 8000,
+    "projects": [
+      {
+        "root": "/absolute/canonical/project",
+        "commands": [
+          { "executable": "npm", "args": ["test"], "timeout_ms": 120000 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Project checks use executable plus argv, the session cwd, the existing OS
+sandbox, command approvals and network controls. Configuration does not approve
+execution. Select a sandboxed mode to use them; automatic checks never run in
+`full_access`. A sibling project or Air worktree needs its own configuration.
+Commands in project `AGENTS.md` are guidance, not executable configuration.
+Checks can run again after a repair edit or command, so configure repeatable
+tests or linters rather than deployments or other one-time operations. A repair
+reply without further edits or commands reuses the previous project-check
+result. Declined or unavailable operations are not retried during that turn.
+
+`maxFixRounds` accepts 0–5 (zero checks once without model repairs), `maxFiles`
+1–10, and `maxOutputChars` 1000–16000. At most four commands can be configured
+per project. Warnings are excluded unless enabled. Checks share the turn's
+cancellation signal, 64-call limit and overall model-round limit. Timeout,
+malformed output and permission denial cannot produce a passing result. The
+original transcript and complete tool results are retained during interruption.
 
 ## MCP
 

@@ -9,7 +9,12 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { directory } from "./config.js";
-import { childEnv } from "./commands.js";
+import {
+  childEnv,
+  DEFAULT_COMMAND_TIMEOUT_MS,
+  MAX_COMMAND_TIMEOUT_MS,
+  validateCommandTimeout,
+} from "./commands.js";
 import {
   agentCodePaths,
   EXECUTION_DIRECTORIES,
@@ -60,6 +65,12 @@ export const commandSchema = z
           .refine((s) => !s.includes("\0")),
       )
       .max(100),
+    timeout_ms: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_COMMAND_TIMEOUT_MS)
+      .default(DEFAULT_COMMAND_TIMEOUT_MS),
     sandbox_permissions: z
       .enum(["use_default", "require_escalated"])
       .default("use_default"),
@@ -460,8 +471,9 @@ export async function sandboxCommand(
   args: string[],
   run: SandboxRun,
   signal: AbortSignal,
-  limits = { timeoutMs: 30000, outputBytes: 100000 },
+  limits = { timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS, outputBytes: 100000 },
 ): Promise<string> {
+  validateCommandTimeout(limits.timeoutMs);
   const process = await startSandbox(executable, args, run, signal);
   process.child.stdin!.end();
   let output = Buffer.alloc(0),

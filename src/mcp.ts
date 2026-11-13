@@ -11,7 +11,12 @@ import { dirname, isAbsolute, join, parse } from "node:path";
 import { homedir } from "node:os";
 import { scopePaths } from "./sandbox.js";
 import { PolicyError } from "./policy.js";
-import { ideMcpConnection } from "./ide-mcp.js";
+import {
+  ideMcpConnection,
+  ideFileProblemsScope,
+  isIdeFileProblemsTool,
+  type IdeFileProblems,
+} from "./ide-mcp.js";
 import { abortable } from "./cancel.js";
 
 // Explicitly named executable/script installation only. Never inspect project
@@ -50,7 +55,9 @@ export type RemoteTool = {
   // Runs on this machine outside the agent's sandbox: a local HTTP/SSE server,
   // including the IDE bridge (terminal, run configurations). Like any unsandboxed
   // execution, each call needs its own approval; no session or remembered grant.
+  // ideFileProblems is a separate, narrowly checked read-only exception.
   unsandboxed: boolean;
+  ideFileProblems?: IdeFileProblems;
   identity: unknown;
   definition: unknown;
   validate: ValidateFunction;
@@ -74,6 +81,7 @@ export class Mcp {
       root: cwd,
       network: async () => false,
     },
+    ideServers: readonly McpServer[] = [],
   ) {
     let stage = "configuration validation";
     let serverNumber = 0;
@@ -175,6 +183,12 @@ export class Mcp {
           clearTimeout(timer);
         }
         signal.throwIfAborted();
+        const diagnosticScope = await ideFileProblemsScope(
+          source,
+          s,
+          cwd,
+          ideServers,
+        );
         stage = "tool catalog or schema validation";
         const listed = await client.listTools({}, { signal, timeout: 15000 });
         if (listed.tools.length > 100 || listed.nextCursor)
@@ -186,6 +200,9 @@ export class Mcp {
           const validate = new Ajv({ strict: false }).compile(t.inputSchema);
           this.tools.set(name, {
             label: `${s.name}/${t.name}`,
+            ...(diagnosticScope && isIdeFileProblemsTool(t)
+              ? { ideFileProblems: diagnosticScope }
+              : {}),
             unsandboxed:
               !("command" in s) &&
               ["localhost", "127.0.0.1", "[::1]"].includes(

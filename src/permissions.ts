@@ -100,7 +100,7 @@ export const permissionModes = [
     value: "ask",
     name: "Ask each time",
     description:
-      "Ask for each edit, command and MCP operation; ignore saved tool grants.",
+      "Ask for each edit, command and non-diagnostic MCP operation; ignore saved tool grants.",
   },
   {
     value: "scoped",

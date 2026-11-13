@@ -313,6 +313,48 @@ arbitrary server error bodies or credentials. Mocked ACP/SSE tests verify the
 header mapping, approvals, policy restrictions and failures. Live PyCharm tool
 acceptance remains separate from these tests and installed-code inspection.
 
+## Automatic verification
+
+Verification runs at the no-tool-call completion boundary, before MCP cleanup,
+only after a successful `write_file` in that turn. Paths are captured after the
+atomic write or client filesystem response, before later notifications. The
+turn-local set does not survive cancellation, restore or replacement. Commands
+and arbitrary MCP mutations are not a reliable changed-file journal.
+
+The MCP connection retains its unsandboxed classification. A separate marker
+identifies only the observed `get_file_problems` contract on a client-supplied
+native IDE descriptor mapped to SSE for the same canonical project. User MCP
+configuration, localhost URLs, labels and annotations cannot confer that marker.
+This trusts the ACP client's routing metadata; it does not attest ownership of
+the listening process or turn untrusted MCP annotations into authorization.
+Arguments are restricted to known fields, validated against the discovered
+schema, pinned to the workspace and checked against normal filesystem exclusions.
+The operation still checks workspace consent, revocation and administrator policy;
+administrator `alwaysAsk` and advisory review take precedence over the exemption.
+All calls emit the ordinary ACP tool lifecycle. See [live catalog evidence](ide-diagnostics.md).
+
+Automatic calls use the existing tool executor and record assistant/tool pairs.
+Raw diagnostic text never becomes a system instruction or a replacement user
+request. The parser handles structured content and the observed JSON text result,
+discards source excerpts, deduplicates compact locations and caps output. A
+partial, malformed or failed result remains incomplete. Initial verification can
+request at most `verify.maxFixRounds` repair attempts (default two), still bounded
+by the normal model/tool budgets. Checks and repairs use the current turn's
+AbortSignal, so replacement waits for their normal cleanup and history repair.
+
+Private user configuration supplies optional commands for exact canonical roots.
+Project instructions cannot enable executable checks. These commands use the
+normal command approval and owned sandbox path, with no scope expansion or
+automatic unsandboxed fallback. The command schema now supports `timeout_ms`,
+default 120000 and maximum 600000; timeout is part of the approval identity.
+Cancellation and output-limit cleanup retain the existing process-group handling.
+Project-check results are reused until a successful file edit or a potentially
+mutating command/MCP call makes them stale. A failed call can have partial
+effects, so attempted commands and non-diagnostic MCP calls also invalidate the
+cache. Declined or unavailable checks are not retried in that turn. Reused partial
+diagnostics remain explicitly incomplete and cannot drive repairs from stale
+errors after subsequent edits.
+
 ## Remaining engineering limits
 
 This preview has the command sandbox described in [sandbox.md](sandbox.md), but lacks an atomic compare-and-swap editor API, general sensitive-file classifier, Windows ACL support, remote-job rollback or credential expiration push notification. Local file-tool reads and writes are bracketed against folder-for-symlink swaps. They open without following a final symlink and refuse hard-linked files. They also require an unchanged device, inode and ctime chain from the root to the file around the open (see `workspace.ts`). Filesystems with coarse timestamps weaken this check. When the IDE's `fs/read_text_file` or `fs/write_text_file` is used instead, the IDE resolves the path itself, and this agent cannot close that race. Local MCP framing is now bounded before SDK parsing. Remote MCP HTTP payloads/results still require further transport-level memory hardening. Session aggregate quota accounting is best-effort across processes. These are release review items, not guarantees covered by mocked tests.
