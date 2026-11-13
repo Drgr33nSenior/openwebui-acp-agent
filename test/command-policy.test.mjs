@@ -49,6 +49,32 @@ test("shell expansion, side-effect predicates and high-risk commands never gain 
   ])
     assert(!repeatableCommand(exe, args), JSON.stringify([exe, args]));
 });
+test("workspace programs and options that run, delete or overwrite elsewhere always ask", () => {
+  for (const [exe, args] of [
+    ["./tools/cat", ["notes.txt"]],
+    [".venv/bin/pytest", []],
+    ["/Users/someone/project/bin/ls", []],
+    ["bash", ["-c", "./tools/cat notes.txt"]],
+    ["rg", ["--hostname-bin=./tools/x", "TODO"]],
+    ["rg", ["--hostname-bin", "./tools/x", "TODO"]],
+    ["pytest", ["--basetemp=src"]],
+    ["pytest", ["-o", "cache_dir=src", "--cache-clear"]],
+    ["pytest", ["-ocache_dir=src"]],
+    ["tsc", ["--outFile", "src/index.ts"]],
+    ["eslint", ["-o", "src/index.ts", "."]],
+    ["vitest", ["run", "--outputFile=src/index.ts"]],
+  ])
+    assert(!repeatableCommand(exe, args), JSON.stringify([exe, args]));
+  for (const [exe, args] of [
+    ["/usr/bin/git", ["status"]],
+    ["/opt/homebrew/bin/rg", ["TODO", "src"]],
+    ["pytest", ["-q", "tests"]],
+    ["tsc", ["--noEmit"]],
+    ["eslint", ["src"]],
+    ["vitest", ["run"]],
+  ])
+    assert(repeatableCommand(exe, args), JSON.stringify([exe, args]));
+});
 test("shell grants retain the exact wrapper and full script, never a parsed command prefix", () => {
   const identity = (args) =>
     grant("command", { executable: "bash", args }, "exact command").id;

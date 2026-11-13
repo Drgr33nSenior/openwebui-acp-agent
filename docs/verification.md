@@ -2,6 +2,30 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## Saved-workspace redaction and recovery
+
+Local metadata inspection confirmed that affected sessions contained a literal
+`[REDACTED]` root. The verified JetBrains stdio descriptor's project path, port
+and debug flag were incorrectly included in secret redaction, and persistence
+redacted the entire session envelope. Those verified routing fields are now
+excluded; auth tokens, custom fields and unrecognized definitions remain
+redacted. Saving applies transcript redaction separately from structured local
+identity, policy and usage metadata.
+
+A legacy root containing the redaction marker loads inactive with a recovery
+notice. Before coding it requires explicit workspace approval, regardless of
+remembered trust. Until approval, saves retain the unresolved root. Approval
+binds the history to the client's canonical workspace; tools are not replayed.
+Denial, invalid replies, cancellation and existing blocks prevent activation and
+inference. An intact mismatched workspace remains an error with recovery guidance.
+No existing transcript or trust record was manually changed during repair.
+
+Local macOS checks: **165 tests passed**, including nine new regression cases;
+lint, type checking and build passed. Tests cover metadata/secret collisions,
+fresh save/load, recovery choices, late replies, blocks and intact mismatches.
+See [sanitized output](test-output-workspace-recovery.txt). Interactive PyCharm
+recovery approval remains a user acceptance step; mock tests do not establish it.
+
 ## MCP terminal framing regression
 
 After the initial all-green run below, the documentation-only rerun at `24969ef`
@@ -931,6 +955,23 @@ Changes:
 Evidence on macOS with Node 26.11.1: lint, strict type checking, build and Prettier passed. All 153 tests passed. The tests include new fake-server cases for each budget, text-based limits, length handling, error detail and choice-less events. The existing length-stop test now expects the kept text.
 
 Not yet confirmed live: a turn longer than 10 minutes through Open WebUI, the reviewer verdict on a live model, and the 90% warning in PyCharm/Air.
+
+## Out-of-sandbox grants and auto-approval (unreleased)
+
+The security review's remaining grant and approval findings:
+
+- **IDE bridge and local MCP tools.** Tools from a local HTTP/SSE MCP server, including the JetBrains bridge, run on this machine outside the sandbox. The bridge exposes the terminal and run configurations. These tools could receive a session or remembered "all arguments" grant. They now always require a one-time approval, as unsandboxed commands already did, and the approval title says so. Remote MCP servers and Open WebUI server tasks keep their grants: they do not execute on this machine.
+- **Auto-approval in development mode.**
+  - Reuse now requires a bare program name or a program in a standard system directory, so `./tools/cat` and `.venv/bin/pytest` ask.
+  - `rg --hostname-bin` asks, because it runs another program.
+  - Test and lint runners ask when given options that delete or overwrite other paths: `pytest --basetemp`, `-o … --cache-clear`, `tsc --outFile`, `eslint -o` and `vitest --outputFile`.
+  - `git -C` stays auto-approvable, as the existing tests intend. A planted repository's `core.fsmonitor` would still run only inside the sandbox, like any approved test script.
+- **Project `AGENTS.md`.** It is now sent as a labelled user message instead of a system message, so repository text cannot outrank the agent's own instructions.
+
+Evidence on macOS with Node 26.11.1:
+
+- Lint, strict type checking, build and Prettier passed. All 158 tests passed.
+- New tests cover the classifier cases, IDE-bridge approvals offering only a one-time option, and the role of the `AGENTS.md` message.
 
 ## Shared protected and secret paths (unreleased)
 
