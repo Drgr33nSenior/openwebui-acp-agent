@@ -45,6 +45,8 @@ import {
   type SessionConfigOption,
   type McpServer,
   type RequestPermissionResponse,
+  type PromptRequest,
+  type PromptResponse,
 } from "@agentclientprotocol/sdk";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -110,18 +112,25 @@ import {
   type ReasoningChoice,
 } from "./reasoning.js";
 function restoreHistory(messages: Message[]) {
-  const ids = new Set(
-    messages.filter((m) => m.role === "tool").map((m) => m.tool_call_id),
-  );
-  for (const m of [...messages])
-    for (const call of m.tool_calls ?? [])
-      if (!ids.has(call.id))
-        messages.push({
+  for (let i = 0; i < messages.length; i++) {
+    const calls = messages[i]?.tool_calls;
+    if (!calls?.length) continue;
+    let end = i + 1;
+    const ids = new Set<string | undefined>();
+    while (messages[end]?.role === "tool")
+      ids.add(messages[end++]!.tool_call_id);
+    for (const call of calls)
+      if (!ids.has(call.id)) {
+        messages.splice(end++, 0, {
           role: "tool",
           tool_call_id: call.id,
           content:
             "Interrupted execution; outcome unknown. Inspect state before any further action. Never replay automatically.",
         });
+        ids.add(call.id);
+      }
+    i = end - 1;
+  }
   return messages;
 }
 const schemas = {
@@ -180,6 +189,8 @@ type Session = {
   sandbox: SandboxMode;
   sandboxEpoch?: string;
   abort?: AbortController;
+  running?: Promise<void>;
+  pending?: AbortController;
   mcp: Mcp;
   servers: McpServer[];
   error?: string;
@@ -241,11 +252,15 @@ export function createAgent(
     )
       throw authRequired(caps);
   };
+  const cancelTurn = (s: Session) => {
+    s.pending?.abort();
+    s.abort?.abort();
+  };
   const signOut = async () => {
     authentication.abort();
     for (const s of sessions.values()) {
       s.active = false;
-      s.abort?.abort();
+      cancelTurn(s);
     }
     try {
       await logout();
@@ -1328,8 +1343,14 @@ export function createAgent(
     await checkAuthentication(authEpoch);
     return { configOptions: options(s) };
   });
-  const select = async (s: Session, id: string, value: string) => {
+  const select = async (
+    s: Session,
+    id: string,
+    value: string,
+    signal: AbortSignal = authentication.signal,
+  ) => {
     await checkPolicy(s);
+    signal.throwIfAborted();
     if (s.accessError)
       throw RequestError.invalidParams(undefined, s.accessError);
     if (id === "workflow") {
@@ -1342,18 +1363,22 @@ export function createAgent(
       s.compaction.automatic = value === "on";
     } else if (id === "model") {
       if (!s.models.includes(value)) throw new Error("Unknown model ID");
-      s.metadata = await s.backend.modelMetadata(
+      const metadata = await s.backend.modelMetadata(
         AbortSignal.any([
+          signal,
           authentication.signal,
           AbortSignal.timeout(s.config.timeoutMs),
         ]),
       );
       await checkAuthentication(s.authEpoch);
-      s.models = s.metadata.map((m) => m.id);
-      if (!s.models.includes(value))
-        throw new Error("Model no longer available");
+      const models = metadata.map((m) => m.id);
+      if (!models.includes(value)) throw new Error("Model no longer available");
+      const credential = await key(s.config);
+      signal.throwIfAborted();
+      s.metadata = metadata;
+      s.models = models;
       s.config.model = value;
-      s.backend = new Backend(s.config, await key(s.config));
+      s.backend = new Backend(s.config, credential);
       s.backend.addSecrets(mcpSecrets(s.servers));
       s.choices = reasoningChoices(s.metadata.find((m) => m.id === value));
       s.reasoning = "default";
@@ -1362,14 +1387,16 @@ export function createAgent(
       s.serverCatalog = undefined;
     } else if (id === "permissions") {
       enforcePermissionMode(s.administrator, value);
-      await s.permissions.selectMode(value);
+      await s.permissions.selectMode(value, signal);
     } else if (id === "sandbox") {
       const mode = parseSandboxMode(value);
       enforceSandbox(s.administrator, mode);
-      s.sandboxEpoch =
+      const epoch =
         mode === "full_access"
           ? (await s.permissions.prepare()).epoch
           : undefined;
+      signal.throwIfAborted();
+      s.sandboxEpoch = epoch;
       s.sandbox = mode;
     } else if (id === "reviewer") {
       if (
@@ -1396,12 +1423,13 @@ export function createAgent(
           s.backend,
           s.metadata.find((m) => m.id === s.config.model),
           AbortSignal.any([
+            signal,
             authentication.signal,
-            ...(s.abort ? [s.abort.signal] : []),
             AbortSignal.timeout(s.config.timeoutMs),
           ]),
         );
         await checkPolicy(s);
+        signal.throwIfAborted();
         s.serverCatalog = catalog;
         if (value === "on") s.serverTools = true;
       }
@@ -1412,7 +1440,7 @@ export function createAgent(
     await save(s);
     return { configOptions: options(s) };
   };
-  app.onRequest("session/set_config_option", async ({ params }) => {
+  app.onRequest("session/set_config_option", async ({ params, signal }) => {
     const s = get(params.sessionId);
     if (s.abort)
       throw RequestError.invalidParams(
@@ -1420,7 +1448,12 @@ export function createAgent(
         "Turn in progress; finish or cancel it before changing session settings",
       );
     if (typeof params.value !== "string") throw RequestError.invalidParams();
-    return select(s, params.configId, params.value).catch((error) => {
+    return select(
+      s,
+      params.configId,
+      params.value,
+      AbortSignal.any([signal, authentication.signal]),
+    ).catch((error) => {
       if (
         params.configId === "server_tools" &&
         error instanceof Error &&
@@ -1434,11 +1467,82 @@ export function createAgent(
     });
   });
   app.onNotification("session/cancel", ({ params }) => {
-    get(params.sessionId).abort?.abort();
+    cancelTurn(get(params.sessionId));
   });
+  type PromptHandler = (context: {
+    params: PromptRequest;
+    client: AgentContext;
+    signal: AbortSignal;
+  }) => Promise<PromptResponse>;
+  const interruptAndReplace =
+    (run: PromptHandler): PromptHandler =>
+    async (context) => {
+      const s = get(context.params.sessionId);
+      // Validate before interrupting. Authentication controls retain their existing
+      // discovery/logout behavior, including logout's cancellation of every session.
+      const input = normalizePrompt(context.params.prompt);
+      const command = input.text.trim().split(/\s+/)[0];
+      if (command === "/login" || command === "/logout") return run(context);
+      if (authentication.signal.aborted) throw authRequired(caps);
+      if (context.signal.aborted) return { stopReason: "cancelled" };
+      // Record arrival order before any await. A separate running barrier is vital:
+      // a superseded waiter can finish while the actual turn is still cleaning up.
+      const previous = s.running;
+      cancelTurn(s);
+      const pending = new AbortController();
+      s.pending = pending;
+      const signal = AbortSignal.any([
+        context.signal,
+        authentication.signal,
+        pending.signal,
+      ]);
+      try {
+        if (previous) await abortable(previous, signal);
+        signal.throwIfAborted();
+        if (s.pending !== pending) return { stopReason: "cancelled" };
+      } catch (error) {
+        if (signal.aborted) return { stopReason: "cancelled" };
+        throw error;
+      } finally {
+        if (s.pending === pending) s.pending = undefined;
+      }
+      let release!: () => void;
+      const running = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      s.running = running;
+      s.abort = pending;
+      const historyStart = s.messages.length;
+      try {
+        const result = await run({ ...context, signal });
+        // Stop can arrive after the handler chose end_turn but during its finally.
+        return signal.aborted ? { stopReason: "cancelled" } : result;
+      } finally {
+        try {
+          // This also covers cancellation during the handler's final save, after
+          // it has already chosen its response. No replacement can append yet.
+          if (signal.aborted && s.messages.length > historyStart) {
+            restoreHistory(s.messages);
+            s.messages.push({
+              // A housekeeping note must not replace the actual user request
+              // that compaction preserves verbatim.
+              role: "assistant",
+              content:
+                "[Previous turn interrupted before completion. Completed tool results are retained; inspect them before retrying any action. Follow the next user request.]",
+            });
+            await save(s);
+          }
+        } finally {
+          if (s.abort === pending) s.abort = undefined;
+          if (s.running === running) s.running = undefined;
+          release();
+        }
+      }
+    };
   app.onRequest(
     "session/prompt",
-    async ({ params, client, signal: connectionSignal }) => {
+    interruptAndReplace(async (context) => {
+      const { params, client, signal: connectionSignal } = context;
       const s = get(params.sessionId);
       const input = normalizePrompt(params.prompt);
       const [authCommand, ...authArgs] = input.text.trim().split(/\s+/);
@@ -1458,18 +1562,17 @@ export function createAgent(
         return { stopReason: "end_turn" };
       }
       await checkAuthentication(s.authEpoch);
-      if (s.abort) throw new Error("Overlapping turns are not supported");
-      s.abort = new AbortController();
       // No deadline for the whole turn: it spans model rounds, tool runs and approval
       // waits. Each model request has its own first-content and idle budgets
       // (Backend.complete); the user can cancel at any time.
       const signal = AbortSignal.any([
         connectionSignal,
         authentication.signal,
-        s.abort.signal,
+        s.abort!.signal,
       ]);
       let checkingPolicy = false;
-      const turnAbort = s.abort;
+      const turnAbort = s.abort!;
+      let partialText = "";
       const policyWatch = setInterval(() => {
         if (checkingPolicy) return;
         checkingPolicy = true;
@@ -1524,6 +1627,7 @@ export function createAgent(
         const previousSandbox = s.sandbox;
         await s.permissions.mode();
         await sandboxMode(s);
+        signal.throwIfAborted();
         if (
           previousMode !== s.permissions.currentMode ||
           previousSandbox !== s.sandbox
@@ -1535,6 +1639,7 @@ export function createAgent(
         const normalized = input;
         const prompt = normalized.text;
         const compactRequested = prompt.trim() === "/compact";
+        signal.throwIfAborted();
         if (prompt.startsWith("/") && !compactRequested) {
           const [cmd, ...rest] = prompt.trim().split(/\s+/);
           if (
@@ -1568,8 +1673,13 @@ export function createAgent(
             )
               throw new Error(`Use ${cmd} on|off`);
             if (cmd === "/plan")
-              await select(s, "workflow", rest[0] === "off" ? "code" : "plan");
-            else if (rest[0]) await select(s, "autocompact", rest[0]);
+              await select(
+                s,
+                "workflow",
+                rest[0] === "off" ? "code" : "plan",
+                signal,
+              );
+            else if (rest[0]) await select(s, "autocompact", rest[0], signal);
             await update(client, s, {
               sessionUpdate: "config_option_update",
               configOptions: options(s),
@@ -1597,21 +1707,21 @@ export function createAgent(
               throw new Error(
                 "Use /permissions mode followed by a mode ID from /permissions",
               );
-            await select(s, "permissions", rest[1]!);
+            await select(s, "permissions", rest[1]!, signal);
           } else if (cmd === "/permissions" && rest[0] === "sandbox") {
             if (rest.length !== 2)
               throw new SandboxError(
                 "Use /permissions sandbox workspace|read_only|full_access",
               );
-            await select(s, "sandbox", rest[1]!);
+            await select(s, "sandbox", rest[1]!, signal);
           } else if (cmd === "/model" && rest.length)
-            await select(s, "model", rest.join(" "));
+            await select(s, "model", rest.join(" "), signal);
           else if (cmd === "/reasoning" && rest.length)
-            await select(s, "reasoning", rest.join(" "));
+            await select(s, "reasoning", rest.join(" "), signal);
           else if (cmd === "/reviewer" && rest.length)
-            await select(s, "reviewer", rest.join(" "));
+            await select(s, "reviewer", rest.join(" "), signal);
           else if (cmd === "/server-tools" && rest.length)
-            await select(s, "server_tools", rest.join(" "));
+            await select(s, "server_tools", rest.join(" "), signal);
           await s.permissions.mode();
           await sandboxMode(s);
           if (
@@ -1896,7 +2006,13 @@ export function createAgent(
                 : []),
             ],
             signal,
-            (t) => text(client, s, t),
+            async (t) => {
+              signal.throwIfAborted();
+              // Backend chunks are already redacted and bounded. Incomplete
+              // tool-call fragments remain in the backend and never execute.
+              partialText += t;
+              await text(client, s, t);
+            },
             reasoningPayload(s.config.model, s.reasoning, s.choices),
             undefined,
             async (used) => {
@@ -1924,6 +2040,7 @@ export function createAgent(
                 );
             },
           );
+          partialText = "";
           s.messages.push(message);
           await save(s);
           if (!message.tool_calls?.length) {
@@ -2011,18 +2128,28 @@ export function createAgent(
         return { stopReason: "end_turn" };
       } finally {
         clearInterval(policyWatch);
-        await s.mcp.close();
-        s.abort = undefined;
-        await save(s);
+        try {
+          await s.mcp.close();
+        } finally {
+          // Keep complete tool groups ahead of the marker and replacement user
+          // message, including interrupted calls whose final update failed.
+          restoreHistory(s.messages);
+          if (signal.aborted && partialText)
+            s.messages.push({
+              role: "assistant",
+              content: s.backend.redact(partialText),
+            });
+          await save(s);
+        }
       }
-    },
+    }),
   );
   return {
     app,
     sessions,
     close: async () => {
       for (const s of sessions.values()) {
-        s.abort?.abort();
+        cancelTurn(s);
         await s.mcp.close();
       }
     },

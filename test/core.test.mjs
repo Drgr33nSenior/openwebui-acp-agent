@@ -1288,7 +1288,7 @@ test("command internal timeout and output limit kill owned processes", async () 
   assert.equal(output.limitedOrCancelled, true);
   assert(Buffer.byteLength(output.output) <= 1000);
 });
-test("overlapping turns are rejected while the first request is pending", async () => {
+test("overlapping prompt cancels the first request and completes its replacement", async () => {
   let entered;
   const ready = new Promise((r) => {
     entered = r;
@@ -1302,13 +1302,16 @@ test("overlapping turns are rejected while the first request is pending", async 
     prompt: [{ type: "text", text: "wait" }],
   });
   await ready;
-  await assert.rejects(
-    c.c.agent.request("session/prompt", {
+  response = async (_, res) =>
+    json(res, { role: "assistant", content: "replacement" });
+  try {
+    const second = c.c.agent.request("session/prompt", {
       sessionId: c.s.sessionId,
-      prompt: [{ type: "text", text: "overlap" }],
-    }),
-  );
-  await c.c.agent.notify("session/cancel", { sessionId: c.s.sessionId });
-  assert.equal((await first).stopReason, "cancelled");
-  await c.close();
+      prompt: [{ type: "text", text: "replacement" }],
+    });
+    assert.equal((await first).stopReason, "cancelled");
+    assert.equal((await second).stopReason, "end_turn");
+  } finally {
+    await c.close();
+  }
 });

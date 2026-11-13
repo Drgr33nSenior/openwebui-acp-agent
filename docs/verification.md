@@ -2,6 +2,48 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## Interrupting a turn (unreleased)
+
+Before implementation, a user-assisted capture ran the installed agent 0.3.0
+(SDK 2.6.0) in PyCharm 2026.3, build 263.7307.206, with AI Assistant
+263.7307.206. A temporary stdio wrapper recorded only RPC methods, aliased
+request/session IDs, timestamps and stop reasons; no message bodies, headers or
+credentials. The original launcher was restored and the idle trace stopped.
+
+Observed Stop-then-send sequence on 2026-11-13 (UTC):
+
+```text
+19:41:12.841  client -> agent  session/prompt P1
+19:41:27.841  client -> agent  session/cancel
+19:41:27.869  agent  -> client P1: cancelled
+19:41:30.116  client -> agent  session/prompt P2
+```
+
+P2 arrived 2.247 seconds after P1's response, with no overlap. An earlier capture
+returned `end_turn` after Stop; the envelope trace cannot identify its internal
+stage. The user confirmed that typing during a turn keeps the Stop button:
+there is no Send button and no way to queue a message in this client. A bare
+second prompt was therefore not observed live. The agent change does not alter
+that UI. Air and post-change interactive acceptance remain unverified.
+
+Replacement prompts now abort the active turn and await its cleanup and history
+writes. The latest waiting prompt wins, and Stop also cancels that waiter.
+Tests cover cancellation during final cleanup, emitted partial text, paired tool
+results, no replay after load, real process/descendant cleanup, cancelled and late
+approvals, one-use approval isolation, independent sessions, cancelled selector
+changes and cleanup failure releasing the barrier. Assistant-role interruption
+notes preserve compaction's pinned user request; cancelled manual compaction
+still leaves its original transcript and checkpoint unchanged.
+
+On macOS 27.0 with Node 26.11.1/npm 11.20.0, `npm ci`, `npm run typecheck`,
+`npm run lint`, `npx --no-install prettier --check src test package.json package-lock.json registry/agent.json`,
+`npm run build` and `node --test test/*.test.mjs` passed: **215 tests, zero
+failures or skips**. This includes 14 new interruption regressions and the
+updated overlap test. No dependency versions changed. Linux/Windows execution
+of this change is not established by this local run. Implementation uses stable
+v1 `session/prompt` and `session/cancel`; SDK 2.6.0's `tool_call/cancel` belongs
+to experimental v2 and is not added here.
+
 ## PR integration with current main
 
 The feature branch incorporates upstream `main` at `9c2d15e`, including the
