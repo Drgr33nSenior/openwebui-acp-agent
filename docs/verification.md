@@ -973,6 +973,33 @@ Evidence on macOS with Node 26.11.1:
 - Lint, strict type checking, build and Prettier passed. All 158 tests passed.
 - New tests cover the classifier cases, IDE-bridge approvals offering only a one-time option, and the role of the `AGENTS.md` message.
 
+## File-tool symlink race (unreleased)
+
+The security review's High finding was that `target()` checked a path, and the file tools then used it by path. A concurrent process in the workspace could swap a folder for a symlink in between. Examples include an approved local MCP server, another session's command, or a detached child on macOS.
+
+Before the fix, a reproduction on macOS ran a separate process that flipped `d` between a real folder and a symlink to an outside folder. In 20 seconds it produced 13 reads of the outside file through `d/f.txt`. It also left 4 temporary files with new content in the outside folder. Nothing outside was overwritten.
+
+Node has no `openat()`. Reads and writes are therefore bracketed:
+
+- **Device, inode and ctime chain.** The device, inode and nanosecond ctime of every folder from the root to the file are recorded before and after the operation.
+- **Final component and links.** Files open without following a final symlink. Hard-linked files and special files are refused.
+- **Matching identity.** The open file must match the entry at the path.
+- **Temporary files.** A write proves its temporary file is inside the root before writing any content. A rename redirected after that point finds no temporary file and fails.
+
+ctime cannot be set by an unprivileged process. Any rename or replacement in a folder changes it.
+
+Evidence on macOS with Node 26.11.1:
+
+- The same 20-second race produced 0 leaks. No content was written outside; at most an empty temporary file is left.
+- `test/file-race.test.mjs` races reads and writes for 8 s each against a separate flipper process. It also covers final symlinks, hard links and FIFOs.
+- The full suite passed twice (159/159), and lint, strict type checking, build and Prettier passed.
+- A first version of the fix re-walked the path with `lstat` and leaked 3 times under full-suite load. `lstat` follows symlinks in all but the final component, which is why the ctime chain replaced it.
+
+Limits:
+
+- Reads and writes through the IDE's ACP filesystem methods are resolved by the IDE.
+- Coarse-timestamp filesystems weaken the check.
+- A concurrent tool changing a folder on the chain at the same instant makes a read fail with "changed during access; retry".
 ## Shared protected and secret paths (unreleased)
 
 A security review found three gaps.
