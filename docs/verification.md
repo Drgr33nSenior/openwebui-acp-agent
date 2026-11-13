@@ -911,3 +911,24 @@ Previous versions, the old helper, credentials, grants and transcripts remain in
 place. The default permission mode remains scoped approvals; no broader policy
 was enabled in a live user session by installation. Reconnect before checking the
 Permissions selector in PyCharm. OS sandboxing remains unimplemented.
+
+## Long turns and stream limits (unreleased)
+
+A source review against Open WebUI 0.13.3 and a home gateway found two blockers for long turns:
+
+- **The turn deadline.** `timeoutMs` (120 s) was one deadline for the whole turn, covering every model round, tool run and approval wait. Long replies, or turns queued behind other users, ended as a silent `cancelled`.
+- **The response limit.** It counted raw SSE bytes. On the measured live chain that is 39–79 bytes per generated token, so 1 MB allowed about 12,700–25,800 tokens. The advisory reviewer's 8,192 bytes allowed about 100–210 tokens, so it usually returned `uncertain`.
+
+Changes:
+
+- **Per-request budgets.** Each model request now has its own `firstContentTimeoutMs` (default 15 min) and `idleTimeoutMs` (default 5 min). Content, reasoning, tool-call deltas and finish reasons count as activity. A turn has no overall deadline, and a timeout reports its reason instead of `cancelled`.
+- **Limits on produced text.** Limits count produced text and tool arguments. A 64 MB guard bounds raw bytes.
+- **Partial replies kept.** A `length` stop keeps the partial text with a notice and returns no tool call.
+- **Error detail.** Errors include the server's JSON error code or message, redacted and truncated, and `Retry-After`. There is still no automatic retry.
+- **Context warning.** A one-time warning appears at 90% context usage.
+- **Choice-less events.** Streamed events without `choices`, such as Open WebUI `sources`, are ignored.
+
+Evidence on macOS with Node 26.11.1: lint, strict type checking, build and Prettier passed. All 153 tests passed. The tests include new fake-server cases for each budget, text-based limits, length handling, error detail and choice-less events. The existing length-stop test now expects the kept text.
+
+Not yet confirmed live: a turn longer than 10 minutes through Open WebUI, the reviewer verdict on a live model, and the 90% warning in PyCharm/Air.
+

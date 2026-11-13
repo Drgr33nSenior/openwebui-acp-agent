@@ -1306,11 +1306,13 @@ export function createAgent(
       await checkAuthentication(s.authEpoch);
       if (s.abort) throw new Error("Overlapping turns are not supported");
       s.abort = new AbortController();
+      // No deadline for the whole turn: it spans model rounds, tool runs and approval
+      // waits. Each model request has its own first-content and idle budgets
+      // (Backend.complete); the user can cancel at any time.
       const signal = AbortSignal.any([
         connectionSignal,
         authentication.signal,
         s.abort.signal,
-        AbortSignal.timeout(s.config.timeoutMs),
       ]);
       let checkingPolicy = false;
       const turnAbort = s.abort;
@@ -1643,11 +1645,23 @@ export function createAgent(
                 s.metadata.find((m) => m.id === s.config.model),
               );
               if (size === undefined) return;
+              const before = s.contextUsage;
               s.contextUsage = { used, size };
               await update(client, s, {
                 sessionUpdate: "usage_update",
                 ...s.contextUsage,
               });
+              // Say so once, when usage first crosses 90% of the advertised window:
+              // past it the next request can be refused for its size.
+              if (
+                used >= size * 0.9 &&
+                !(before && before.size === size && before.used >= size * 0.9)
+              )
+                await text(
+                  client,
+                  s,
+                  `\n\n[Context ${Math.round((used / size) * 100)}% full; start a new session soon. History retained.]\n\n`,
+                );
             },
           );
           s.messages.push(message);

@@ -29,7 +29,19 @@ export const configSchema = z
       .regex(/^[A-Za-z0-9-]+$/)
       .default("Authorization"),
     rounds: z.number().int().min(1).max(100).default(12),
+    // Discovery and metadata requests (model list, server-tool discovery).
     timeoutMs: z.number().int().min(100).max(3600000).default(120000),
+    // Each model request: the wait for its first streamed content (queueing, prompt
+    // processing and silent thinking), then the longest silence between chunks.
+    // A reply that keeps streaming is never cut short by these. Defaults sit above
+    // typical server-side budgets so the server reports its own limit first.
+    firstContentTimeoutMs: z
+      .number()
+      .int()
+      .min(1000)
+      .max(3600000)
+      .default(900000),
+    idleTimeoutMs: z.number().int().min(1000).max(3600000).default(300000),
   })
   .strict();
 export type Config = z.infer<typeof configSchema>;
