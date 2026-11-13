@@ -1,0 +1,9 @@
+Open WebUI ACP Agent is an independent, unofficial project, licensed under MIT.
+
+OS command isolation uses @anthropic-ai/sandbox-runtime 0.0.83,
+Copyright Anthropic PBC, licensed under Apache License 2.0.
+Its source, licence, notices and platform helpers are distributed in the installed
+npm dependency. This project does not imply endorsement by Anthropic or OpenAI.
+
+The agent uses the runtime as a library. No Codex executable or Open WebUI source
+is included. The lockfile records the exact dependency artifacts and integrity.
