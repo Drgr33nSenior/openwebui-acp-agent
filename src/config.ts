@@ -11,6 +11,7 @@ import {
   readdir,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { verificationSchema } from "./verification.js";
 export const directory =
   process.env.OPENWEBUI_ACP_HOME ??
   join(
@@ -29,6 +30,7 @@ export const configSchema = z
       .regex(/^[A-Za-z0-9-]+$/)
       .default("Authorization"),
     rounds: z.number().int().min(1).max(100).default(40),
+    verify: verificationSchema.default(() => verificationSchema.parse({})),
     // Discovery and metadata requests (model list, server-tool discovery).
     timeoutMs: z.number().int().min(100).max(3600000).default(120000),
     // Each model request: the wait for its first streamed content (queueing, prompt

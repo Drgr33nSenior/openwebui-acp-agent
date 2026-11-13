@@ -10,7 +10,13 @@ const temporary = await mkdtemp(join(tmpdir(), "ow-usage-"));
 process.env.OPENWEBUI_ACP_HOME = join(temporary, "state");
 process.env.OPENWEBUI_API_KEY = "synthetic-usage-key";
 const { Backend } = await import("../dist/backend.js");
-const { configSchema, writeJson } = await import("../dist/config.js");
+const { directory, configSchema, writeJson } =
+  await import("../dist/config.js");
+assert.equal(
+  directory,
+  process.env.OPENWEBUI_ACP_HOME,
+  "Application state must use the test's private directory before any writes",
+);
 const { contextSize, completionContextTokens } =
   await import("../dist/usage.js");
 const { createAgent } = await import("../dist/agent.js");

@@ -20,7 +20,13 @@ process.env.OPENWEBUI_ACP_HOME = join(temp, "state");
 process.env.OPENWEBUI_API_KEY = "permission-fixture-not-real";
 const { Permissions, grant, fingerprint, repeatableCommand } =
   await import("../dist/permissions.js");
-const { writeJson, configSchema } = await import("../dist/config.js");
+const { directory, writeJson, configSchema } =
+  await import("../dist/config.js");
+assert.equal(
+  directory,
+  process.env.OPENWEBUI_ACP_HOME,
+  "Application state must use the test's private directory before any writes",
+);
 const { createAgent } = await import("../dist/agent.js");
 const { snapshotPolicy } = await import("../dist/policy.js");
 const signal = () => AbortSignal.timeout(10000);
@@ -680,6 +686,7 @@ for (const [executable, args] of [
         executable,
         args,
         cwd,
+        timeout_ms: 120000,
       });
       const events = c.updates.filter((u) => u.toolCallId === first.id);
       assert.equal(
@@ -1322,6 +1329,25 @@ test("policy monitoring cancels an active owned runner when administrator rules 
     assert.equal(result.stopReason, "cancelled");
     assert.equal(aborted, true);
     assert.equal(c.executed.length, 0);
+  } finally {
+    await c.close();
+  }
+});
+
+test("remembering a command does not approve a longer execution timeout", async () => {
+  const cwd = await workspace();
+  const c = await client(cwd, (p) => (isTool(p) ? "session" : "once"));
+  try {
+    for (const timeout_ms of [120000, 180000, 180000])
+      await invoke(c, [
+        call("run_command", { executable: "ls", args: [], timeout_ms }),
+      ]);
+    const approvals = c.approvals.filter(isTool);
+    assert.deepEqual(
+      approvals.map((p) => p.toolCall.rawInput.timeout_ms),
+      [120000, 180000],
+    );
+    assert.equal(c.executed.length, 3);
   } finally {
     await c.close();
   }

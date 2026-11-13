@@ -5,17 +5,35 @@ import { setTimeout as delay } from "node:timers/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
-import { ideMcpConnection, mcpSecrets } from "../dist/ide-mcp.js";
-import { mkdtemp, mkdir } from "node:fs/promises";
+import {
+  link,
+  mkdtemp,
+  mkdir,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClientApp } from "@agentclientprotocol/sdk";
 const temporary = await mkdtemp(join(tmpdir(), "ow-sse-"));
 process.env.OPENWEBUI_ACP_HOME = join(temporary, "state");
 process.env.OPENWEBUI_API_KEY = "synthetic-inference-only";
+const {
+  ideMcpConnection,
+  mcpSecrets,
+  isIdeFileProblemsTool,
+  ideFileProblemsArguments,
+} = await import("../dist/ide-mcp.js");
 const { Mcp } = await import("../dist/mcp.js");
 const { createAgent } = await import("../dist/agent.js");
-const { configSchema, writeJson } = await import("../dist/config.js");
+const { directory, configSchema, writeJson } =
+  await import("../dist/config.js");
+assert.equal(
+  directory,
+  process.env.OPENWEBUI_ACP_HOME,
+  "Application state must use the test's private directory before any writes",
+);
 const { snapshotPolicy } = await import("../dist/policy.js");
 
 function descriptor(port) {
@@ -57,6 +75,35 @@ async function fixture(mode = "normal") {
         { inputSchema: { query: z.string() } },
         async ({ query }) => ({ content: [{ type: "text", text: query }] }),
       );
+      if (mode === "diagnostics")
+        for (const name of [
+          "get_file_problems",
+          "execute_terminal_command",
+          "get_run_configurations",
+          "execute_run_configuration",
+          "rename_refactoring",
+          "write_file",
+        ])
+          server.registerTool(
+            name,
+            {
+              inputSchema: {
+                filePath: z.string(),
+                errorsOnly: z.boolean().optional(),
+                timeout: z.number().int().optional(),
+                projectPath: z.string().optional(),
+              },
+              annotations: { readOnlyHint: true },
+            },
+            async ({ filePath }) => ({
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({ filePath, errors: [] }),
+                },
+              ],
+            }),
+          );
       const transport = new SSEServerTransport("/messages", res);
       connections.push({ server, transport, res });
       await server.connect(transport);
@@ -148,6 +195,180 @@ test("only verified IDE routing fields are excluded from MCP secret redaction", 
     headers: [{ name: "Authorization", value: "synthetic-http-key" }],
   };
   assert.deepEqual(mcpSecrets([http]), ["synthetic-http-key"]);
+});
+
+test("only the exact observed IDE file-problems schema qualifies for diagnostics", () => {
+  const tool = {
+    name: "get_file_problems",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filePath: { type: "string" },
+        errorsOnly: { type: "boolean" },
+        projectPath: { type: "string" },
+        timeout: { type: "integer" },
+      },
+      required: ["filePath"],
+    },
+  };
+  assert.equal(isIdeFileProblemsTool(tool), true);
+  for (const name of [
+    "get_file_problems_extra",
+    "execute_terminal_command",
+    "get_run_configurations",
+    "execute_run_configuration",
+    "rename_refactoring",
+  ])
+    assert.equal(isIdeFileProblemsTool({ ...tool, name }), false);
+  for (const change of [
+    { required: [] },
+    { required: ["filePath", "projectPath"] },
+    {
+      properties: {
+        ...tool.inputSchema.properties,
+        execute: { type: "boolean" },
+      },
+    },
+    {
+      properties: {
+        ...tool.inputSchema.properties,
+        timeout: { type: "string" },
+      },
+    },
+    { properties: { filePath: { type: "string" } } },
+  ])
+    assert.equal(
+      isIdeFileProblemsTool({
+        ...tool,
+        inputSchema: { ...tool.inputSchema, ...change },
+      }),
+      false,
+    );
+});
+
+test("IDE diagnostic identity requires ACP provenance, canonical workspace and exact tool; annotations grant nothing", async () => {
+  const workspace = await realpath(
+    await mkdtemp(join(temporary, "diagnostics-")),
+  );
+  const other = await realpath(
+    await mkdtemp(join(temporary, "other-project-")),
+  );
+  const f = await fixture("diagnostics");
+  const source = descriptor(f.port);
+  source.env.find((e) => e.name === "IJ_MCP_SERVER_PROJECT_PATH").value =
+    workspace;
+  const direct = ideMcpConnection(source);
+  const wrongProject = structuredClone(source);
+  wrongProject.env.find((e) => e.name === "IJ_MCP_SERVER_PROJECT_PATH").value =
+    other;
+  try {
+    for (const [servers, provenance, expected] of [
+      [[source], [source], true],
+      [[source], [], false],
+      [[source], [structuredClone(source)], false],
+      [[direct], [direct], false],
+      [[wrongProject], [wrongProject], false],
+    ]) {
+      const m = new Mcp();
+      let approvals = 0;
+      try {
+        await m.connect(
+          servers,
+          workspace,
+          async () => approvals++,
+          AbortSignal.timeout(5000),
+          undefined,
+          provenance,
+        );
+        assert.equal(approvals, 1);
+        const tools = [...m.tools.values()];
+        const problems = tools.find((t) =>
+          t.label.endsWith("/get_file_problems"),
+        );
+        assert.equal(problems.unsandboxed, true);
+        assert.deepEqual(
+          problems.ideFileProblems,
+          expected ? { projectPath: workspace } : undefined,
+        );
+        for (const tool of tools.filter((t) => t !== problems)) {
+          assert.equal(tool.unsandboxed, true);
+          assert.equal(tool.ideFileProblems, undefined, tool.label);
+        }
+      } finally {
+        await m.close();
+      }
+    }
+  } finally {
+    await f.close();
+  }
+});
+
+test("IDE diagnostic arguments pin the project and reject paths outside ordinary read scope", async () => {
+  const workspace = await realpath(
+    await mkdtemp(join(temporary, "diagnostic-paths-")),
+  );
+  const other = await realpath(
+    await mkdtemp(join(temporary, "diagnostic-outside-")),
+  );
+  await writeFile(join(workspace, "code.ts"), "const valid = true;\n");
+  await writeFile(join(other, "outside.ts"), "const outside = true;\n");
+  await writeFile(join(workspace, "large.ts"), "x".repeat(100001));
+  await mkdir(join(workspace, "directory"));
+  assert.deepEqual(
+    await ideFileProblemsArguments(workspace, { filePath: "code.ts" }),
+    {
+      filePath: "code.ts",
+      projectPath: workspace,
+      errorsOnly: true,
+      timeout: 10000,
+    },
+  );
+  assert.equal(
+    (await ideFileProblemsArguments(workspace, { filePath: "not-saved.ts" }))
+      .filePath,
+    "not-saved.ts",
+  );
+  for (const input of [
+    { filePath: join(other, "outside.ts") },
+    { filePath: "../outside.ts" },
+    { filePath: ".env" },
+    { filePath: "directory" },
+    { filePath: "large.ts" },
+    { filePath: "code.ts", projectPath: other },
+    { filePath: "code.ts", timeout: 30001 },
+    { filePath: "code.ts", timeout: 0 },
+    { filePath: "code.ts", execute: true },
+    { filePath: "code.ts", errorsOnly: "false" },
+  ])
+    await assert.rejects(ideFileProblemsArguments(workspace, input));
+  if (process.platform !== "win32") {
+    await symlink(join(other, "outside.ts"), join(workspace, "escape.ts"));
+    await assert.rejects(
+      ideFileProblemsArguments(workspace, { filePath: "escape.ts" }),
+      /Symlink/,
+    );
+    await symlink(workspace, join(other, "workspace-alias"));
+    assert.equal(
+      (
+        await ideFileProblemsArguments(workspace, {
+          filePath: "code.ts",
+          projectPath: join(other, "workspace-alias"),
+        })
+      ).projectPath,
+      workspace,
+    );
+    await assert.rejects(
+      ideFileProblemsArguments(join(other, "workspace-alias"), {
+        filePath: "code.ts",
+      }),
+      /workspace path changed/,
+    );
+    await link(join(other, "outside.ts"), join(workspace, "hardlink.ts"));
+    await assert.rejects(
+      ideFileProblemsArguments(workspace, { filePath: "hardlink.ts" }),
+      /bounded workspace text file/,
+    );
+  }
 });
 
 test("IDE bridge recognition is narrow and rejects ambiguous or invalid descriptors", () => {

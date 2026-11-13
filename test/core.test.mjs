@@ -16,8 +16,13 @@ import { ClientApp } from "@agentclientprotocol/sdk";
 const temp = await mkdtemp(join(tmpdir(), "ow-acp-test-"));
 process.env.OPENWEBUI_ACP_HOME = join(temp, "state");
 process.env.OPENWEBUI_API_KEY = "fixture-secret-never-real";
-const { configSchema, writeJson, readJson, endpoint } =
+const { directory, configSchema, writeJson, readJson, endpoint } =
   await import("../dist/config.js");
+assert.equal(
+  directory,
+  process.env.OPENWEBUI_ACP_HOME,
+  "Application state must use the test's private directory before any writes",
+);
 const { root, target, files, atomicEdit, changeTrust, trust } =
   await import("../dist/workspace.js");
 const { Backend } = await import("../dist/backend.js");

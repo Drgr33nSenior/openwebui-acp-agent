@@ -2,6 +2,26 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## Browser and verification merge integration (unreleased)
+
+Merged `main` at `ccdee36` (PR #7) into the existing PR #9 branch without
+rewriting published history. Import, MCP tool metadata and documentation
+conflicts retain both features: the browser's strict options, per-call approvals,
+output/transport bounds and owned-session cleanup, plus the exact ACP-supplied
+IDE diagnostic exemption and bounded verification loop. User-configured MCP
+options remain part of approval identity; they do not grant IDE provenance.
+The MCP tool catalog and per-client cleanup map are both retained.
+
+On macOS 27.0 with Node 26.11.1/npm 11.20.0, `npm ci`, typecheck, lint,
+the repository Prettier scope and build passed. The focused browser/verification
+suite passed 31 tests; the full combined suite passed **274 tests, zero failures
+or skips**. Each run selected fresh external `OPENWEBUI_ACP_HOME` before Node
+started and confirmed that the fallback directory remained empty. `npm ci`
+audited 193 packages with zero vulnerabilities. Sanitized output is in
+[test-output-browser-merge.txt](test-output-browser-merge.txt). Browser wrapper
+and container source did not change in this merge; their earlier observations
+remain recorded below. Hosted checks for the merge are pending.
+
 ## Browser phase A (unreleased)
 
 The native macOS spike could not launch Chromium headless shell under the
@@ -89,6 +109,79 @@ Windows smoke is not native Windows sandbox or browser acceptance.
 Interactive IDE/model use, Qwen Code, native Windows and Linux host-service
 routing remain unverified. The Qwen Code setup is documented separately and does
 not acquire this agent's sandbox or permission enforcement.
+
+## Verification and harness merge integration (unreleased)
+
+Merged `main` at `78f030e` (including PR #8) into the existing PR #7 branch without
+rewriting its published history. Conflicts in the agent loop, configuration and
+this record retain both features: a 40-round default, schema-directed reply
+repair, specific tool errors, bounded automatic checks and their independent
+repair-attempt limit. The canonical changed-file journal now also supplies the
+turn-limit report. A limit retains both the progress summary and unresolved
+verification details in history.
+
+Integration review found that verification still matched the old permission-error
+text. It now recognizes the typed denial from the harness and keeps declined
+checks marked as declined, with no retry. New regressions cover malformed repair
+replies without repeated edits or extra fix attempts, and verification calls
+sharing the 64-call budget while preserving remaining diagnostics.
+
+The review also found a test-isolation regression: a static import in
+`mcp-sse.test.mjs` could load configuration before the test selected its temporary
+state directory. IDE helpers now load after that selection. State-writing tests
+touched by this integration assert the selected directory before any writes.
+Each verification run additionally sets a fresh `OPENWEBUI_ACP_HOME` before Node
+starts, so module initialization cannot select normal application state. The final
+full-suite run confirmed that this external fallback directory remained empty.
+
+Local macOS 27.0 checks with Node 26.11.1/npm 11.20.0 passed: `npm ci`, typecheck,
+lint, the repository Prettier scope, build and **263 tests, zero failures or
+skips**. The focused verification/harness/interruption suite passed 55 tests.
+`npm ci` audited 193 packages with zero vulnerabilities. No dependency versions
+changed. Final sanitized output is in
+[test-output-verification-merge.txt](test-output-verification-merge.txt).
+Hosted CI and live IDE/model repair acceptance remain separate checks.
+
+## Automatic verification after edits (unreleased)
+
+Implemented from `main` at `c095051`, retaining PR #6's interrupt-and-replace
+behavior. The running PyCharm MCP server reported version 2026.3 and 66 tools
+through an actual `tools/list` request. Installed PyCharm build: 263.7307.206;
+IntelliJ IDEA build: 263.7307.200. The catalog and separate live Air IDE
+file-problems result are recorded in [IDE diagnostic contracts](ide-diagnostics.md).
+Only `get_file_problems` receives the scoped diagnostic exemption; a same-named
+tool on another server, terminal tools, run configurations and refactoring do not.
+
+Successful `write_file` operations trigger bounded IDE diagnostics when the model
+tries to finish. Errors can request two repair attempts by default. Optional
+private configuration declares sandboxed checks for exact workspace roots.
+Commands now accept `timeout_ms`: default 120000, maximum 600000. Approval
+records include that timeout; approving one duration does not approve a longer
+one. No project instructions are executed as configuration.
+
+On macOS with Node 26.11.1 and npm 11.20.0, `npm ci`, `npm run typecheck`,
+`npm run lint`, `prettier --check src test package.json package-lock.json registry/agent.json`,
+`npm run build`, and `node --test test/*.test.mjs` passed. The full suite passed
+**240 tests, zero failures or skips**. The first full run identified five older
+approval-payload assertions that needed the new timeout field; those assertions
+now verify the field as well as the original executable, argv and cwd.
+Sanitized final output is in [test-output-verification.txt](test-output-verification.txt).
+
+Tests cover edit/read-only triggers, bridge absence and provenance, schema/path
+restrictions, malicious read-only annotations, repair limits, malformed and
+partial diagnostics, deduplication and aggregate output caps. They also cover
+project opt-in, command limits, declined checks, full-access refusal, policy and
+trust revocation, cancellation, interrupted checks with paired history, and stale
+check invalidation after MCP mutations. Reused partial results remain historical
+and cannot trigger additional repairs from stale errors. Independent source
+review found no remaining defects after these corrections.
+
+Live discovery and a read-only diagnostic call do not establish an end-to-end
+IDE/model repair cycle. That interactive acceptance remains unverified. The
+initial tracker covers `write_file` changes; arbitrary shell/MCP-only edits do
+not supply a changed-file journal. Hosted cross-platform CI results belong to
+the feature PR and are separate from this local macOS run. No live deployment,
+credential, IDE registration or existing session was changed for this feature.
 
 ## Coding harness recovery (unreleased)
 

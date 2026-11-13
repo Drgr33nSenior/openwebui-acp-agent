@@ -60,6 +60,7 @@ See [design and API evidence](docs/design.md) before changing a request contract
 | `src/sandbox.ts`, `src/sandbox-worker.ts` | Owned process boundary, per-invocation runtime, network approval, limits and cleanup |
 | `src/macos-sandbox.ts`, `src/protected-paths.ts` | Pinned macOS credential-service protection and agent-code write protection |
 | `src/commands.ts`, `src/cancel.ts` | Explicitly approved unsandboxed commands, named child environment, cancellation |
+| `src/verification.ts` | Bounded IDE diagnostic parsing, repair settings and exact-workspace project check configuration |
 | `src/mcp.ts`, `src/sandbox-mcp.ts`, `src/ide-mcp.ts`, `src/user-mcp.ts` | Official MCP SDK integration, sandboxed stdio, HTTP/SSE, verified IDE descriptor mapping, explicit configuration |
 | `test/*.test.mjs`, `test/fixtures/` | Deterministic ACP/Open WebUI/MCP tests and real OS enforcement fixtures |
 | `registry/`, `.github/workflows/ci.yml` | Proposed registry entry/icon and CI definitions |
