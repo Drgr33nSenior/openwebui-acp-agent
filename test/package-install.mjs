@@ -5,7 +5,9 @@ import { mkdtemp, realpath, writeFile, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
+import { checkRuntimeDependency } from "./runtime-dependency-check.mjs";
 const installed = resolve(process.argv[2], "node_modules/openwebui-acp-agent");
+await checkRuntimeDependency(installed);
 const temporary = await realpath(
   await mkdtemp(join(tmpdir(), "ow-installed-")),
 );
@@ -56,6 +58,12 @@ try {
   assert.equal(errors, "");
 } finally {
   clearTimeout(timeout);
+}
+if (process.platform === "win32") {
+  console.log(
+    "Installed package: patched runtime dependency and clean ACP handshake passed; Windows sandbox remains unsupported",
+  );
+  process.exit(0);
 }
 const { sandboxCommand } = await import(
   pathToFileURL(join(installed, "dist/sandbox.js"))

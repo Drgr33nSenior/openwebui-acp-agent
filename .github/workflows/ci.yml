@@ -7,7 +7,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, ubuntu-26.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -17,6 +17,24 @@ jobs:
           cache: npm
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y bubblewrap socat ripgrep
+      # Disposable development runners only. This application-specific rule
+      # permits bwrap's namespace setup; command seccomp and mount/network
+      # restrictions remain enforced by the runtime and the tests below.
+      - name: Prepare bubblewrap namespace permission
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          test "$(stat -c %u /usr/bin/bwrap)" = 0
+          test -z "$(find /usr/bin/bwrap -perm /022 -print)"
+          restriction_before=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
+          sudo apparmor_parser --skip-kernel-load --skip-read-cache docs/bwrap-apparmor.profile
+          sudo apparmor_parser --replace --skip-read-cache docs/bwrap-apparmor.profile
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = "$restriction_before"
+          uname -sr
+          bwrap --version
+          sudo cat /sys/kernel/security/apparmor/profiles | grep -E '(bwrap|unprivileged_userns)'
+          bwrap --unshare-user --ro-bind / / --proc /proc --dev /dev /usr/bin/cat /proc/self/attr/current
+          bwrap --unshare-user --unshare-net --ro-bind / / --proc /proc --dev /dev /usr/bin/true
       - run: npm ci --ignore-scripts
       - run: npm run lint
       - run: npm run typecheck
@@ -25,7 +43,19 @@ jobs:
         run: npm test
       - if: runner.os == 'Windows'
         run: node --test test/platform.test.mjs
-      - run: npm pack
+      - name: Install and verify the distribution outside the checkout
+        shell: bash
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          package_file=$(node -p "require('./package.json').name + '-' + require('./package.json').version + '.tgz'")
+          npm install --prefix "$RUNNER_TEMP/installed-agent" --ignore-scripts "$RUNNER_TEMP/$package_file"
+          npm audit --prefix "$RUNNER_TEMP/installed-agent" --omit=dev --audit-level=high
+          node test/package-install.mjs "$RUNNER_TEMP/installed-agent"
+      - name: Report Linux sandbox policy denials
+        if: failure() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo journalctl -k -b --since '-10 minutes' --no-pager --output=cat | awk '/apparmor="DENIED"/ && /profile="(bwrap|openwebui-acp-bwrap|unprivileged_userns|unpriv_bwrap)/' | tail -30
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
@@ -34,6 +64,6 @@ jobs:
         with:
           node-version: '26.11.1'
       - run: npm ci --ignore-scripts
-      # This currently fails on the upstream runtime's Zod advisory. Keep the
-      # release gate intact; do not suppress it to make the preview look ready.
+      # Keep the normal release gate; dependency overrides must also pass the
+      # compatibility and installed-package checks.
       - run: npm audit --omit=dev --audit-level=high

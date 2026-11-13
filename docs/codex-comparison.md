@@ -138,5 +138,7 @@ A separately selected model can supply advice through ACP, but cannot grant
 permission. Real macOS and Ubuntu 24.04.5 VM sandbox tests now pass. See
 [managed policy](managed-policy.md) and [verification](verification.md).
 Automatic model approval, central enterprise identity/management, native Windows
-and cloud execution remain outside this release. The upstream Zod advisory still
-blocks general publication. These controls do not establish full Codex parity.
+and cloud execution remain outside this release. The runtime/Zod advisory has a
+tested dependency and packaging fix; see
+[sandbox.md](sandbox.md#dependency-advisory-and-release-gate). These controls do
+not establish full Codex parity.

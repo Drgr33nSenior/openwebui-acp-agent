@@ -64,5 +64,20 @@ The tested Ubuntu 24.04.5 image blocked bubblewrap under its
 checked with `apparmor_parser --skip-kernel-load --skip-read-cache` before loading.
 `kernel.apparmor_restrict_unprivileged_userns` remained `1`. This follows
 [Ubuntu’s per-application guidance](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces).
-The agent does not install this rule automatically. CI runners may need an
-administrator-provisioned equivalent; an unobserved CI definition is not a pass.
+The agent does not install this rule automatically. The user separately approved
+loading the same profile on disposable GitHub Actions development runners on
+13 November 2026. CI explicitly tests Ubuntu 24.04 and 26.04 instead of the
+moving `ubuntu-latest` alias. It checks the executable's ownership and write
+permissions, validates the profile before loading it, and verifies that the
+global namespace restriction is unchanged. The profile exists only for the
+runner lifetime; no workstation or service configuration is changed. This
+approval does not apply to other hosts. See verification.md for observed runs.
+
+Ubuntu 26.04 already loads a profile named `bwrap`. The exception uses that
+same name so replacement updates one executable attachment rather than loading
+a competing profile for `/usr/bin/bwrap`. This replaces the runner's bwrap
+profile, including its child-transition policy; the runtime's namespaces,
+capability handling and seccomp remain the command boundary. Do not install this
+exception on another host without administrator review. An older test VM may
+still have the original `openwebui-acp-bwrap` name; do not load both profiles for
+the same executable. No existing VM profile was changed during the CI fix.
