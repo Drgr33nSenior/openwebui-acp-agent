@@ -1,0 +1,27 @@
+name: openwebui-acp-browser
+services:
+  browser:
+    build: .
+    image: openwebui-acp-browser:0.0.85
+    init: true
+    user: "1000:1000"
+    ports:
+      - "127.0.0.1:8931:8931"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=536870912,mode=1777
+      - /workspace:rw,noexec,nosuid,nodev,size=67108864,uid=1000,gid=1000,mode=0700
+    shm_size: "256mb"
+    mem_limit: "2g"
+    cpus: 2
+    pids_limit: 256
+    restart: "no"
+    logging:
+      driver: local
+      options:
+        max-size: "1m"
+        max-file: "2"

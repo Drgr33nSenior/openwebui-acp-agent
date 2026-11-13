@@ -1,0 +1,23 @@
+{
+  "name": "openwebui-acp-browser-wrapper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pinned isolated Playwright MCP browser for the unofficial Open WebUI ACP agent",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24 <27"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "smoke": "node smoke.mjs",
+    "refresh": "node refresh.mjs",
+    "print-config": "node config.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@playwright/mcp": "0.0.85",
+    "playwright": "1.66.0-alpha-2026-11-09",
+    "playwright-core": "1.66.0-alpha-2026-11-09"
+  }
+}

@@ -1,0 +1,61 @@
+Browser phase A wrapper/container/package verification — 2026-11-13
+Mac host: macOS 27.0, Node 26.11.1, npm 11.20.0.
+Container: Linux arm64, Node 24.22.3, Chromium 158.0.8127.18 revision 1254.
+No live model or public websites used. All containers owned by this check were stopped.
+Wrapper dependency audit: zero vulnerabilities.
+
+
+Wrapper unit/protocol tests
+
+
+> openwebui-acp-browser-wrapper@0.1.0 test
+> node --test test/*.test.mjs
+
+✔ owned browser launches lazily into a fresh context and is awaited on close (2.250292ms)
+✔ closing while launch is pending releases the late browser without creating a context (0.604834ms)
+✔ closing while context creation is pending closes its browser immediately (1.663125ms)
+✔ failed context creation and a transport close both release the owned process (0.400041ms)
+✔ HTTP DELETE waits for owned Chromium cleanup across repeated sessions (132.240375ms)
+✔ HTTP browser sessions work with the official SDK, stay isolated and release on DELETE (59.631667ms)
+✔ Origin and cross-site metadata fail before creating a browser (6.740041ms)
+✔ HTTP MCP rejects other paths, content types, oversized bodies and malformed JSON (3.30975ms)
+✔ invalid, missing or duplicated Host headers cannot reach browser initialization (3.818375ms)
+✔ concurrent initializations cannot exceed four sessions and DELETE frees capacity (57.630417ms)
+✔ closing the HTTP listener closes all owned MCP server connections (3.667167ms)
+✔ fixed browser settings isolate the profile and avoid image/file downloads (0.884875ms)
+✔ wrapper environment is named and never forwards provider keys or profile overrides (0.147959ms)
+✔ Chromium cache stays in each process's private temporary directory (0.08875ms)
+✔ proxy authentication is an explicit browser option, not a credential-bearing launch argument (0.183708ms)
+✔ browser dependency pins, tool allowlist and container boundary are explicit (10.09325ms)
+✔ the pinned upstream catalog contains every allowed tool without launching a browser (16.800667ms)
+ℹ tests 17
+ℹ suites 0
+ℹ pass 17
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 669.433584
+
+
+Restricted real browser fixture checks
+
+{"case":"container-internal-fixture","result":{"smoke":"passed","toolsCalled":16,"fixtureRequests":6,"sessions":6,"checks":["navigate","find","type","click","snapshot","six successive isolated sessions"],"externalServices":false},"hardeningVerified":true}
+{"case":"mac-host-loopback-fixture","result":{"smoke":"passed","toolsCalled":16,"fixtureRequests":6,"sessions":6,"checks":["navigate","find","type","click","snapshot","six successive isolated sessions"],"externalServices":false}}
+{"resourceCounters":"21\nmax 0\nlow 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0"}
+{"ownedTestContainerStopped":true}
+
+
+Installed package outside checkout
+
+
+added 100 packages in 7s
+
+37 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities
+
+Installed 0.3.0: clean ACP v1 handshake, terminal authentication and logout discovery, context usage module, and real sandbox command passed outside the checkout
+
+{"installedSmoke":"passed","browserLockIncluded":true,"browserDependenciesBundled":false,"files":1213,"unpackedSize":20684109}

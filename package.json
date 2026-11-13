@@ -21,7 +21,13 @@
     "LICENSE",
     "docs",
     "registry",
-    "NOTICE"
+    "NOTICE",
+    "browser/*.mjs",
+    "browser/*.json",
+    "browser/Dockerfile",
+    "browser/.dockerignore",
+    "browser/compose.yaml",
+    "browser/test/*.test.mjs"
   ],
   "engines": {
     "node": ">=24 <27"

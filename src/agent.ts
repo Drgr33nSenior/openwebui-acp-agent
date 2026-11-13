@@ -11,7 +11,7 @@ import {
   PermissionDeclinedError,
   toolFailure,
 } from "./harness.js";
-import { userMcp } from "./user-mcp.js";
+import { userMcp, mcpOptions } from "./user-mcp.js";
 import { mcpSecrets, ideFileProblemsArguments } from "./ide-mcp.js";
 import {
   verificationCommands,
@@ -908,7 +908,7 @@ export function createAgent(
           s.backend.redact(`MCP ${remote.label} (all arguments)`).slice(0, 300),
         ),
         { id: c.id, input: args },
-        remote.unsandboxed,
+        remote.unsandboxed || remote.forceOnce,
       );
       await check();
       return remote.call(args, signal);
@@ -1952,6 +1952,7 @@ export function createAgent(
                   {
                     server,
                     ...(source ? { source } : {}),
+                    options: mcpOptions(source ?? server),
                     readPaths,
                     sandbox: await sandboxMode(s),
                     policyVersion: 1,

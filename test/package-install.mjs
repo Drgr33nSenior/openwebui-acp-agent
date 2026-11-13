@@ -1,13 +1,34 @@
 // Verify an already installed tarball from outside the source checkout.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, realpath, writeFile, readFile } from "node:fs/promises";
+import {
+  access,
+  mkdtemp,
+  realpath,
+  writeFile,
+  readFile,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { checkRuntimeDependency } from "./runtime-dependency-check.mjs";
 const installed = resolve(process.argv[2], "node_modules/openwebui-acp-agent");
 await checkRuntimeDependency(installed);
+const browser = join(installed, "browser");
+const browserLock = JSON.parse(
+  await readFile(join(browser, "package-lock.json"), "utf8"),
+);
+assert.equal(
+  browserLock.packages["node_modules/@playwright/mcp"].version,
+  "0.0.85",
+);
+assert.equal(
+  browserLock.packages["node_modules/playwright"].version,
+  "1.66.0-alpha-2026-11-09",
+);
+for (const file of ["Dockerfile", ".dockerignore", "compose.yaml", "smoke.mjs"])
+  await access(join(browser, file));
+await assert.rejects(access(join(browser, "node_modules")), { code: "ENOENT" });
 const temporary = await realpath(
   await mkdtemp(join(tmpdir(), "ow-installed-")),
 );

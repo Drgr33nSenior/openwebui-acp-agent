@@ -246,6 +246,13 @@ original transcript and complete tool results are retained during interruption.
 
 ## MCP
 
+An optional [Playwright browser container](docs/browser.md) supports navigation,
+accessibility snapshots, finding controls, clicking and typing. It uses an
+isolated browser profile and requires approval for every call. Browser setup is
+explicit; the agent does not install or start Docker automatically. The container
+has its own network access, outside the agent's command sandbox. See the linked
+guide for pinned dependencies, tool filtering, setup and limitations.
+
 Pass stdio, Streamable HTTP or legacy SSE definitions in ACP `session/new.mcpServers`. This is different from the client's `agent_servers` registration. Streamable HTTP remains preferred for new servers. SSE supports older servers, including the inspected PyCharm IDE server.
 
 For macOS PyCharm/IDEA native launchers with the sole argument `stdioMcpServer`, the agent recognizes the supplied IDE connection descriptor and asks to connect directly to its local SSE endpoint. The approval shows the destination and IDE project. It preserves the supplied MCP authentication and project headers without launching another IDE process. IDE tool execution is outside the agent's command sandbox; each tool still requires approval or an applicable grant. Other stdio definitions keep the sandboxed runner. See [the compatibility evidence](docs/design.md#ide-mcp-compatibility).

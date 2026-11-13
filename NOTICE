@@ -12,3 +12,9 @@ licence and copyright texts remain in each package's LICENSE file.
 
 The agent uses the runtime as a library. No Codex executable or Open WebUI source
 is included. The lockfile records the exact dependency artifacts and integrity.
+
+The optional browser wrapper installs Microsoft @playwright/mcp 0.0.85 and
+Playwright 1.66.0-alpha-2026-11-09, licensed under Apache License 2.0, with their
+original notices. Browser binaries and these dependencies are not bundled in the
+agent npm package. Their separate installation is described in docs/browser.md.
+This project does not imply endorsement by Microsoft.
