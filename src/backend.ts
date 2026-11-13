@@ -13,6 +13,12 @@ export type Call = {
   function: { name: string; arguments: string };
 };
 export const MAX = 1_000_000;
+// Raw bytes on the wire are protocol overhead (a JSON envelope per streamed chunk,
+// reasoning deltas, usage frames), not output. Response limits apply to the text and
+// tool arguments a reply produces; this only bounds a runaway stream.
+export const WIRE_MAX = 64 * MAX;
+export const OUTPUT_LIMIT_NOTICE =
+  "\n\n[Output limit reached before the reply finished; any unfinished tool call was not run. Ask to continue, or split the task.]";
 function parseResponse(value: string): any {
   try {
     return JSON.parse(value);
@@ -24,10 +30,37 @@ export class BackendHttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly retryAfterSeconds?: number,
   ) {
     super(message);
   }
 }
+// The server's own error code or message, from a small JSON error body only: an
+// OpenAI-style {"error": {"code" | "message"}} or Open WebUI's {"detail"}. Raw
+// non-JSON bodies are never echoed.
+async function errorDetail(r: Response): Promise<string | undefined> {
+  try {
+    const text = await bounded(r, AbortSignal.timeout(5000), 16384);
+    const body = JSON.parse(text);
+    const error = body?.error;
+    const value =
+      (typeof error?.code === "string" && error.code) ||
+      (typeof error?.message === "string" && error.message) ||
+      (typeof error === "string" && error) ||
+      (typeof body?.detail === "string" && body.detail) ||
+      undefined;
+    return value ? value.replace(/\s+/g, " ").slice(0, 200) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+function retryAfter(r: Response): number | undefined {
+  const value = Number(r.headers.get("retry-after"));
+  return Number.isFinite(value) && value >= 0 && value <= 86400
+    ? value
+    : undefined;
+}
+class StreamTimeout extends Error {}
 export class Backend {
   private secrets: string[] = [];
   constructor(
@@ -70,9 +103,10 @@ export class Backend {
       );
     }
     if (!r.ok) {
-      await r.body?.cancel();
-      throw new BackendHttpError(
-        r.status,
+      const detail = await errorDetail(r);
+      await r.body?.cancel().catch(() => {});
+      const wait = retryAfter(r);
+      const base =
         (
           {
             401: "Authentication expired or invalid; login again",
@@ -80,7 +114,13 @@ export class Backend {
             404: "Endpoint or model not found",
             429: "Rate limited; try later",
           } as Record<number, string>
-        )[r.status] ?? `Backend failed (HTTP ${r.status})`,
+        )[r.status] ?? `Backend failed (HTTP ${r.status})`;
+      throw new BackendHttpError(
+        r.status,
+        base +
+          (detail ? ": " + this.redact(detail) : "") +
+          (wait !== undefined ? ` (retry after ${wait} s)` : ""),
+        wait,
       );
     }
     return r;
@@ -111,13 +151,67 @@ export class Backend {
     signal: AbortSignal,
     onText: (s: string) => Promise<void>,
     extra: Record<string, unknown> = {},
-    maxResponseBytes = MAX,
+    maxResponseChars = MAX,
     onUsage?: (used: number) => Promise<void>,
   ): Promise<Message> {
     if (JSON.stringify(messages).length > MAX)
       throw new Error(
         "Context budget exceeded; start a new session. History retained.",
       );
+    // Per-request budgets, not one deadline for the whole turn: a long reply that
+    // keeps streaming runs to completion; a silent one is ended with a clear reason.
+    const watchdog = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = (ms: number | undefined, message: string) => {
+      clearTimeout(timer);
+      timer =
+        ms === undefined
+          ? undefined
+          : setTimeout(() => watchdog.abort(new StreamTimeout(message)), ms);
+    };
+    const firstMs = this.config.firstContentTimeoutMs;
+    const idleMs = this.config.idleTimeoutMs;
+    arm(
+      firstMs,
+      `No response from the model within ${Math.round(firstMs / 1000)} s; the server may be busy or the prompt very long. History retained.`,
+    );
+    const active = () =>
+      arm(
+        idleMs,
+        `The model stream stalled for ${Math.round(idleMs / 1000)} s; the partial reply was not saved. History retained.`,
+      );
+    const request = AbortSignal.any([signal, watchdog.signal]);
+    try {
+      return await this.stream(
+        messages,
+        tools,
+        request,
+        onText,
+        extra,
+        maxResponseChars,
+        onUsage,
+        active,
+        () => arm(undefined, ""),
+      );
+    } catch (e) {
+      if (!signal.aborted && watchdog.signal.reason instanceof StreamTimeout)
+        throw new Error(watchdog.signal.reason.message);
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  private async stream(
+    messages: Message[],
+    tools: unknown[],
+    signal: AbortSignal,
+    onText: (s: string) => Promise<void>,
+    extra: Record<string, unknown>,
+    maxResponseChars: number,
+    onUsage: ((used: number) => Promise<void>) | undefined,
+    active: () => void,
+    unbounded: () => void,
+  ): Promise<Message> {
     const r = await this.request("api/chat/completions", signal, {
       model: this.config.model,
       messages,
@@ -142,20 +236,41 @@ export class Backend {
     const calls = new Map<number, Call>();
     let finish: string | undefined;
     let used: number | undefined;
+    let produced = 0;
+    const count = (value: string) => {
+      produced += value.length;
+      if (produced > maxResponseChars)
+        throw new Error("Response limit exceeded");
+    };
     const consume = async (x: any, stream: boolean) => {
       if (x.error)
         throw new Error(
-          "Backend rejected completion; check context size and function-calling support",
+          "Backend rejected completion" +
+            (typeof x.error?.message === "string"
+              ? ": " + this.redact(x.error.message).slice(0, 200)
+              : "; check context size and function-calling support"),
         );
       const reported = completionContextTokens(x.usage);
       if (reported !== undefined) used = reported;
       if (Array.isArray(x.choices) && x.choices.length === 0 && x.usage) return;
+      // Streamed events without choices (e.g. Open WebUI's {"sources": [...]}) carry
+      // no completion data.
+      if (stream && x.choices === undefined && !x.usage) return;
       const choice = x.choices?.[0];
       if (!choice) throw new Error("Malformed completion");
       const d = stream ? choice.delta : choice.message;
       if (!d) throw new Error("Malformed completion delta");
+      if (
+        d.content ||
+        d.reasoning_content ||
+        d.reasoning ||
+        d.tool_calls?.length ||
+        choice.finish_reason
+      )
+        active();
       if (d.content != null) {
         if (typeof d.content !== "string") throw new Error("Malformed text");
+        count(d.content);
         content += d.content;
         await emit(d.content);
       }
@@ -171,6 +286,7 @@ export class Backend {
         c.id += t.id ?? "";
         c.function.name += t.function?.name ?? "";
         c.function.arguments += t.function?.arguments ?? "";
+        count((t.function?.name ?? "") + (t.function?.arguments ?? ""));
         calls.set(index, c);
       }
       if (choice.finish_reason) finish = choice.finish_reason;
@@ -185,8 +301,7 @@ export class Backend {
         for await (const chunk of r.body) {
           signal.throwIfAborted();
           bytes += chunk.length;
-          if (bytes > maxResponseBytes)
-            throw new Error("Response limit exceeded");
+          if (bytes > WIRE_MAX) throw new Error("Response limit exceeded");
           buffer += decoder.decode(chunk, { stream: true });
           buffer = buffer.replace(/\r\n/g, "\n");
           let end;
@@ -212,17 +327,23 @@ export class Backend {
         await r.body.cancel().catch(() => {});
         throw e;
       }
-    } else
-      await consume(
-        parseResponse(await bounded(r, signal, maxResponseBytes)),
-        false,
-      );
+    } else {
+      // A non-streamed reply sends nothing until it is complete: no budget can tell
+      // a slow answer from a stalled one, so only the caller's signal bounds it.
+      unbounded();
+      await consume(parseResponse(await bounded(r, signal, MAX)), false);
+    }
     signal.throwIfAborted();
     if (used !== undefined) await onUsage?.(used);
-    if (finish === "length")
-      throw new Error(
-        "Context or response limit reached; history retained, no pending tools executed",
-      );
+    if (finish === "length") {
+      // Keep what was written; never run a tool call the limit may have cut short.
+      await emit(OUTPUT_LIMIT_NOTICE);
+      await emit("", true);
+      return {
+        role: "assistant",
+        content: this.redact(content) + OUTPUT_LIMIT_NOTICE,
+      };
+    }
     if (finish && !["stop", "tool_calls"].includes(finish))
       throw new Error("Unsupported completion finish reason");
     await emit("", true);

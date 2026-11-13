@@ -178,7 +178,7 @@ test("fragmented SSE collects final usage-only events without double counting", 
   );
 });
 
-test("non-streaming usage is optional; malformed counts do not break replies; length errors still report measured usage", async () => {
+test("non-streaming usage is optional; malformed counts do not break replies; a length stop keeps its text and reports measured usage", async () => {
   for (const [u, expected] of [
     [{ prompt_tokens: 12, completion_tokens: 4 }, [16]],
     [undefined, []],
@@ -215,20 +215,19 @@ test("non-streaming usage is optional; malformed counts do not break replies; le
       ),
     );
   const actual = [];
-  await assert.rejects(
-    new Backend(conf, "synthetic").complete(
-      [],
-      [],
-      AbortSignal.timeout(5000),
-      async () => {},
-      {},
-      undefined,
-      async (v) => {
-        actual.push(v);
-      },
-    ),
-    /limit reached/,
+  const kept = await new Backend(conf, "synthetic").complete(
+    [],
+    [],
+    AbortSignal.timeout(5000),
+    async () => {},
+    {},
+    undefined,
+    async (v) => {
+      actual.push(v);
+    },
   );
+  assert.match(kept.content, /^partial\n\n\[Output limit reached/);
+  assert.equal(kept.tool_calls, undefined);
   assert.deepEqual(actual, [1000]);
 });
 

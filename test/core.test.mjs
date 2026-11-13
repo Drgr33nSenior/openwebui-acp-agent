@@ -477,6 +477,175 @@ test("HTTP failures, redirects, malformed responses and response bounds", async 
     /limit/,
   );
 });
+const sse = (res, events, gapMs = 0, end = "data: [DONE]\n\n") => {
+  res.setHeader("Content-Type", "text/event-stream");
+  return (async () => {
+    for (const event of events) {
+      if (gapMs) await new Promise((r) => setTimeout(r, gapMs));
+      res.write("data: " + JSON.stringify(event) + "\n\n");
+    }
+    if (end !== null) res.end(end);
+  })();
+};
+const delta = (d, finish_reason) => ({
+  choices: [{ delta: d, finish_reason }],
+});
+const budgets = configSchema.parse({
+  url,
+  model: "model-a",
+  firstContentTimeoutMs: 1000,
+  idleTimeoutMs: 1000,
+});
+test("a reply that keeps streaming outlives the first-content and idle budgets", async () => {
+  response = async (_, res) =>
+    sse(
+      res,
+      [
+        ...Array.from({ length: 6 }, () => delta({ reasoning_content: "." })),
+        ...Array.from({ length: 4 }, () => delta({ content: "ab" })),
+        delta({}, "stop"),
+      ],
+      300,
+    );
+  const m = await new Backend(budgets, "secret").complete(
+    [],
+    [],
+    AbortSignal.timeout(20000),
+    async () => {},
+  );
+  assert.equal(m.content, "abababab");
+});
+test("no first content and a stalled stream end with their own reasons, not a cancel", async () => {
+  response = async () => {};
+  await assert.rejects(
+    new Backend(budgets, "secret").complete(
+      [],
+      [],
+      AbortSignal.timeout(20000),
+      async () => {},
+    ),
+    /No response from the model within 1 s/,
+  );
+  response = async (_, res) =>
+    sse(res, [delta({ content: "partial" })], 0, null);
+  await assert.rejects(
+    new Backend(budgets, "secret").complete(
+      [],
+      [],
+      AbortSignal.timeout(20000),
+      async () => {},
+    ),
+    /stalled for 1 s/,
+  );
+});
+test("response limits count produced text, not protocol bytes", async () => {
+  // About 1.4 MB of streamed envelopes for 3,000 characters of text: within the limit.
+  const padding = "p".repeat(450);
+  response = async (_, res) =>
+    sse(res, [
+      ...Array.from({ length: 3000 }, () => ({
+        ...delta({ content: "x" }),
+        padding,
+      })),
+      delta({}, "stop"),
+    ]);
+  const m = await new Backend(conf, "secret").complete(
+    [],
+    [],
+    AbortSignal.timeout(20000),
+    async () => {},
+  );
+  assert.equal(m.content.length, 3000);
+  response = async (_, res) =>
+    sse(res, [delta({ content: "x".repeat(20) }), delta({}, "stop")]);
+  await assert.rejects(
+    new Backend(conf, "secret").complete(
+      [],
+      [],
+      AbortSignal.timeout(5000),
+      async () => {},
+      {},
+      10,
+    ),
+    /Response limit exceeded/,
+  );
+});
+test("a length stop keeps streamed text and never returns a cut-short tool call", async () => {
+  response = async (_, res) =>
+    sse(res, [
+      delta({ content: "half an answer" }),
+      delta({
+        tool_calls: [
+          {
+            index: 0,
+            id: "c1",
+            function: { name: "write_file", arguments: '{"pa' },
+          },
+        ],
+      }),
+      delta({}, "length"),
+    ]);
+  let shown = "";
+  const m = await new Backend(conf, "secret").complete(
+    [],
+    [],
+    AbortSignal.timeout(5000),
+    async (t) => {
+      shown += t;
+    },
+  );
+  assert.match(m.content, /^half an answer\n\n\[Output limit reached/);
+  assert.equal(m.tool_calls, undefined);
+  assert.match(shown, /Output limit reached/);
+});
+test("server error codes and Retry-After are reported; raw bodies are not", async () => {
+  response = async (_, res) =>
+    res
+      .writeHead(504, {
+        "Content-Type": "application/json",
+        "Retry-After": "5",
+      })
+      .end(JSON.stringify({ error: { code: "first_token_deadline" } }));
+  await assert.rejects(
+    new Backend(conf, "secret").complete(
+      [],
+      [],
+      AbortSignal.timeout(5000),
+      async () => {},
+    ),
+    /HTTP 504\): first_token_deadline \(retry after 5 s\)$/,
+  );
+  response = async (_, res) =>
+    res
+      .writeHead(400, { "Content-Type": "application/json" })
+      .end(JSON.stringify({ detail: "prompt for secret is too long" }));
+  await assert.rejects(
+    new Backend(conf, "secret").complete(
+      [],
+      [],
+      AbortSignal.timeout(5000),
+      async () => {},
+    ),
+    (e) =>
+      e.message.includes("prompt for [REDACTED] is too long") &&
+      !e.message.includes("secret"),
+  );
+});
+test("streamed events without choices (Open WebUI sources) are ignored", async () => {
+  response = async (_, res) =>
+    sse(res, [
+      { sources: [{ source: { name: "doc" } }] },
+      delta({ content: "ok" }),
+      delta({}, "stop"),
+    ]);
+  const m = await new Backend(conf, "secret").complete(
+    [],
+    [],
+    AbortSignal.timeout(5000),
+    async () => {},
+  );
+  assert.equal(m.content, "ok");
+});
 test("stream redacts a credential split across events", async () => {
   response = async (_, res) => {
     res.setHeader("Content-Type", "text/event-stream");
