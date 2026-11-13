@@ -2,6 +2,23 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## PR integration with current main
+
+The feature branch incorporates upstream `main` at `9c2d15e`, including the
+shared protected-path policy, once-only approval rules for unsandboxed tools,
+and file-tool race fixes. Merge conflicts in `docs/design.md` and
+`test/sandbox.test.mjs` were resolved by retaining the upstream security behavior
+and both sets of tests. An independent integration review identified that
+compaction must preserve upstream's user-role `AGENTS.md` guidance. It now keeps
+that text verbatim as untrusted user data, without promoting it to system
+instructions or duplicating it as a user task.
+
+The resolved source passed **201 macOS tests**, lint, type checking, build and
+Prettier on Node 26.11.1. Sanitized test output is in
+[test-output-pr-merge.txt](test-output-pr-merge.txt). Hosted CI and interactive
+client acceptance are separate from these local results. Source publication is
+through a feature PR; npm publication and IDE registration are unchanged.
+
 ## Compaction, planning and feature audit
 
 Local macOS verification with Node 26.11.1: **190 tests passed**, including seven
@@ -1019,3 +1036,68 @@ Evidence on macOS with Node 26.11.1: lint, strict type checking, build and Prett
 
 Not yet confirmed live: a turn longer than 10 minutes through Open WebUI, the reviewer verdict on a live model, and the 90% warning in PyCharm/Air.
 
+## Out-of-sandbox grants and auto-approval (unreleased)
+
+The security review's remaining grant and approval findings:
+
+- **IDE bridge and local MCP tools.** Tools from a local HTTP/SSE MCP server, including the JetBrains bridge, run on this machine outside the sandbox. The bridge exposes the terminal and run configurations. These tools could receive a session or remembered "all arguments" grant. They now always require a one-time approval, as unsandboxed commands already did, and the approval title says so. Remote MCP servers and Open WebUI server tasks keep their grants: they do not execute on this machine.
+- **Auto-approval in development mode.**
+  - Reuse now requires a bare program name or a program in a standard system directory, so `./tools/cat` and `.venv/bin/pytest` ask.
+  - `rg --hostname-bin` asks, because it runs another program.
+  - Test and lint runners ask when given options that delete or overwrite other paths: `pytest --basetemp`, `-o … --cache-clear`, `tsc --outFile`, `eslint -o` and `vitest --outputFile`.
+  - `git -C` stays auto-approvable, as the existing tests intend. A planted repository's `core.fsmonitor` would still run only inside the sandbox, like any approved test script.
+- **Project `AGENTS.md`.** It is now sent as a labelled user message instead of a system message, so repository text cannot outrank the agent's own instructions.
+
+Evidence on macOS with Node 26.11.1:
+
+- Lint, strict type checking, build and Prettier passed. All 158 tests passed.
+- New tests cover the classifier cases, IDE-bridge approvals offering only a one-time option, and the role of the `AGENTS.md` message.
+
+## File-tool symlink race (unreleased)
+
+The security review's High finding was that `target()` checked a path, and the file tools then used it by path. A concurrent process in the workspace could swap a folder for a symlink in between. Examples include an approved local MCP server, another session's command, or a detached child on macOS.
+
+Before the fix, a reproduction on macOS ran a separate process that flipped `d` between a real folder and a symlink to an outside folder. In 20 seconds it produced 13 reads of the outside file through `d/f.txt`. It also left 4 temporary files with new content in the outside folder. Nothing outside was overwritten.
+
+Node has no `openat()`. Reads and writes are therefore bracketed:
+
+- **Device, inode and ctime chain.** The device, inode and nanosecond ctime of every folder from the root to the file are recorded before and after the operation.
+- **Final component and links.** Files open without following a final symlink. Hard-linked files and special files are refused.
+- **Matching identity.** The open file must match the entry at the path.
+- **Temporary files.** A write proves its temporary file is inside the root before writing any content. A rename redirected after that point finds no temporary file and fails.
+
+ctime cannot be set by an unprivileged process. Any rename or replacement in a folder changes it.
+
+Evidence on macOS with Node 26.11.1:
+
+- The same 20-second race produced 0 leaks. No content was written outside; at most an empty temporary file is left.
+- `test/file-race.test.mjs` races reads and writes for 8 s each against a separate flipper process. It also covers final symlinks, hard links and FIFOs.
+- The full suite passed twice (159/159), and lint, strict type checking, build and Prettier passed.
+- A first version of the fix re-walked the path with `lstat` and leaked 3 times under full-suite load. `lstat` follows symlinks in all but the final component, which is why the ctime chain replaced it.
+
+Limits:
+
+- Reads and writes through the IDE's ACP filesystem methods are resolved by the IDE.
+- Coarse-timestamp filesystems weaken the check.
+- A concurrent tool changing a folder on the chain at the same instant makes a read fail with "changed during access; retry".
+## Shared protected and secret paths (unreleased)
+
+A security review found three gaps.
+
+- The file tools protected `.git`, `.idea` and `.vscode`, but not other files that later run outside the sandbox. These include `.claude/settings*.json` hooks, `.husky/`, `.mcp.json`, `.gitmodules` and `.envrc`. The model could therefore write a hook, and in edits mode no prompt would appear.
+- `read_file` and the sandbox used different secret lists. A sandboxed `cat` of an in-workspace `id_ed25519`, `*.p12` or `.netrc` succeeded.
+- Development mode auto-approved commands that name credential-bearing files such as `.git/config`. The sandbox must keep that file readable for Git.
+
+`src/protected-paths.ts` now holds one list per concern, used by `workspace.ts`, `sandbox.ts` and `permissions.ts`.
+
+Evidence on macOS with Node 26.11.1:
+
+- Lint, strict type checking, build and Prettier passed. All 154 tests passed.
+- The real Seatbelt test now confirms the new rules. A sandboxed command cannot read `deploy/id_ed25519` or `.netrc`. It cannot write `.husky/pre-commit`, `.claude/settings.json` or `.envrc`. It can still read `.git/config`.
+- New tests cover the following:
+  - The lists stay a superset of sandbox-runtime 0.0.83's `DANGEROUS_FILES` and directories.
+  - Names match only whole path segments, so `id_ed25519.pub`, `environment.ts` and `.gitignore` are unaffected.
+  - The file tools read these files but refuse to write them.
+  - Commands naming secrets prompt, including `bash -c` and `HEAD:.npmrc`.
+
+Hosted CI on Ubuntu then found that a `.claude` write deny broke every sandboxed command (`bwrap: Can't create file at …/.claude/commands: Read-only file system`). The runtime appends its own `.claude/commands` and `.claude/agents` denies after a configured parent, and bubblewrap cannot create a mountpoint below a read-only parent. The policy now emits those child denies first, as it already did for `.git`. A cross-platform policy test checks the ordering; it fails on the broken order and passes on the fix.

@@ -5,6 +5,7 @@ import {
   contextMessages,
   compactHistory,
   shouldAutoCompact,
+  PROJECT_GUIDANCE_PREFIX,
 } from "../dist/compaction.js";
 import { MAX, OUTPUT_LIMIT_NOTICE } from "../dist/backend.js";
 
@@ -165,6 +166,53 @@ test("a new user turn does not erase the verbatim request pinned by compaction",
   );
   assert.equal(summaryRequest.previousUserRequest, requestA);
   assert(summaryRequest.history.some((m) => m.content === requestB));
+});
+
+test("repository guidance stays exact user data across repeated compaction and later prompts", async () => {
+  const messages = history();
+  const guidance = user(
+    PROJECT_GUIDANCE_PREFIX +
+      "Run the focused tests. Preserve the public API and existing user edits.",
+  );
+  messages[1] = guidance;
+  const next = await compactHistory(
+    messages,
+    fresh(),
+    async () => response(),
+    signal(),
+  );
+  assert(next.through > 1);
+  const assertGuidance = (context) => {
+    assert.deepEqual(
+      context.filter((m) => m.content === guidance.content),
+      [guidance],
+    );
+    assert(
+      !context.some(
+        (m) =>
+          m.role === "system" && m.content?.includes("Preserve the public API"),
+      ),
+    );
+  };
+  assertGuidance(contextMessages(messages, next));
+  messages.push(user("Continue and add a regression test."));
+  assertGuidance(contextMessages(messages, next));
+  messages.push(
+    ...group("later-d"),
+    assistant("Further findings ".repeat(500)),
+    ...group("later-e"),
+  );
+  const again = await compactHistory(
+    messages,
+    next,
+    async () =>
+      response("Earlier work remains complete; finish the regression test."),
+    signal(),
+  );
+  assert(again.through > next.through);
+  assertGuidance(contextMessages(messages, again));
+  // A checkpoint covering only guidance must not quote it again as a user task.
+  assertGuidance(contextMessages(messages, { ...next, through: 2 }));
 });
 
 test("compaction never splits pending or multiple tool calls", async () => {

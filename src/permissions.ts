@@ -3,6 +3,7 @@ import { open, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { z } from "zod";
 import { directory, privateDir, readJson, writeJson } from "./config.js";
+import { mentions, PROMPT_ARGUMENT_NAMES } from "./protected-paths.js";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const grantSchema = z
@@ -290,6 +291,19 @@ export function repeatableCommand(
     .toLowerCase()
     .replace(/\.exe$/, "");
   if (depth > 3 || args.some((a) => /[\r\n\0]/.test(a))) return false;
+  // A bare program name (found on PATH) or a standard system program directory:
+  // "./tools/cat", ".venv/bin/pytest" or any other path could be a workspace file.
+  if (
+    /[\\/]/.test(executable) &&
+    !/^\/(?:usr\/(?:local\/)?)?s?bin\/[^/]+$|^\/opt\/homebrew\/bin\/[^/]+$/.test(
+      executable,
+    )
+  )
+    return false;
+  // A command that names secret or credential-bearing files always asks, even in
+  // development mode: the sandbox must leave some of them readable (Git reads
+  // .git/config), and their contents would reach the model and the server.
+  if (args.some((a) => mentions(PROMPT_ARGUMENT_NAMES, a))) return false;
   if (["sh", "bash", "zsh"].includes(name)) {
     if (args.length !== 2 || !["-c", "-lc"].includes(args[0]!)) return false;
     const commands = literalShellCommands(args[1]!);
@@ -320,8 +334,9 @@ export function repeatableCommand(
     return (
       depth > 0 && args.length <= 1 && !args.some((a) => a.startsWith("-"))
     );
+  // ripgrep --pre and --hostname-bin run another program.
   if (["rg", "grep"].includes(name))
-    return !args.some((a) => /^--pre(?:=|$)/.test(a));
+    return !args.some((a) => /^--(?:pre|hostname-bin)(?:=|$)/.test(a));
   if (name === "find")
     return !args.some(
       (a) =>
@@ -360,7 +375,18 @@ export function repeatableCommand(
       (args[0] === "--version" ||
         (name === "node" ? args[0] === "-v" : args[0] === "-V"))
     );
-  return ["pytest", "tsc", "eslint", "vitest"].includes(name);
+  // Test and lint runners already execute project code inside the sandbox; what
+  // they must not do unasked is delete or overwrite an arbitrary path: pytest
+  // removes --basetemp (and, with --cache-clear, an overridden cache_dir), and the
+  // others write a report or bundle wherever an output option points.
+  const runnerFlags: Record<string, RegExp> = {
+    pytest: /^(?:--basetemp|--override-ini|-o|--cache-clear)(?:=|$)|^-o./,
+    tsc: /^--outFile(?:=|$)/,
+    eslint: /^(?:-o|--output-file)(?:=|$)/,
+    vitest: /^--outputFile(?:=|$|\.)/,
+  };
+  const denied = runnerFlags[name];
+  return !!denied && !args.some((a) => denied.test(a));
 }
 // Only documented read commands qualify. In particular, gh api fields can
 // silently change GET to POST; no payload, header override or GraphQL is reused.

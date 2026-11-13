@@ -335,7 +335,13 @@ test("ACP IDE MCP approval precedes connection and each tool call; inference nev
     if (approvals.length <= 2) assert.equal(f.requests.length, 0);
     if (approvals.length === 3) {
       assert.match(title, /lookup/);
+      assert.match(title, /outside the sandbox/);
       assert.equal(round, 1);
+      // IDE tools run on this machine outside the sandbox: no reusable grant.
+      assert.deepEqual(
+        params.options.map((o) => o.optionId).filter((id) => id !== "deny"),
+        ["once"],
+      );
     }
     return { outcome: { outcome: "selected", optionId: "once" } };
   });

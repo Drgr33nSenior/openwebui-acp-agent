@@ -47,6 +47,10 @@ export async function mcpReadPaths(server: McpServer): Promise<string[]> {
 }
 export type RemoteTool = {
   label: string;
+  // Runs on this machine outside the agent's sandbox: a local HTTP/SSE server,
+  // including the IDE bridge (terminal, run configurations). Like any unsandboxed
+  // execution, each call needs its own approval; no session or remembered grant.
+  unsandboxed: boolean;
   identity: unknown;
   definition: unknown;
   validate: ValidateFunction;
@@ -182,6 +186,11 @@ export class Mcp {
           const validate = new Ajv({ strict: false }).compile(t.inputSchema);
           this.tools.set(name, {
             label: `${s.name}/${t.name}`,
+            unsandboxed:
+              !("command" in s) &&
+              ["localhost", "127.0.0.1", "[::1]"].includes(
+                new URL(s.url).hostname,
+              ),
             identity: {
               server: s,
               ...(s !== source ? { source } : {}),

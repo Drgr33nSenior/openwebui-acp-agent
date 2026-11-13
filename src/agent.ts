@@ -9,6 +9,7 @@ import { userMcp } from "./user-mcp.js";
 import { mcpSecrets } from "./ide-mcp.js";
 import {
   compactionStateSchema,
+  PROJECT_GUIDANCE_PREFIX,
   compactHistory,
   contextMessages,
   shouldAutoCompact,
@@ -739,7 +740,7 @@ export function createAgent(
             path: p,
           })
         ).content
-      : await readText(p);
+      : await readText(s.root, p);
     if (result.length > 100000 || result.includes("\0"))
       throw new Error("File exceeds text limits");
     return result;
@@ -836,7 +837,11 @@ export function createAgent(
       const check = await approve(
         client,
         s,
-        `Call ${remote.label}: ${JSON.stringify(args)}`,
+        `Call ${remote.label}` +
+          (remote.unsandboxed
+            ? " (runs on this machine outside the sandbox)"
+            : "") +
+          `: ${JSON.stringify(args)}`,
         signal,
         false,
         [],
@@ -846,6 +851,7 @@ export function createAgent(
           s.backend.redact(`MCP ${remote.label} (all arguments)`).slice(0, 300),
         ),
         { id: c.id, input: args },
+        remote.unsandboxed,
       );
       await check();
       return remote.call(args, signal);
@@ -1748,8 +1754,9 @@ export function createAgent(
         }
         // Supplied editor text may be newer than disk. Validate its path without
         // replacing it with a disk read; a missing unsaved file is acceptable.
+        // Reading it as context is not a write.
         for (const path of normalized.filePaths)
-          await target(s.root, path, true);
+          await target(s.root, path, true, false);
         await permitted(s, signal);
         if (
           s.workflow !== "plan" &&
@@ -1811,9 +1818,11 @@ export function createAgent(
           });
           try {
             const instructions = await read(client, s, "AGENTS.md");
+            // Repository text is data: as a user message it cannot outrank the
+            // system message above, which says it grants no permissions.
             s.messages.push({
-              role: "system",
-              content: "Untrusted project guidance:\n" + instructions,
+              role: "user",
+              content: PROJECT_GUIDANCE_PREFIX + instructions,
             });
           } catch {
             /* Optional instructions. */

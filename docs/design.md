@@ -315,7 +315,7 @@ acceptance remains separate from these tests and installed-code inspection.
 
 ## Remaining engineering limits
 
-This preview has the command sandbox described in [sandbox.md](sandbox.md), but lacks an atomic compare-and-swap editor API, general sensitive-file classifier, Windows ACL support, remote-job rollback or credential expiration push notification. File-path checks and re-reads reduce accidental escape/stale writes but cannot eliminate adversarial TOCTOU races. Local MCP framing is now bounded before SDK parsing. Remote MCP HTTP payloads/results still require further transport-level memory hardening. Session aggregate quota accounting is best-effort across processes. These are release review items, not guarantees covered by mocked tests.
+This preview has the command sandbox described in [sandbox.md](sandbox.md), but lacks an atomic compare-and-swap editor API, general sensitive-file classifier, Windows ACL support, remote-job rollback or credential expiration push notification. Local file-tool reads and writes are bracketed against folder-for-symlink swaps. They open without following a final symlink and refuse hard-linked files. They also require an unchanged device, inode and ctime chain from the root to the file around the open (see `workspace.ts`). Filesystems with coarse timestamps weaken this check. When the IDE's `fs/read_text_file` or `fs/write_text_file` is used instead, the IDE resolves the path itself, and this agent cannot close that race. Local MCP framing is now bounded before SDK parsing. Remote MCP HTTP payloads/results still require further transport-level memory hardening. Session aggregate quota accounting is best-effort across processes. These are release review items, not guarantees covered by mocked tests.
 
 Research date: 2026-11-13. [Node release policy](https://nodejs.org/en/about/previous-releases) lists Node 26 and 24 as LTS. [ACP SDK source](https://github.com/agentclientprotocol/typescript-sdk), [MCP SDK source](https://github.com/modelcontextprotocol/typescript-sdk), [JetBrains AI Assistant](https://www.jetbrains.com/help/ai-assistant/acp.html), and [Air agent management](https://www.jetbrains.com/help/air/air-in-ides-manage-agents.html) were consulted. Product compatibility is not inferred from these documents.
 
@@ -437,8 +437,8 @@ validated summary checkpoint. The transcript remains the source for IDE replay;
 compaction never rewrites it or executes its tool calls. Checkpoints contain a
 summary, transcript boundary, count and automatic setting. Boundary validation
 keeps assistant calls and their complete results together. Original leading
-system messages, recent complete history and the last user request within the
-compacted prefix remain available. The latter stays quoted verbatim when a new
+system messages, root project guidance as untrusted user content, recent complete
+history and the last user request within the compacted prefix remain available. The latter stays quoted verbatim when a new
 user turn arrives and is supplied to subsequent summaries.
 
 A compaction request uses the configured Open WebUI completion endpoint with an
