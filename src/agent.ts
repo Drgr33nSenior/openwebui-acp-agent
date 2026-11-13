@@ -634,7 +634,7 @@ export function createAgent(
             path: p,
           })
         ).content
-      : await readText(p);
+      : await readText(s.root, p);
     if (result.length > 100000 || result.includes("\0"))
       throw new Error("File exceeds text limits");
     return result;

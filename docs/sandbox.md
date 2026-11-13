@@ -137,9 +137,9 @@ closed. WSL2 would use the Linux implementation, but has not been tested here.
 
 Processes have bounded command duration/output, a private temporary directory
 and POSIX process-group cleanup. Tests cover ordinary child descendants. A
-complete hostile-process escape audit, unusual IPC channels, every filesystem
-alias/race, detached descendants and cross-platform enforcement remain review
-items. This boundary is not a VM, and allowed workspace writes can still damage
+complete hostile-process escape audit, unusual IPC channels, filesystem aliases
+beyond the file tools' symlink and hard-link checks, detached descendants and
+cross-platform enforcement remain review items. This boundary is not a VM, and allowed workspace writes can still damage
 the workspace. Preserve backups and review changes.
 
 ## Dependency advisory and release gate
