@@ -93,6 +93,7 @@ test("sandbox input and scope exceptions validate exact paths", async () => {
 });
 
 test("real OS sandbox permits workspace writes and denies sibling, symlink, sensitive-file and Git-metadata access", async () => {
+  const sharedFile = join(await mkdtemp("/tmp/ow-shared-denied-"), "game.js");
   const result = await run(`
     const fs=require('node:fs');const path=require('node:path');const r={};
     for(const [name,fn] of Object.entries({
@@ -103,6 +104,7 @@ test("real OS sandbox permits workspace writes and denies sibling, symlink, sens
       outsideWrite:()=>fs.writeFileSync(${JSON.stringify(join(sibling, "bad.txt"))},'bad'),
       escape:()=>fs.readFileSync('escape/private.txt','utf8'),
       gitWrite:()=>fs.writeFileSync('.git/config','bad'),
+      sharedTemporary:()=>fs.writeFileSync(${JSON.stringify(sharedFile)},'bad'),
       gitConfigRead:()=>fs.readFileSync('.git/config','utf8'),
       keyRead:()=>fs.readFileSync('deploy/id_ed25519','utf8'),
       netrcRead:()=>fs.readFileSync('.netrc','utf8'),
@@ -122,6 +124,7 @@ test("real OS sandbox permits workspace writes and denies sibling, symlink, sens
     outsideWrite: false,
     escape: false,
     gitWrite: false,
+    sharedTemporary: false,
     gitConfigRead: true,
     keyRead: false,
     netrcRead: false,
@@ -135,6 +138,31 @@ test("real OS sandbox permits workspace writes and denies sibling, symlink, sens
     "fixture-git-config",
   );
   await assert.rejects(access(join(sibling, "bad.txt")));
+  await assert.rejects(access(sharedFile));
+});
+
+test("private scratch storage works in both sandbox modes and ends with each command", async () => {
+  for (const mode of ["workspace", "read_only"]) {
+    const result = await run(
+      `
+      const fs=require('node:fs');const path=require('node:path');
+      const file=path.join(require('node:os').tmpdir(),'game.js');
+      fs.writeFileSync(file,'scratch');
+      console.log(JSON.stringify({file,contents:fs.readFileSync(file,'utf8')}));
+      ${mode === "workspace" ? "fs.writeFileSync('persistent.js','workspace artifact');" : ""}
+    `,
+      { ...plan, mode },
+    );
+    assert.equal(result.code, 0, result.output);
+    const scratch = JSON.parse(result.output);
+    assert.equal(scratch.contents, "scratch");
+    await assert.rejects(access(scratch.file));
+  }
+  const later = await run(
+    "console.log(require('node:fs').readFileSync('persistent.js','utf8'))",
+  );
+  assert.equal(later.code, 0, later.output);
+  assert.equal(later.output.trim(), "workspace artifact");
 });
 
 test("read-only sandbox denies project writes while explicit scope grants remain bounded", async () => {

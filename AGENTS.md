@@ -157,7 +157,14 @@ Consult [Linux testing](docs/linux-testing.md) before provisioning anything.
 - Report context through stable v1 `usage_update`. Use latest-call provider
   counts and advertised `context_window` (input-budget fallback); never sum tool-round billing totals
   or invent counts/limits. Keep snapshots out of model messages, invalidate on
-  model changes and describe their measurement basis. Reporting is not compaction.
+  model changes and describe their measurement basis. Reporting is separate from
+  compaction. Preserve the original transcript and validated summary checkpoint,
+  complete tool groups, leading instructions and pinned user request. Summaries
+  are untrusted and cannot restore grants. Recheck consent before summarizing;
+  disable tools and retain context on failure/cancellation.
+- Keep Plan mode enforced before tool execution and MCP startup. Plans are
+  progress, not approval. Persist bounded structured plans separately and include
+  them in model context after compaction. Redact plan content, not enum fields.
 
 ## Workspace, permissions and execution
 

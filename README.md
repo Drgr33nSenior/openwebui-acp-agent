@@ -141,9 +141,32 @@ Without counts or a known limit, the agent does not invent a percentage.
 
 The snapshot survives session restoration when the model budget still matches.
 Changing models clears it in the agent until the new model reports usage; the
-client may keep its previous display until that update arrives. This display does
-not add automatic context compaction or truncate conversation history. Rendering
-depends on the ACP client. See [context reporting](docs/design.md#context-usage).
+client may keep its previous display until that update arrives. Rendering depends
+on the ACP client. See [context reporting](docs/design.md#context-usage).
+
+Use `/compact` to summarize older completed history for subsequent model requests.
+The original transcript stays on disk. Automatic compaction is on by default:
+when older history can be reduced, it runs before inference at 80% of the reported
+context budget or 700,000 serialized context characters. Use the **Automatic
+compaction** selector or `/autocompact on|off` to control it. `/status` reports the
+setting and completed compaction count. Summary generation uses the selected
+model with tools disabled; it can cost inference time and tokens. Failed or
+cancelled compaction retains the original context. Automatic failure warns and
+continues within existing limits, without retrying compaction in that turn.
+Token usage refreshes on the next coding response; no guessed percentage is sent.
+Compaction does not remove the existing 2 MB session-storage budget or guarantee
+that a model preserves every fact. It cannot repair an oversized indivisible
+message/tool group; start a new session when no safe reduction is possible.
+
+Use **Workflow → Plan** or `/plan on` to inspect files and propose work before
+implementation. This mode permits only list/read/search and `update_plan`;
+commands, edits, MCP and server tasks are blocked. **Workflow → Code** or
+`/plan off` restores tool availability under the existing permissions and sandbox.
+For multi-step tasks the model can send a structured progress plan to the IDE.
+The plan survives restoration and compaction; it never authorizes execution.
+`/help` lists commands, and unknown slash commands return explicit guidance.
+`/status` distinguishes configured MCP servers from connections open during a turn.
+See the [feature audit and proposed roadmap](docs/feature-audit.md).
 
 The CLI provides `acp`, `login`, `logout`, `models`, `status`, `doctor`, `trust`, `trust revoke /absolute/workspace`, and `trust allow /absolute/workspace`. The last command explicitly clears a block and remembers trust; use it deliberately.
 
