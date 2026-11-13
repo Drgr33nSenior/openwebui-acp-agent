@@ -79,8 +79,13 @@ file entries include the wrapper and its lockfile but exclude its installed
 dependencies and browser binaries. Sanitized wrapper/container/package evidence
 is in [test-output-browser-container.txt](test-output-browser-container.txt).
 
-A separate CI workflow builds the same restricted Compose service and exercises
-a container-local fixture. Hosted results are recorded below when observed.
+Hosted CI passed for implementation commit `6d6fbdd`: Ubuntu 24.04/26.04,
+macOS, Windows platform/installed-package smoke and dependency audit
+([agent checks](https://github.com/Drgr33nSenior/openwebui-acp-agent/actions/runs/43517313740)).
+The separate Ubuntu browser workflow built the same restricted Compose service:
+17 wrapper tests and six successive real-browser fixture sessions (16 calls)
+passed ([browser checks](https://github.com/Drgr33nSenior/openwebui-acp-agent/actions/runs/43517313891)).
+Windows smoke is not native Windows sandbox or browser acceptance.
 Interactive IDE/model use, Qwen Code, native Windows and Linux host-service
 routing remain unverified. The Qwen Code setup is documented separately and does
 not acquire this agent's sandbox or permission enforcement.
