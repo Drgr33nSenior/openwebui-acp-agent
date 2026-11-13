@@ -271,6 +271,15 @@ No telemetry or analytics is added. Open WebUI and its model providers have inde
 
 Malformed or symlinked trust files fail closed. Inspect and repair them manually while clients are stopped; do not delete them simply to bypass a block. A stale `trust.lock` after a crash also requires inspection. See [design](docs/design.md), [migration](docs/migration.md), and [verification](docs/verification.md).
 
+An earlier version could redact the workspace path in saved sessions supplied
+with JetBrains MCP configuration. Reopening an affected chat now shows a recovery
+notice. Its next coding prompt requires fresh approval to attach the history to
+the current workspace, even if that workspace is already trusted. Approve only
+if the history belongs to this project. Declining or cancelling leaves the saved
+workspace unresolved; no coding request or MCP startup occurs. An intact saved
+path that belongs to another project still requires reopening that project or
+starting a new chat. Do not delete transcripts or edit trust records to recover.
+
 ## Administrator rules and approval advice
 
 Use the IDE’s **Approval advice** selector to opt into a separately selected model, or `/reviewer <model-id>`. Advice never grants permission; the user still decides. `/reviewer off` disables it. Root-owned administrator rules can restrict destinations, sandbox modes and approvals. See [managed policy](docs/managed-policy.md) and the [headless Linux test procedure](docs/linux-testing.md).

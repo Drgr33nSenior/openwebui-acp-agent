@@ -5,7 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
-import { ideMcpConnection } from "../dist/ide-mcp.js";
+import { ideMcpConnection, mcpSecrets } from "../dist/ide-mcp.js";
 import { mkdtemp, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -124,6 +124,30 @@ test("IDE bridge mapping preserves project, token and header semantics without e
     await m.close();
     await f.close();
   }
+});
+
+test("only verified IDE routing fields are excluded from MCP secret redaction", () => {
+  const ide = descriptor(4321);
+  assert.deepEqual(mcpSecrets([ide]), [
+    "synthetic-ide-only",
+    "lookup",
+    "synthetic-extra",
+  ]);
+  for (const other of [
+    { ...ide, command: "/arbitrary/program" },
+    descriptor(0),
+  ])
+    assert.deepEqual(
+      mcpSecrets([other]),
+      other.env.map((e) => e.value),
+    );
+  const http = {
+    type: "http",
+    name: "remote",
+    url: "https://example.com/mcp",
+    headers: [{ name: "Authorization", value: "synthetic-http-key" }],
+  };
+  assert.deepEqual(mcpSecrets([http]), ["synthetic-http-key"]);
 });
 
 test("IDE bridge recognition is narrow and rejects ambiguous or invalid descriptors", () => {

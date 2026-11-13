@@ -2,6 +2,30 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## Saved-workspace redaction and recovery
+
+Local metadata inspection confirmed that affected sessions contained a literal
+`[REDACTED]` root. The verified JetBrains stdio descriptor's project path, port
+and debug flag were incorrectly included in secret redaction, and persistence
+redacted the entire session envelope. Those verified routing fields are now
+excluded; auth tokens, custom fields and unrecognized definitions remain
+redacted. Saving applies transcript redaction separately from structured local
+identity, policy and usage metadata.
+
+A legacy root containing the redaction marker loads inactive with a recovery
+notice. Before coding it requires explicit workspace approval, regardless of
+remembered trust. Until approval, saves retain the unresolved root. Approval
+binds the history to the client's canonical workspace; tools are not replayed.
+Denial, invalid replies, cancellation and existing blocks prevent activation and
+inference. An intact mismatched workspace remains an error with recovery guidance.
+No existing transcript or trust record was manually changed during repair.
+
+Local macOS checks: **165 tests passed**, including nine new regression cases;
+lint, type checking and build passed. Tests cover metadata/secret collisions,
+fresh save/load, recovery choices, late replies, blocks and intact mismatches.
+See [sanitized output](test-output-workspace-recovery.txt). Interactive PyCharm
+recovery approval remains a user acceptance step; mock tests do not establish it.
+
 ## MCP terminal framing regression
 
 After the initial all-green run below, the documentation-only rerun at `24969ef`
