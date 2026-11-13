@@ -2,6 +2,28 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## MCP terminal framing regression
+
+After the initial all-green run below, the documentation-only rerun at `24969ef`
+exposed an intermittent failure in the real-process MCP frame-limit test on
+Ubuntu 24.04. The SDK clears its buffer on overflow; queued stdout arriving after
+the agent requested process termination could therefore parse as a fresh valid
+response before cleanup completed. This was a transport bug, not an assertion
+to relax.
+
+The transport now latches framing failure before stopping the process. It ignores
+later stdout and refuses further sends. Two deterministic tests hold cleanup
+pending and send valid data after oversized or malformed frames. They verify no
+late delivery, one termination request and no subsequent write. The existing
+real-process sandbox/MCP assertion remains unchanged. Kernel diagnostics now
+filter only relevant profiles and do not fail merely because there is no kernel
+denial for an application-level failure.
+
+Local verification: lint, type checking, build and focused formatting checks
+passed; the full suite passed **150 tests** with no failures or skips. See
+[sanitized output](test-output-mcp-framing.txt). Hosted checks run the same tests
+on both Ubuntu targets and macOS, plus the separate installed-package audits.
+
 ## CI failure remediation
 
 The hosted run at `859f89d` passed macOS and Windows checks but failed Ubuntu

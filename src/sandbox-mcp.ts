@@ -14,6 +14,7 @@ export class SandboxMcpTransport implements Transport {
   onmessage?: (message: JSONRPCMessage) => void;
   private process?: Awaited<ReturnType<typeof startSandbox>>;
   private buffer = new ReadBuffer({ maxBufferSize: 256000 });
+  private failed = false;
   constructor(
     private executable: string,
     private args: string[],
@@ -34,14 +35,7 @@ export class SandboxMcpTransport implements Transport {
       if ((stderrBytes += b.length) > 100000) this.process?.stop();
     });
     this.process.child.stdout!.on("data", (b: Buffer) => {
-      try {
-        this.buffer.append(b);
-        let message;
-        while ((message = this.buffer.readMessage())) this.onmessage?.(message);
-      } catch {
-        this.onerror?.(new Error("MCP frame invalid or oversized"));
-        this.process?.stop();
-      }
+      this.receive(b);
     });
     this.process.child.stdin!.on("error", () =>
       this.onerror?.(new Error("MCP input closed")),
@@ -52,8 +46,24 @@ export class SandboxMcpTransport implements Transport {
       this.onclose?.();
     });
   }
+  private receive(chunk: Buffer) {
+    // stop() terminates the owned process asynchronously. Already queued pipe
+    // data must never resurrect this stream after ReadBuffer clears on error.
+    if (this.failed) return;
+    try {
+      this.buffer.append(chunk);
+      let message;
+      while ((message = this.buffer.readMessage())) this.onmessage?.(message);
+    } catch {
+      this.failed = true;
+      this.buffer.clear();
+      this.process?.stop();
+      this.onerror?.(new Error("MCP frame invalid or oversized"));
+    }
+  }
   async send(message: JSONRPCMessage) {
-    if (!this.process) throw new Error("MCP transport not started");
+    if (!this.process || this.failed)
+      throw new Error("MCP transport not started or failed");
     const line = serializeMessage(message);
     if (Buffer.byteLength(line) > 256000)
       throw new Error("MCP message too large");

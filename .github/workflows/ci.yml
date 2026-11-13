@@ -55,7 +55,7 @@ jobs:
         if: failure() && runner.os == 'Linux'
         shell: bash
         run: |
-          sudo journalctl -k -b --since '-10 minutes' --no-pager --output=cat --grep 'apparmor="DENIED"' | tail -30
+          sudo journalctl -k -b --since '-10 minutes' --no-pager --output=cat | awk '/apparmor="DENIED"/ && /profile="(bwrap|openwebui-acp-bwrap|unprivileged_userns|unpriv_bwrap)/' | tail -30
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
