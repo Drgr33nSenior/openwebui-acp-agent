@@ -19,7 +19,13 @@ const temporary = await realpath(await mkdtemp(join(tmpdir(), "ow-verify-")));
 process.env.OPENWEBUI_ACP_HOME = join(temporary, "state");
 process.env.OPENWEBUI_API_KEY = "synthetic-verification-inference";
 const { createAgent } = await import("../dist/agent.js");
-const { configSchema, writeJson } = await import("../dist/config.js");
+const { directory, configSchema, writeJson } =
+  await import("../dist/config.js");
+assert.equal(
+  directory,
+  process.env.OPENWEBUI_ACP_HOME,
+  "Application state must use the test's private directory before any writes",
+);
 const { snapshotPolicy } = await import("../dist/policy.js");
 const { changeTrust } = await import("../dist/workspace.js");
 const {
@@ -827,6 +833,11 @@ test("unchanged repairs reuse failed project results and never repeat a declined
       assert.equal((await c.prompt()).stopReason, "end_turn");
       assert.equal(requests.length - requestsBefore, 4);
       assert.equal(runs, decline ? 0 : 1);
+      if (decline)
+        assert.match(
+          displayed(c),
+          /permission declined; not retried this turn/,
+        );
       assert.equal(
         c.approvals.filter((p) => p.toolCall.title.includes("npm")).length,
         1,
@@ -897,6 +908,124 @@ test("run_command forwards validated per-call timeout and uses the two-minute de
       runs.map((args) => args[4].timeoutMs),
       [600000, 120000],
     );
+  } finally {
+    await c.close();
+  }
+});
+
+test("malformed repair replies recover once without repeating edits or spending another verification attempt", async () => {
+  const c = await client({
+    verify: { maxFixRounds: 1 },
+    diagnose: async ({ filePath }) =>
+      problemResult(
+        filePath,
+        (await readFile(join(c.cwd, filePath), "utf8")) === "broken"
+          ? [problem()]
+          : [],
+      ),
+  });
+  let round = 0;
+  respond = (_request, res) => {
+    switch (round++) {
+      case 0:
+        return reply(res, null, [edit("broken")]);
+      case 1:
+        return reply(res, "Initial edit finished.");
+      case 2:
+        return reply(res, null, [
+          edit("must not execute", "broken", "a.txt", "unexecuted"),
+          {
+            id: "malformed",
+            type: "function",
+            function: { name: "read_file", arguments: "{" },
+          },
+        ]);
+      case 3:
+        return reply(res, null, [edit("fixed", "broken", "a.txt", "fix")]);
+      default:
+        return reply(res, "Corrected.");
+    }
+  };
+  try {
+    assert.equal((await c.prompt()).stopReason, "end_turn");
+    assert.equal(requests.length, 5);
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "fixed");
+    assert.equal(c.fixture.calls.length, 2);
+    assert.equal(
+      c.approvals.filter((p) => p.toolCall.title.startsWith("Write ")).length,
+      2,
+    );
+    assert.match(
+      JSON.stringify(requests[3].messages),
+      /Your last reply was malformed/,
+    );
+    assert.match(displayed(c), /Repair attempt 1\/1/);
+    assert.doesNotMatch(displayed(c), /Repair attempt 2/);
+    assert.match(displayed(c), /Verification passed/);
+    assert(
+      !c
+        .state()
+        .messages.flatMap((m) => m.tool_calls ?? [])
+        .some((call) => call.id === "unexecuted" || call.id === "malformed"),
+    );
+    paired(c.state().messages);
+  } finally {
+    await c.close();
+  }
+});
+
+test("verification calls share the 64-call budget and limit summaries retain unresolved diagnostics", async () => {
+  const c = await client({
+    diagnose: ({ filePath }) =>
+      problemResult(filePath, [problem("Still unresolved")]),
+  });
+  let round = 0;
+  respond = (_request, res) => {
+    switch (round++) {
+      case 0:
+        return reply(res, null, [
+          ...Array.from({ length: 61 }, (_, n) =>
+            tool("read_file", { path: "a.txt" }, `read-${n}`),
+          ),
+          edit("broken"),
+        ]);
+      case 1:
+        return reply(res, "Initial edit finished.");
+      default:
+        return reply(res, null, [
+          tool("read_file", { path: "a.txt" }, "last-read"),
+          edit("must not execute", "broken", "a.txt", "over-budget"),
+        ]);
+    }
+  };
+  try {
+    assert.equal((await c.prompt()).stopReason, "max_turn_requests");
+    assert.equal(requests.length, 3);
+    assert.equal(c.fixture.calls.length, 1);
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "broken");
+    assert.equal(
+      c.approvals.filter((p) => p.toolCall.title.startsWith("Write ")).length,
+      1,
+    );
+    assert.match(displayed(c), /Tool-call limit reached/);
+    assert.match(displayed(c), /Files updated: a.txt/);
+    assert.match(
+      displayed(c),
+      /Verification incomplete: tool-call limit reached/,
+    );
+    assert.match(
+      displayed(c),
+      /Remaining problems from the last check:[\s\S]*Still unresolved/,
+    );
+    assert.match(
+      c
+        .state()
+        .messages.find(
+          (m) => m.role === "tool" && m.tool_call_id === "over-budget",
+        ).content,
+      /this operation was not executed/,
+    );
+    paired(c.state().messages);
   } finally {
     await c.close();
   }

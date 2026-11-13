@@ -35,6 +35,16 @@ export class BackendHttpError extends Error {
     super(message);
   }
 }
+// Only failed reply parsing is recoverable. Transport/auth/policy failures and
+// resource limits must not trigger another inference request automatically.
+export class ModelReplyError extends Error {
+  constructor(
+    readonly kind: "truncated" | "malformed",
+    message: string,
+  ) {
+    super(message);
+  }
+}
 // The server's own error code or message, from a small JSON error body only: an
 // OpenAI-style {"error": {"code" | "message"}} or Open WebUI's {"detail"}. Raw
 // non-JSON bodies are never echoed.
@@ -196,6 +206,14 @@ export class Backend {
     } catch (e) {
       if (!signal.aborted && watchdog.signal.reason instanceof StreamTimeout)
         throw new Error(watchdog.signal.reason.message);
+      if (
+        (e as NodeJS.ErrnoException)?.code ===
+        "ERR_ENCODING_INVALID_ENCODED_DATA"
+      )
+        throw new ModelReplyError(
+          "malformed",
+          "Malformed UTF-8 in model reply",
+        );
       throw e;
     } finally {
       clearTimeout(timer);
@@ -243,6 +261,8 @@ export class Backend {
         throw new Error("Response limit exceeded");
     };
     const consume = async (x: any, stream: boolean) => {
+      if (!x || typeof x !== "object")
+        throw new ModelReplyError("malformed", "Malformed completion");
       if (x.error)
         throw new Error(
           "Backend rejected completion" +
@@ -257,9 +277,11 @@ export class Backend {
       // no completion data.
       if (stream && x.choices === undefined && !x.usage) return;
       const choice = x.choices?.[0];
-      if (!choice) throw new Error("Malformed completion");
+      if (!choice)
+        throw new ModelReplyError("malformed", "Malformed completion");
       const d = stream ? choice.delta : choice.message;
-      if (!d) throw new Error("Malformed completion delta");
+      if (!d || typeof d !== "object")
+        throw new ModelReplyError("malformed", "Malformed completion delta");
       if (
         d.content ||
         d.reasoning_content ||
@@ -269,15 +291,28 @@ export class Backend {
       )
         active();
       if (d.content != null) {
-        if (typeof d.content !== "string") throw new Error("Malformed text");
+        if (typeof d.content !== "string")
+          throw new ModelReplyError("malformed", "Malformed text");
         count(d.content);
         content += d.content;
         await emit(d.content);
       }
+      if (d.tool_calls != null && !Array.isArray(d.tool_calls))
+        throw new ModelReplyError("malformed", "Malformed tool calls");
       for (const [i, t] of (d.tool_calls ?? []).entries()) {
+        if (
+          !t ||
+          typeof t !== "object" ||
+          (t.id != null && typeof t.id !== "string") ||
+          (t.function?.name != null && typeof t.function.name !== "string") ||
+          (t.function?.arguments != null &&
+            typeof t.function.arguments !== "string") ||
+          (t.type != null && t.type !== "function")
+        )
+          throw new ModelReplyError("malformed", "Malformed tool call fields");
         const index = stream ? t.index : i;
         if (!Number.isInteger(index) || index < 0 || index > 63)
-          throw new Error("Malformed tool index");
+          throw new ModelReplyError("malformed", "Malformed tool index");
         const c = calls.get(index) ?? {
           id: "",
           type: "function",
@@ -290,6 +325,13 @@ export class Backend {
         calls.set(index, c);
       }
       if (choice.finish_reason) finish = choice.finish_reason;
+    };
+    const parseCompletion = (data: string) => {
+      try {
+        return parseResponse(data);
+      } catch {
+        throw new ModelReplyError("malformed", "Malformed backend JSON");
+      }
     };
     if (r.headers.get("content-type")?.includes("text/event-stream")) {
       let buffer = "",
@@ -318,11 +360,12 @@ export class Backend {
               done = true;
               continue;
             }
-            await consume(parseResponse(data), true);
+            await consume(parseCompletion(data), true);
           }
         }
         buffer += decoder.decode();
-        if (!done && !finish) throw new Error("Truncated stream");
+        if (!done && !finish)
+          throw new ModelReplyError("truncated", "Truncated stream");
       } catch (e) {
         await r.body.cancel().catch(() => {});
         throw e;
@@ -331,28 +374,32 @@ export class Backend {
       // A non-streamed reply sends nothing until it is complete: no budget can tell
       // a slow answer from a stalled one, so only the caller's signal bounds it.
       unbounded();
-      await consume(parseResponse(await bounded(r, signal, MAX)), false);
+      await consume(parseCompletion(await bounded(r, signal, MAX)), false);
     }
     signal.throwIfAborted();
     if (used !== undefined) await onUsage?.(used);
     if (finish === "length") {
-      // Keep what was written; never run a tool call the limit may have cut short.
-      await emit(OUTPUT_LIMIT_NOTICE);
+      // The coding loop may ask again once; never return a cut-short tool call.
       await emit("", true);
-      return {
-        role: "assistant",
-        content: this.redact(content) + OUTPUT_LIMIT_NOTICE,
-      };
+      throw new ModelReplyError(
+        "truncated",
+        "The model reply was cut off by its output limit",
+      );
     }
+    if (finish === "content_filter")
+      throw new Error("Backend declined completion (content filter)");
     if (finish && !["stop", "tool_calls"].includes(finish))
-      throw new Error("Unsupported completion finish reason");
+      throw new ModelReplyError(
+        "malformed",
+        "Unsupported completion finish reason",
+      );
     await emit("", true);
     const all = [...calls.values()];
     if (
       all.some((c) => !c.id || !c.function.name) ||
       new Set(all.map((c) => c.id)).size !== all.length
     )
-      throw new Error("Malformed tool calls");
+      throw new ModelReplyError("malformed", "Malformed tool calls");
     return {
       role: "assistant",
       content: this.redact(content),

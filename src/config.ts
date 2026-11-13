@@ -29,7 +29,7 @@ export const configSchema = z
       .string()
       .regex(/^[A-Za-z0-9-]+$/)
       .default("Authorization"),
-    rounds: z.number().int().min(1).max(100).default(12),
+    rounds: z.number().int().min(1).max(100).default(40),
     verify: verificationSchema.default(() => verificationSchema.parse({})),
     // Discovery and metadata requests (model list, server-tool discovery).
     timeoutMs: z.number().int().min(100).max(3600000).default(120000),

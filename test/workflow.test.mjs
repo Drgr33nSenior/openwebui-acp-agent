@@ -10,7 +10,13 @@ const temporary = await mkdtemp(join(tmpdir(), "ow-workflow-"));
 process.env.OPENWEBUI_ACP_HOME = join(temporary, "state");
 process.env.OPENWEBUI_API_KEY = "synthetic-workflow-fixture";
 const { createAgent } = await import("../dist/agent.js");
-const { writeJson, readJson, configSchema } = await import("../dist/config.js");
+const { directory, writeJson, readJson, configSchema } =
+  await import("../dist/config.js");
+assert.equal(
+  directory,
+  process.env.OPENWEBUI_ACP_HOME,
+  "Application state must use the test's private directory before any writes",
+);
 const requests = [];
 let pending = [],
   summaryResponse,
@@ -255,7 +261,7 @@ test("Plan mode enforces read-only tools before forged mutations and never conne
     ]) {
       assert.match(
         results.find((r) => r.tool_call_id === id).content,
-        /Tool failed or permission declined/,
+        /Tool failed: Operation disabled in read-only mode/,
       );
       assert(
         events(c).some((u) => u.toolCallId === id && u.status === "failed"),

@@ -2,6 +2,38 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## Verification and harness merge integration (unreleased)
+
+Merged `main` at `78f030e` (including PR #8) into the existing PR #7 branch without
+rewriting its published history. Conflicts in the agent loop, configuration and
+this record retain both features: a 40-round default, schema-directed reply
+repair, specific tool errors, bounded automatic checks and their independent
+repair-attempt limit. The canonical changed-file journal now also supplies the
+turn-limit report. A limit retains both the progress summary and unresolved
+verification details in history.
+
+Integration review found that verification still matched the old permission-error
+text. It now recognizes the typed denial from the harness and keeps declined
+checks marked as declined, with no retry. New regressions cover malformed repair
+replies without repeated edits or extra fix attempts, and verification calls
+sharing the 64-call budget while preserving remaining diagnostics.
+
+The review also found a test-isolation regression: a static import in
+`mcp-sse.test.mjs` could load configuration before the test selected its temporary
+state directory. IDE helpers now load after that selection. State-writing tests
+touched by this integration assert the selected directory before any writes.
+Each verification run additionally sets a fresh `OPENWEBUI_ACP_HOME` before Node
+starts, so module initialization cannot select normal application state. The final
+full-suite run confirmed that this external fallback directory remained empty.
+
+Local macOS 27.0 checks with Node 26.11.1/npm 11.20.0 passed: `npm ci`, typecheck,
+lint, the repository Prettier scope, build and **263 tests, zero failures or
+skips**. The focused verification/harness/interruption suite passed 55 tests.
+`npm ci` audited 193 packages with zero vulnerabilities. No dependency versions
+changed. Final sanitized output is in
+[test-output-verification-merge.txt](test-output-verification-merge.txt).
+Hosted CI and live IDE/model repair acceptance remain separate checks.
+
 ## Automatic verification after edits (unreleased)
 
 Implemented from `main` at `c095051`, retaining PR #6's interrupt-and-replace
@@ -42,6 +74,56 @@ initial tracker covers `write_file` changes; arbitrary shell/MCP-only edits do
 not supply a changed-file journal. Hosted cross-platform CI results belong to
 the feature PR and are separate from this local macOS run. No live deployment,
 credential, IDE registration or existing session was changed for this feature.
+
+## Coding harness recovery (unreleased)
+
+The coding loop now returns specific tool errors, redacted before a 2,000-character
+cap. Stale-edit failures instruct the model to read the current file again. A
+user permission denial has its own message and explicitly forbids retrying or
+finding another route. Existing policy checks, atomic writes and approvals still
+run before execution.
+
+The default round budget is 40, with a maximum of 100. Explicit existing values
+are unchanged. The separate 64-tool-call budget is retained. Either limit produces
+a bounded report of tool-result counts, changed files and remaining plan steps;
+returned results do not establish that checks passed. Every returned tool call,
+including an unexecuted over-budget call, has a paired result in history.
+
+A truncated or malformed coding reply gets at most one corrected inference
+request per round. Every call's JSON is checked before any call in that reply can
+execute. Emitted partial text and an assistant-role correction marker are kept;
+the marker does not replace the user request that compaction preserves. Retry
+counts and error categories go to stderr without arguments, messages or secrets.
+A second failure stops with an explanation. Authentication, HTTP, network,
+content-filter and resource-limit failures are not re-asked automatically.
+
+Argument repair is schema-directed: nullable `"null"`, JSON-encoded arrays/objects
+and extra keys in simple closed object schemas. Numbers and booleans are not
+coerced. Complex reference, pattern and conditional schemas are left unchanged;
+normal validation follows repair. The short workflow prompt asks for targeted
+reads, minimal edits, project checks and stopping when permission blocks work.
+It applies to new sessions; restored system instructions and `AGENTS.md` handling
+are unchanged. The command description is shorter, while detailed sandbox failure
+guidance remains in tool results.
+
+On macOS 27.0 with Node 26.11.1/npm 11.20.0, `npm ci`, `npm run typecheck`,
+`npm run lint`, `npx --no-install prettier --check src test package.json package-lock.json registry/agent.json`,
+`npm run build` and `node --test test/*.test.mjs` passed: **236 tests, zero failures
+or skips**, including 21 new harness regressions. `npm ci` audited 193 packages
+with zero vulnerabilities; dependency versions and the lockfile are unchanged.
+Sanitized output is in [test-output-harness.txt](test-output-harness.txt).
+Documentation clarity audits passed. An additional whole-document Prettier check
+reported formatting differences in README and this record that also exist on
+the base commit; the repository-required formatter scope above passed.
+
+Tests cover specific validation/stale errors, distinct denials, redaction and
+caps, the prompt snapshot, declared coercions and non-coercible input, schema
+patterns/prototype keys, one recovery per round and cumulative counting, malformed
+later calls preventing earlier mutations, cancellation during a re-ask, no retries
+for HTTP/content-filter/resource failures, UTF-8 failure recovery and bounded
+round/tool limits. Existing interruption, permissions and real macOS sandbox
+checks also passed. Live model/parser quality, interactive IDE acceptance and
+Linux/Windows execution of this change remain unverified.
 
 ## Interrupting a turn (unreleased)
 

@@ -10,7 +10,13 @@ const temporary = await mkdtemp(join(tmpdir(), "ow-usage-"));
 process.env.OPENWEBUI_ACP_HOME = join(temporary, "state");
 process.env.OPENWEBUI_API_KEY = "synthetic-usage-key";
 const { Backend } = await import("../dist/backend.js");
-const { configSchema, writeJson } = await import("../dist/config.js");
+const { directory, configSchema, writeJson } =
+  await import("../dist/config.js");
+assert.equal(
+  directory,
+  process.env.OPENWEBUI_ACP_HOME,
+  "Application state must use the test's private directory before any writes",
+);
 const { contextSize, completionContextTokens } =
   await import("../dist/usage.js");
 const { createAgent } = await import("../dist/agent.js");
@@ -178,7 +184,7 @@ test("fragmented SSE collects final usage-only events without double counting", 
   );
 });
 
-test("non-streaming usage is optional; malformed counts do not break replies; a length stop keeps its text and reports measured usage", async () => {
+test("non-streaming usage is optional; malformed counts do not break replies; a length stop signals recovery and still reports measured usage", async () => {
   for (const [u, expected] of [
     [{ prompt_tokens: 12, completion_tokens: 4 }, [16]],
     [undefined, []],
@@ -215,19 +221,24 @@ test("non-streaming usage is optional; malformed counts do not break replies; a 
       ),
     );
   const actual = [];
-  const kept = await new Backend(conf, "synthetic").complete(
-    [],
-    [],
-    AbortSignal.timeout(5000),
-    async () => {},
-    {},
-    undefined,
-    async (v) => {
-      actual.push(v);
-    },
+  let emitted = "";
+  await assert.rejects(
+    new Backend(conf, "synthetic").complete(
+      [],
+      [],
+      AbortSignal.timeout(5000),
+      async (value) => {
+        emitted += value;
+      },
+      {},
+      undefined,
+      async (v) => {
+        actual.push(v);
+      },
+    ),
+    (error) => error.kind === "truncated" && /cut off/.test(error.message),
   );
-  assert.match(kept.content, /^partial\n\n\[Output limit reached/);
-  assert.equal(kept.tool_calls, undefined);
+  assert.equal(emitted, "partial");
   assert.deepEqual(actual, [1000]);
 });
 

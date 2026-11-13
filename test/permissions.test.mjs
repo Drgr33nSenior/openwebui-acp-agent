@@ -20,7 +20,13 @@ process.env.OPENWEBUI_ACP_HOME = join(temp, "state");
 process.env.OPENWEBUI_API_KEY = "permission-fixture-not-real";
 const { Permissions, grant, fingerprint, repeatableCommand } =
   await import("../dist/permissions.js");
-const { writeJson, configSchema } = await import("../dist/config.js");
+const { directory, writeJson, configSchema } =
+  await import("../dist/config.js");
+assert.equal(
+  directory,
+  process.env.OPENWEBUI_ACP_HOME,
+  "Application state must use the test's private directory before any writes",
+);
 const { createAgent } = await import("../dist/agent.js");
 const { snapshotPolicy } = await import("../dist/policy.js");
 const signal = () => AbortSignal.timeout(10000);
@@ -811,8 +817,15 @@ for (const [mode, code, output, expectHint] of [
       const description = request.tools.find(
         (t) => t.function.name === "run_command",
       ).function.description;
-      assert.match(description, /cannot be used by later commands/);
-      assert.match(description, /never hard-code shared \/tmp or \/var\/tmp/);
+      assert.match(
+        description,
+        /TMPDIR for temporary files within one command/,
+      );
+      assert.match(
+        description,
+        /workspace-relative paths for persistent files/,
+      );
+      assert.ok(description.length < 400);
       assert.equal(c.executed.length, 1);
     } finally {
       await c.close();

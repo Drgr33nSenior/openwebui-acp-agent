@@ -6,12 +6,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
 import {
-  ideMcpConnection,
-  mcpSecrets,
-  isIdeFileProblemsTool,
-  ideFileProblemsArguments,
-} from "../dist/ide-mcp.js";
-import {
   link,
   mkdtemp,
   mkdir,
@@ -25,9 +19,21 @@ import { ClientApp } from "@agentclientprotocol/sdk";
 const temporary = await mkdtemp(join(tmpdir(), "ow-sse-"));
 process.env.OPENWEBUI_ACP_HOME = join(temporary, "state");
 process.env.OPENWEBUI_API_KEY = "synthetic-inference-only";
+const {
+  ideMcpConnection,
+  mcpSecrets,
+  isIdeFileProblemsTool,
+  ideFileProblemsArguments,
+} = await import("../dist/ide-mcp.js");
 const { Mcp } = await import("../dist/mcp.js");
 const { createAgent } = await import("../dist/agent.js");
-const { configSchema, writeJson } = await import("../dist/config.js");
+const { directory, configSchema, writeJson } =
+  await import("../dist/config.js");
+assert.equal(
+  directory,
+  process.env.OPENWEBUI_ACP_HOME,
+  "Application state must use the test's private directory before any writes",
+);
 const { snapshotPolicy } = await import("../dist/policy.js");
 
 function descriptor(port) {
