@@ -48,6 +48,11 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/installed-agent" --ignore-scripts "$RUNNER_TEMP/$package_file"
           npm audit --prefix "$RUNNER_TEMP/installed-agent" --omit=dev --audit-level=high
           node test/package-install.mjs "$RUNNER_TEMP/installed-agent"
+      - name: Report Linux sandbox policy denials
+        if: failure() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo journalctl --kernel --boot --since '-10 minutes' --no-pager --output=cat --grep 'apparmor="DENIED"' | tail -30
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
