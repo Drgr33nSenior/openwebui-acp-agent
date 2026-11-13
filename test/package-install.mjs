@@ -64,6 +64,18 @@ const { SERVER_TOOLS_VERSION } = await import(
   pathToFileURL(join(installed, "dist/server-tools.js"))
 );
 assert.equal(SERVER_TOOLS_VERSION, "0.13.3");
+const { contextSize, completionContextTokens } = await import(
+  pathToFileURL(join(installed, "dist/usage.js"))
+);
+assert.equal(contextSize({ max_input_tokens: 1000 }), 1000);
+assert.equal(
+  contextSize({ context_window: 2000, max_input_tokens: 1000 }),
+  2000,
+);
+assert.equal(
+  completionContextTokens({ prompt_tokens: 120, completion_tokens: 30 }),
+  150,
+);
 await writeFile(join(temporary, "fixture.txt"), "installed fixture");
 const result = JSON.parse(
   await sandboxCommand(
@@ -80,5 +92,5 @@ assert.equal(
   "installed fixture",
 );
 console.log(
-  "Installed 0.3.0: clean ACP v1 handshake, terminal authentication and logout discovery, and real sandbox command passed outside the checkout",
+  "Installed 0.3.0: clean ACP v1 handshake, terminal authentication and logout discovery, context usage module, and real sandbox command passed outside the checkout",
 );

@@ -50,6 +50,7 @@ See [design and API evidence](docs/design.md) before changing a request contract
 | --- | --- |
 | `src/agent.ts` | ACP handlers, isolated sessions, model/tool rounds, approvals, selectors, slash commands, restoration |
 | `src/backend.ts`, `src/reasoning.ts` | Open WebUI requests, bounded streaming/non-streaming parsing, metadata-derived reasoning |
+| `src/usage.ts` | Validated latest-call usage and advertised context windows/input budgets for the ACP context wheel |
 | `src/server-tools.ts` | Opt-in server task discovery/execution, retained chats, cancellation, citations and image output |
 | `src/cli.ts`, `src/auth.ts`, `src/setup.ts` | Executable routing, authentication discovery, masked terminal setup |
 | `src/config.ts` | Non-secret configuration, secure credential access, bounded private state writes |
@@ -153,6 +154,10 @@ Consult [Linux testing](docs/linux-testing.md) before provisioning anything.
   IDs and history ordering. Validate before execution. Keep finite limits and
   cancellation throughout. Do not retry potentially completed side effects or
   silently truncate context and pending actions.
+- Report context through stable v1 `usage_update`. Use latest-call provider
+  counts and advertised `context_window` (input-budget fallback); never sum tool-round billing totals
+  or invent counts/limits. Keep snapshots out of model messages, invalidate on
+  model changes and describe their measurement basis. Reporting is not compaction.
 
 ## Workspace, permissions and execution
 

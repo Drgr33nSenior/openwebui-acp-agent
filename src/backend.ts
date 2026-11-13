@@ -1,5 +1,6 @@
 import { endpoint, type Config } from "./config.js";
 import { enforceDestination, loadPolicy } from "./policy.js";
+import { completionContextTokens } from "./usage.js";
 export type Message = {
   role: string;
   content: string | null;
@@ -111,6 +112,7 @@ export class Backend {
     onText: (s: string) => Promise<void>,
     extra: Record<string, unknown> = {},
     maxResponseBytes = MAX,
+    onUsage?: (used: number) => Promise<void>,
   ): Promise<Message> {
     if (JSON.stringify(messages).length > MAX)
       throw new Error(
@@ -122,6 +124,7 @@ export class Backend {
       tools,
       stream: true,
       ...extra,
+      ...(onUsage ? { stream_options: { include_usage: true } } : {}),
     });
     let content = "",
       pendingText = "";
@@ -138,11 +141,14 @@ export class Backend {
     };
     const calls = new Map<number, Call>();
     let finish: string | undefined;
+    let used: number | undefined;
     const consume = async (x: any, stream: boolean) => {
       if (x.error)
         throw new Error(
           "Backend rejected completion; check context size and function-calling support",
         );
+      const reported = completionContextTokens(x.usage);
+      if (reported !== undefined) used = reported;
       if (Array.isArray(x.choices) && x.choices.length === 0 && x.usage) return;
       const choice = x.choices?.[0];
       if (!choice) throw new Error("Malformed completion");
@@ -211,6 +217,8 @@ export class Backend {
         parseResponse(await bounded(r, signal, maxResponseBytes)),
         false,
       );
+    signal.throwIfAborted();
+    if (used !== undefined) await onUsage?.(used);
     if (finish === "length")
       throw new Error(
         "Context or response limit reached; history retained, no pending tools executed",

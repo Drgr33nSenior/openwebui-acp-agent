@@ -7,6 +7,7 @@ import {
 } from "./auth.js";
 import { userMcp } from "./user-mcp.js";
 import { normalizePrompt } from "./prompt.js";
+import { contextSize, contextUsageSchema, type ContextUsage } from "./usage.js";
 import { abortable } from "./cancel.js";
 import {
   loadPolicy,
@@ -153,6 +154,7 @@ type Session = {
   reasoning: string;
   choices: ReasoningChoice[];
   messages: Message[];
+  contextUsage?: ContextUsage;
   active: boolean;
   authEpoch: unknown;
   permissions: Permissions;
@@ -375,6 +377,7 @@ export function createAgent(
       permissionMode: s.permissions.savedMode(),
       sandboxMode: s.sandbox === "full_access" ? "workspace" : s.sandbox,
       messages: s.messages,
+      contextUsage: s.contextUsage,
       serverRuns: s.serverRuns,
     };
     if (JSON.stringify(value).length > 2_000_000)
@@ -1032,6 +1035,7 @@ export function createAgent(
         url: z.string(),
         model: z.string(),
         reasoning: z.string(),
+        contextUsage: contextUsageSchema.optional(),
         sandboxMode: z
           .string()
           .default("workspace")
@@ -1120,6 +1124,12 @@ export function createAgent(
           : run.state,
       })),
       messages: restoreHistory(saved.messages),
+      contextUsage:
+        !accessError &&
+        saved.contextUsage?.size ===
+          contextSize(metadata.find((m) => m.id === c.model))
+          ? saved.contextUsage
+          : undefined,
       active: false,
       authEpoch,
       permissions: new Permissions({
@@ -1158,6 +1168,11 @@ export function createAgent(
             m.role === "user" ? "user_message_chunk" : "agent_message_chunk",
           content: { type: "text", text: m.content },
         });
+    if (s.contextUsage)
+      await update(client, s, {
+        sessionUpdate: "usage_update",
+        ...s.contextUsage,
+      });
     await checkAuthentication(authEpoch);
     return { configOptions: options(s) };
   });
@@ -1188,6 +1203,7 @@ export function createAgent(
       );
       s.choices = reasoningChoices(s.metadata.find((m) => m.id === value));
       s.reasoning = "default";
+      s.contextUsage = undefined;
       s.serverTools = false;
       s.serverCatalog = undefined;
     } else if (id === "permissions") {
@@ -1438,6 +1454,9 @@ export function createAgent(
                 backend: s.config.url,
                 model: s.config.model,
                 reasoning: s.reasoning,
+                contextUsage: s.contextUsage ?? null,
+                contextUsageBasis:
+                  "Latest reported prompt plus completion tokens against advertised context_window, or max_input_tokens when unavailable; not a live tokenizer estimate or cumulative usage",
                 approvalReviewer: s.reviewer,
                 administratorPolicy: s.administrator,
                 reasoningChoices: s.choices,
@@ -1617,6 +1636,19 @@ export function createAgent(
             signal,
             (t) => text(client, s, t),
             reasoningPayload(s.config.model, s.reasoning, s.choices),
+            undefined,
+            async (used) => {
+              signal.throwIfAborted();
+              const size = contextSize(
+                s.metadata.find((m) => m.id === s.config.model),
+              );
+              if (size === undefined) return;
+              s.contextUsage = { used, size };
+              await update(client, s, {
+                sessionUpdate: "usage_update",
+                ...s.contextUsage,
+              });
+            },
           );
           s.messages.push(message);
           await save(s);

@@ -129,13 +129,68 @@ and a 512-token output limit verified a behavioral difference: the advertised
 Off value returned no reasoning content, while Low returned 223 reasoning
 characters and reported 107 reasoning tokens. No tools ran. This establishes
 observed behavior for those two values on that deployment, not other values or
-providers. The deployment extension's source provenance remains unresolved.
+providers. Subsequent inspection located the declaration adapter in the user's
+[Open WebUI fork](https://github.com/Drgr33nSenior/open-webui/blob/21bc3e3da87d25e988b412710bafcefd4b4261db/backend/open_webui/utils/models.py).
+The exact deployed build identity has not been verified.
 
 ACP config options use category `thought_level`; Model default omits override
 fields. Selection is validated, persisted and reset on model changes. Both local
 coding requests and delegated tasks preserve the selected mapping. Fixture tests
 cover malformed metadata, unsupported choices, precedence, defaults, persistence
 and model switching. Live IDE selector rendering remains an acceptance item.
+
+## Context usage
+
+The pinned SDK's stable v1 `UsageUpdate` and the
+[ACP prompt-turn specification](https://agentclientprotocol.com/protocol/v1/prompt-turn#session-usage-updates)
+define `session/update` with `sessionUpdate: "usage_update"`, `used` and `size`.
+No extra capability flag or JetBrains extension is required. The installed
+PyCharm ACP module contains `SessionUsageUpdatedEvent`, `handleSessionUsage` and
+`updateSessionUsage` handlers. This is client implementation evidence, not a
+completed visual acceptance test.
+
+Coding completions request `stream_options.include_usage: true`. The parser
+collects the latest valid usage record from ordinary or usage-only SSE events,
+including after the finish marker, or from a non-streaming response. It emits
+one snapshot per model call, not a sum of repeated events or tool rounds.
+The [Open WebUI API reference](https://docs.openwebui.com/reference/api-endpoints/)
+distinguishes latest-call `prompt_tokens`/`completion_tokens` from potentially
+aggregate `input_tokens`, `output_tokens`, `total_tokens` and cost. Only the
+latest-call fields, or the documented Ollama `prompt_eval_count`/`eval_count`
+equivalents, contribute to the wheel. Invalid, negative, fractional, overflowing
+or missing input counts are ignored. Missing output counts add nothing.
+
+The denominator prefers the model catalog's positive `context_window`, directly
+or in its `openai` metadata. When absent, it falls back to `max_input_tokens`, the
+usable input budget. It never adds `max_output_tokens`: scheduler headroom can
+be reserved separately. The numerator is a
+snapshot of reported prompt plus completion tokens; generated reasoning may be
+included in provider completion accounting, and later unsent inputs/tool results
+are not yet measured. It is not an exact tokenizer count of current local
+history. Unknown budgets/counts produce no fabricated usage update. The last
+valid snapshot remains available through `/status`; clients can retain their
+last display when no new measurement is available. No cost estimate is sent.
+
+Snapshots are session-local and persisted outside message history. Restoration
+requires the same advertised budget; old sessions without snapshots still load.
+Changing the model invalidates the previous measurement. Cancellation prevents
+late usage delivery. A completed response with a length limit can still report
+its measured count before the existing limit error; no pending tools execute.
+Separate advisory reviews and delegated server chats do not add their counters
+to the main session. This feature adds no compaction or new backend endpoint.
+
+The user's gateway source calculates the input budget from the full serving
+window minus output allowance and scheduler reserve. A bounded source change in
+`ArchLinuxThreadripper/apps/base/shared-api/boundary.py` now publishes
+`context_window` from the configured serving policy, preserving input/output
+fields. The source change is published in
+[gateway PR #179](https://github.com/Drgr33nSenior/ArchLinuxThreadripper/pull/179),
+not deployed. The Open WebUI fork's existing
+[catalog merge](https://github.com/Drgr33nSenior/open-webui/blob/21bc3e3da87d25e988b412710bafcefd4b4261db/backend/open_webui/routers/openai.py)
+already preserves arbitrary provider fields at the top level and in `openai`.
+No Open WebUI patch, endpoint, credential or live configuration change is needed
+for this pass-through. Clients receive the new field after the gateway change is
+deployed through its owner workflow and the model catalog cache refreshes.
 
 ## Authentication and version discrepancies
 

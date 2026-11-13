@@ -2,6 +2,63 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## ACP context usage wheel
+
+The agent now requests completion usage and emits stable v1 `usage_update`
+notifications. The counts describe the latest reported prompt plus completion
+against the catalog's advertised full context window, with an input-budget
+fallback when absent. No guessed tokenizer counts,
+model-family limits, cost estimates or automatic compaction were added.
+
+On macOS 27.0 arm64, Node 26.11.1, package 0.3.0: **147 tests passed**, with zero
+failures or skips. [Sanitized output](test-output-context.txt) includes six new
+tests for fragmented/duplicate usage-only SSE events, non-streaming/missing/bad
+usage, length errors, cancellation, multiple tool rounds, session isolation,
+restoration without replay, changed budgets and model switching. Lint, strict
+type checking and build passed. No dependency or permission behavior changed.
+
+Read-only inspection confirmed usage event handlers in the installed PyCharm
+2026.3 ACP module. The live model catalog advertises input/output limits, but a
+synthetic usage probe returned HTTP 503. A subsequent bounded probe returned
+HTTP 403. Live usage delivery and visual wheel rendering therefore remain
+unverified; those errors were not treated as successful integration tests. No
+server settings, credentials, workspace content or server chats were changed.
+Linux and Windows were not rerun for this change.
+
+The gateway metadata change passed **59 shared-service tests** using deterministic
+backends. The added test verifies an authoritative full window that differs from
+input plus output limits, preservation of those existing limits, unrelated model
+entries, and operation without reasoning controls. The suite reported a named
+private-candidate-input skip; no private qualification evidence was supplied.
+The required `make check-strict` entrypoint was attempted and blocked because
+`HOME_LAB_PYTHON` does not select a prepared private Python. No check was disabled.
+Open WebUI fork source inspection established existing metadata pass-through;
+that checkout remains unchanged. The gateway changes are published in
+[PR #179](https://github.com/Drgr33nSenior/ArchLinuxThreadripper/pull/179), not
+merged or deployed. After incorporating newer upstream source, the shared-service
+suite passed **64 tests**, retaining the named private-candidate-input skip.
+Live propagation and final IDE rendering remain acceptance work.
+
+Packing, offline installation with lifecycle scripts disabled, and the installed
+ACP/authentication/context-module/sandbox smoke test passed outside the checkout.
+Open WebUI Preview now launches
+`~/.local/share/openwebui-acp-agent/0.3.0-context-20261113-r2/node_modules/openwebui-acp-agent/dist/cli.js`.
+Only that registration changed. The private single-entry rollback record is
+`~/.jetbrains/acp.openwebui-preview.before-context-20261113T161428708721Z.json`.
+Reconnect the agent; the wheel needs a completion with valid usage data. Other
+agents, credentials, trust records and sessions were preserved.
+
+## Publication checks
+
+The initial public agent [CI run](https://github.com/Drgr33nSenior/openwebui-acp-agent/actions/runs/43451257425)
+failed its dependency audit and Ubuntu tests. The sandbox failures report
+`apply-seccomp: write /proc/self/setgroups` permission denial in a nested user
+namespace. These are real CI failures, not a Linux support pass. The matrix then
+cancelled macOS/Windows jobs. Matrix fail-fast is now disabled so each platform
+can report independently; all tests and the audit gate remain enabled. No runner
+security restriction was changed. The online audit still reports the high
+runtime/Zod advisory with sandbox runtime 0.0.83 as the latest upstream version.
+
 ## Provider reasoning selector and source-preview preparation
 
 The live deployment reports Open WebUI 0.13.3 and publishes provider reasoning

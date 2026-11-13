@@ -20,6 +20,11 @@ Before distribution:
   active `gh` account is Drgr33nSenior before GitHub operations.
 - Recheck package-name availability, publish an immutable version, then validate its downloadable artifact.
 - Run upstream registry schema, icon, packaging and authentication checks without weakening them. A local schema pass does not validate the existence of the package URL.
+- Resolve the hosted Ubuntu sandbox failures before claiming CI qualification.
+  The initial run denied nested user-namespace setup in the runtime's seccomp
+  helper. Keep those failures visible; do not disable sandbox enforcement or
+  tests. Platform jobs now run independently rather than cancelling on the first
+  failure. Earlier disposable-VM passes do not establish hosted-runner support.
 
 The latest upstream sandbox runtime remains 0.0.83 with Zod `^3.25.0`.
 `npm audit --omit=dev` reports

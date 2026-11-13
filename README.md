@@ -130,6 +130,21 @@ without recognized metadata expose only Model default. A live Off/Low probe
 showed different reasoning output; other levels and providers still need
 behavioral verification. See [API evidence](docs/design.md#reasoning).
 
+The IDE's **context usage wheel** receives standard ACP usage updates after each
+model call that reports token counts. It shows the latest reported prompt plus
+completion tokens against the model's advertised full window (`context_window`),
+falling back to the input budget (`max_input_tokens`) when that field is absent,
+not a cumulative token bill or an estimate while you type. It requests streaming
+usage and also handles non-streaming replies. The provider may omit counts.
+Without counts or a known limit, the agent does not invent a percentage.
+`/status` exposes the last snapshot and its basis.
+
+The snapshot survives session restoration when the model budget still matches.
+Changing models clears it in the agent until the new model reports usage; the
+client may keep its previous display until that update arrives. This display does
+not add automatic context compaction or truncate conversation history. Rendering
+depends on the ACP client. See [context reporting](docs/design.md#context-usage).
+
 The CLI provides `acp`, `login`, `logout`, `models`, `status`, `doctor`, `trust`, `trust revoke /absolute/workspace`, and `trust allow /absolute/workspace`. The last command explicitly clears a block and remembers trust; use it deliberately.
 
 ## Permissions and tools
