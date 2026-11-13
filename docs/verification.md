@@ -14,6 +14,11 @@ approved the existing bubblewrap AppArmor profile specifically for these
 disposable CI development runners. The workflow validates and loads that
 application profile without changing the global namespace restriction. No
 sandbox assertion, seccomp rule or network boundary was disabled.
+Ubuntu 26.04 already had a `bwrap` attachment. The first attempt loaded a second
+profile for the same executable and failed the minimal namespace probe. The user
+then explicitly approved replacing the disposable runner's existing `bwrap`
+profile, including its child-transition policy. Using one attachment resolved
+the failure. This CI-only exception is not automatically installed by the agent.
 
 The runtime's documented `zod/v3` compatibility import now resolves Zod 4.6.7.
 The runtime dependency tree is bundled: testing proved a root-only override
@@ -27,6 +32,7 @@ Observed local results with Node 26.11.1 / npm 11.20.0 on macOS:
 - `npm ci --ignore-scripts`: passed with the patched dependency resolution.
 - `npm run lint`, `npm run typecheck`, `npm run build`: passed.
 - `npm test`: **148 passed**, no failures or skips; includes real sandbox tests.
+  See [sanitized output](test-output-ci-fix.txt).
 - Prettier check of source, tests, manifests and lockfile: passed.
 - `npm pack`, separate-directory installation with lifecycle scripts disabled,
   installed runtime schema/advisory regression checks, ACP handshake and real
@@ -34,10 +40,22 @@ Observed local results with Node 26.11.1 / npm 11.20.0 on macOS:
 - Checkout and installed-tarball `npm audit --omit=dev --audit-level=high`:
   **zero vulnerabilities**. No advisory was suppressed.
 
-The hosted run for this fix is pending. Windows CI deliberately checks platform
-refusal behavior, package dependencies and initialization only; native Windows
-sandbox and persistence support remain deferred. No new live backend or IDE
-acceptance is claimed.
+Hosted [run 43466454765](https://github.com/Drgr33nSenior/openwebui-acp-agent/actions/runs/43466454765)
+at `70aa152` passed **all five jobs**:
+
+| Target | Observed result |
+| --- | --- |
+| Ubuntu 24.04.5, kernel 7.0.0-1017-azure, bubblewrap 0.9.0 | 145 passed; three existing macOS-only skips; installed-package sandbox passed |
+| Ubuntu 26.04.1, kernel 7.0.0-1019-azure, bubblewrap 0.11.1 | 145 passed; the same three skips; installed-package sandbox passed |
+| macOS 26.7.2 arm64, build 25G332 | 148 passed; no skips; installed-package sandbox passed |
+| Windows Server 2025, 10.0.26100 | Platform refusal test, installed dependency compatibility and ACP initialization passed |
+| Production dependency audit | Zero vulnerabilities; installed-package audits also passed on every platform |
+
+The Linux skips are two macOS PTY authentication tests and the macOS Keychain
+IPC test. No Linux enforcement test was skipped. Windows CI deliberately checks
+platform refusal behavior, package dependencies and initialization only; native
+Windows sandbox and persistence support remain deferred. No new live backend or
+IDE acceptance is claimed. Earlier failure records below are retained as history.
 
 ## ACP context usage wheel
 
