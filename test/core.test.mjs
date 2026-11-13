@@ -757,7 +757,7 @@ test("response limits count produced text, not protocol bytes", async () => {
     /Response limit exceeded/,
   );
 });
-test("a length stop keeps streamed text and never returns a cut-short tool call", async () => {
+test("a length stop keeps streamed text and signals recoverable truncation without a tool call", async () => {
   response = async (_, res) =>
     sse(res, [
       delta({ content: "half an answer" }),
@@ -773,17 +773,18 @@ test("a length stop keeps streamed text and never returns a cut-short tool call"
       delta({}, "length"),
     ]);
   let shown = "";
-  const m = await new Backend(conf, "secret").complete(
-    [],
-    [],
-    AbortSignal.timeout(5000),
-    async (t) => {
-      shown += t;
-    },
+  await assert.rejects(
+    new Backend(conf, "secret").complete(
+      [],
+      [],
+      AbortSignal.timeout(5000),
+      async (t) => {
+        shown += t;
+      },
+    ),
+    (error) => error.kind === "truncated" && /cut off/.test(error.message),
   );
-  assert.match(m.content, /^half an answer\n\n\[Output limit reached/);
-  assert.equal(m.tool_calls, undefined);
-  assert.match(shown, /Output limit reached/);
+  assert.equal(shown, "half an answer");
 });
 test("server error codes and Retry-After are reported; raw bodies are not", async () => {
   response = async (_, res) =>
