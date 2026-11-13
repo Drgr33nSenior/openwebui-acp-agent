@@ -72,3 +72,12 @@ permissions, validates the profile before loading it, and verifies that the
 global namespace restriction is unchanged. The profile exists only for the
 runner lifetime; no workstation or service configuration is changed. This
 approval does not apply to other hosts. See verification.md for observed runs.
+
+Ubuntu 26.04 already loads a profile named `bwrap`. The exception uses that
+same name so replacement updates one executable attachment rather than loading
+a competing profile for `/usr/bin/bwrap`. This replaces the runner's bwrap
+profile, including its child-transition policy; the runtime's namespaces,
+capability handling and seccomp remain the command boundary. Do not install this
+exception on another host without administrator review. An older test VM may
+still have the original `openwebui-acp-bwrap` name; do not load both profiles for
+the same executable. No existing VM profile was changed during the CI fix.
