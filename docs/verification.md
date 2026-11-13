@@ -911,3 +911,27 @@ Previous versions, the old helper, credentials, grants and transcripts remain in
 place. The default permission mode remains scoped approvals; no broader policy
 was enabled in a live user session by installation. Reconnect before checking the
 Permissions selector in PyCharm. OS sandboxing remains unimplemented.
+
+
+## Shared protected and secret paths (unreleased)
+
+A security review found three gaps.
+
+- The file tools protected `.git`, `.idea` and `.vscode`, but not other files that later run outside the sandbox. These include `.claude/settings*.json` hooks, `.husky/`, `.mcp.json`, `.gitmodules` and `.envrc`. The model could therefore write a hook, and in edits mode no prompt would appear.
+- `read_file` and the sandbox used different secret lists. A sandboxed `cat` of an in-workspace `id_ed25519`, `*.p12` or `.netrc` succeeded.
+- Development mode auto-approved commands that name credential-bearing files such as `.git/config`. The sandbox must keep that file readable for Git.
+
+`src/protected-paths.ts` now holds one list per concern, used by `workspace.ts`, `sandbox.ts` and `permissions.ts`.
+
+Evidence on macOS with Node 26.11.1:
+
+- Lint, strict type checking, build and Prettier passed. All 154 tests passed.
+- The real Seatbelt test now confirms the new rules. A sandboxed command cannot read `deploy/id_ed25519` or `.netrc`. It cannot write `.husky/pre-commit`, `.claude/settings.json` or `.envrc`. It can still read `.git/config`.
+- New tests cover the following:
+  - The lists stay a superset of sandbox-runtime 0.0.83's `DANGEROUS_FILES` and directories.
+  - Names match only whole path segments, so `id_ed25519.pub`, `environment.ts` and `.gitignore` are unaffected.
+  - The file tools read these files but refuse to write them.
+  - Commands naming secrets prompt, including `bash -c` and `HEAD:.npmrc`.
+
+Linux bubblewrap enforcement of the added write denies has not run locally; hosted CI covers it.
+\n

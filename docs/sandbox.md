@@ -43,10 +43,25 @@ the canonical workspace, invocation-specific temporary directory and explicitly
 approved program/read scopes. Other system paths remain readable for toolchain
 compatibility; this is not a container or a universal read allowlist. Known
 credential directories and common secret filenames are denied. File discovery
-still applies its own narrower sensitive-file and ignore rules.
+also hides agent and IDE state and applies ignore rules.
 
-Workspace `.git`, `.agents`, `.codex`, `.aws`, `.idea` and `.vscode` paths are
-protected against command writes. Agent distribution files and dependencies are
+`src/protected-paths.ts` keeps one list per concern, shared by the file tools,
+this policy and command auto-approval:
+
+- **Secrets** (`SECRET_NAMES`, at any depth), such as `.ssh`, `.aws`, `.env*`,
+  `.npmrc`, `.netrc`, `.pgpass`, `*.pem`, `*.key`, `*.p12`, `*.pfx` and `id_rsa`/`id_ed25519` keys.
+  These are refused to `read_file` and denied to sandboxed reads.
+- **Prompt-only names** (`PROMPT_ARGUMENT_NAMES`). These are the secrets plus `.git/config`,
+  `.kube`, `kubeconfig` and Terraform state. Tools that need them can still read
+  them, but a command naming one is never approved automatically, including in
+  development mode.
+- **Files that run outside the sandbox** (`EXECUTION_DIRECTORIES`,
+  `EXECUTION_FILES`): `.git`, `.agents`, `.codex`, `.aws`, `.idea`, `.vscode`,
+  `.claude`, `.husky`, `.githooks`, shell rc files, `.gitconfig`, `.gitmodules`,
+  `.mcp.json` and `.envrc`. The file tools can read them but never write them,
+  and they are protected against command writes. The list is a superset of the
+  pinned runtime's own protected files, and a test fails if a runtime update adds
+  one that is missing here. Agent distribution files and dependencies are
 also protected when they fall inside the workspace. A worktree's Git metadata
 outside its root is not implicitly granted; commands may need an explicit read
 exception for that metadata. Sibling worktrees remain separate scopes.

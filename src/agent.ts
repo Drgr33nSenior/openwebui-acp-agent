@@ -1541,8 +1541,9 @@ export function createAgent(
         await permitted(s, signal);
         // Supplied editor text may be newer than disk. Validate its path without
         // replacing it with a disk read; a missing unsaved file is acceptable.
+        // Reading it as context is not a write.
         for (const path of normalized.filePaths)
-          await target(s.root, path, true);
+          await target(s.root, path, true, false);
         await permitted(s, signal);
         if (
           s.servers.length &&

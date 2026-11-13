@@ -10,7 +10,13 @@ import { z } from "zod";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { directory } from "./config.js";
 import { childEnv } from "./commands.js";
-import { agentCodePaths } from "./protected-paths.js";
+import {
+  agentCodePaths,
+  EXECUTION_DIRECTORIES,
+  EXECUTION_FILES,
+  mentions,
+  SECRET_NAMES,
+} from "./protected-paths.js";
 
 export const sandboxModes = [
   {
@@ -106,7 +112,15 @@ export async function scopePaths(paths: string[]) {
       p === parse(p).root ||
       p === (await realpath(homedir())) ||
       inside(resolve(directory), p) ||
-      /(?:^|[/\\])(?:\.ssh|\.aws|\.config|\.codex|\.agents|\.env(?:\.[^/\\]*)?|\.npmrc|workstation-agent|Keychains|ide-mac-key\.json|retrieval-key|[^/\\]*\.(?:key|pem|p12))(?:[/\\]|$)/i.test(
+      mentions(
+        [
+          ...SECRET_NAMES,
+          ".config",
+          ".codex",
+          ".agents",
+          "workstation-agent",
+          "Keychains",
+        ],
         p,
       )
     )
@@ -121,14 +135,9 @@ export function sandboxPolicy(
   run: SandboxRun,
   temporary: string,
 ): SandboxRuntimeConfig {
-  const protectedPaths = [
-    ".git",
-    ".agents",
-    ".codex",
-    ".aws",
-    ".idea",
-    ".vscode",
-  ];
+  // Shared with the file tools (protected-paths.ts): sandboxed commands may not
+  // write what later runs outside the sandbox either.
+  const protectedPaths = [...EXECUTION_DIRECTORIES, ...EXECUTION_FILES];
   // Literal entries prevent metacharacters in workspace names broadening scope.
   const privatePaths = [
     resolve(directory),
@@ -166,15 +175,7 @@ export function sandboxPolicy(
           ...privatePaths,
         ].map(literal),
         ...contentRoots.flatMap((r) =>
-          [
-            "**/.env",
-            "**/.env.*",
-            "**/.npmrc",
-            "**/*.pem",
-            "**/*.key",
-            "**/ide-mac-key.json",
-            "**/retrieval-key",
-          ].map((p) => join(globLiteral(r), p)),
+          SECRET_NAMES.map((name) => join(globLiteral(r), "**", name)),
         ),
       ],
       allowRead: [

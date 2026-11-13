@@ -34,6 +34,11 @@ await writeFile(join(root, "public.txt"), "public");
 await writeFile(join(root, ".env"), "synthetic-not-a-real-secret");
 await mkdir(join(root, ".git"));
 await writeFile(join(root, ".git", "config"), "fixture-git-config");
+await mkdir(join(root, "deploy"));
+await writeFile(join(root, "deploy", "id_ed25519"), "synthetic-key-fixture");
+await writeFile(join(root, ".netrc"), "synthetic-netrc-fixture");
+await mkdir(join(root, ".husky"));
+await mkdir(join(root, ".claude"));
 await writeFile(join(sibling, "private.txt"), "synthetic-outside-content");
 await symlink(sibling, join(root, "escape"));
 const plan = { mode: "workspace", root, network: async () => false };
@@ -98,6 +103,12 @@ test("real OS sandbox permits workspace writes and denies sibling, symlink, sens
       outsideWrite:()=>fs.writeFileSync(${JSON.stringify(join(sibling, "bad.txt"))},'bad'),
       escape:()=>fs.readFileSync('escape/private.txt','utf8'),
       gitWrite:()=>fs.writeFileSync('.git/config','bad'),
+      gitConfigRead:()=>fs.readFileSync('.git/config','utf8'),
+      keyRead:()=>fs.readFileSync('deploy/id_ed25519','utf8'),
+      netrcRead:()=>fs.readFileSync('.netrc','utf8'),
+      hookWrite:()=>fs.writeFileSync('.husky/pre-commit','bad'),
+      claudeWrite:()=>fs.writeFileSync('.claude/settings.json','bad'),
+      envrcWrite:()=>fs.writeFileSync('.envrc','bad'),
       temporary:()=>fs.writeFileSync(path.join(process.env.TMPDIR,'local.txt'),'ok')
     })) { try { fn(); r[name]=true; } catch { r[name]=false; } }
     console.log(JSON.stringify(r));
@@ -111,6 +122,12 @@ test("real OS sandbox permits workspace writes and denies sibling, symlink, sens
     outsideWrite: false,
     escape: false,
     gitWrite: false,
+    gitConfigRead: true,
+    keyRead: false,
+    netrcRead: false,
+    hookWrite: false,
+    claudeWrite: false,
+    envrcWrite: false,
     temporary: true,
   });
   assert.equal(
