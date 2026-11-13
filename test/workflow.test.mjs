@@ -255,7 +255,7 @@ test("Plan mode enforces read-only tools before forged mutations and never conne
     ]) {
       assert.match(
         results.find((r) => r.tool_call_id === id).content,
-        /Tool failed or permission declined/,
+        /Tool failed: Operation disabled in read-only mode/,
       );
       assert(
         events(c).some((u) => u.toolCallId === id && u.status === "failed"),

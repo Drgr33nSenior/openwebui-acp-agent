@@ -2,6 +2,56 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## Coding harness recovery (unreleased)
+
+The coding loop now returns specific tool errors, redacted before a 2,000-character
+cap. Stale-edit failures instruct the model to read the current file again. A
+user permission denial has its own message and explicitly forbids retrying or
+finding another route. Existing policy checks, atomic writes and approvals still
+run before execution.
+
+The default round budget is 40, with a maximum of 100. Explicit existing values
+are unchanged. The separate 64-tool-call budget is retained. Either limit produces
+a bounded report of tool-result counts, changed files and remaining plan steps;
+returned results do not establish that checks passed. Every returned tool call,
+including an unexecuted over-budget call, has a paired result in history.
+
+A truncated or malformed coding reply gets at most one corrected inference
+request per round. Every call's JSON is checked before any call in that reply can
+execute. Emitted partial text and an assistant-role correction marker are kept;
+the marker does not replace the user request that compaction preserves. Retry
+counts and error categories go to stderr without arguments, messages or secrets.
+A second failure stops with an explanation. Authentication, HTTP, network,
+content-filter and resource-limit failures are not re-asked automatically.
+
+Argument repair is schema-directed: nullable `"null"`, JSON-encoded arrays/objects
+and extra keys in simple closed object schemas. Numbers and booleans are not
+coerced. Complex reference, pattern and conditional schemas are left unchanged;
+normal validation follows repair. The short workflow prompt asks for targeted
+reads, minimal edits, project checks and stopping when permission blocks work.
+It applies to new sessions; restored system instructions and `AGENTS.md` handling
+are unchanged. The command description is shorter, while detailed sandbox failure
+guidance remains in tool results.
+
+On macOS 27.0 with Node 26.11.1/npm 11.20.0, `npm ci`, `npm run typecheck`,
+`npm run lint`, `npx --no-install prettier --check src test package.json package-lock.json registry/agent.json`,
+`npm run build` and `node --test test/*.test.mjs` passed: **236 tests, zero failures
+or skips**, including 21 new harness regressions. `npm ci` audited 193 packages
+with zero vulnerabilities; dependency versions and the lockfile are unchanged.
+Sanitized output is in [test-output-harness.txt](test-output-harness.txt).
+Documentation clarity audits passed. An additional whole-document Prettier check
+reported formatting differences in README and this record that also exist on
+the base commit; the repository-required formatter scope above passed.
+
+Tests cover specific validation/stale errors, distinct denials, redaction and
+caps, the prompt snapshot, declared coercions and non-coercible input, schema
+patterns/prototype keys, one recovery per round and cumulative counting, malformed
+later calls preventing earlier mutations, cancellation during a re-ask, no retries
+for HTTP/content-filter/resource failures, UTF-8 failure recovery and bounded
+round/tool limits. Existing interruption, permissions and real macOS sandbox
+checks also passed. Live model/parser quality, interactive IDE acceptance and
+Linux/Windows execution of this change remain unverified.
+
 ## Interrupting a turn (unreleased)
 
 Before implementation, a user-assisted capture ran the installed agent 0.3.0

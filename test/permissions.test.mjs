@@ -810,8 +810,15 @@ for (const [mode, code, output, expectHint] of [
       const description = request.tools.find(
         (t) => t.function.name === "run_command",
       ).function.description;
-      assert.match(description, /cannot be used by later commands/);
-      assert.match(description, /never hard-code shared \/tmp or \/var\/tmp/);
+      assert.match(
+        description,
+        /TMPDIR for temporary files within one command/,
+      );
+      assert.match(
+        description,
+        /workspace-relative paths for persistent files/,
+      );
+      assert.ok(description.length < 400);
       assert.equal(c.executed.length, 1);
     } finally {
       await c.close();
