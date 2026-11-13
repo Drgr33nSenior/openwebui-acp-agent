@@ -952,4 +952,4 @@ Evidence on macOS with Node 26.11.1:
   - The file tools read these files but refuse to write them.
   - Commands naming secrets prompt, including `bash -c` and `HEAD:.npmrc`.
 
-Linux bubblewrap enforcement of the added write denies has not run locally; hosted CI covers it.
+Hosted CI on Ubuntu then found that a `.claude` write deny broke every sandboxed command (`bwrap: Can't create file at …/.claude/commands: Read-only file system`). The runtime appends its own `.claude/commands` and `.claude/agents` denies after a configured parent, and bubblewrap cannot create a mountpoint below a read-only parent. The policy now emits those child denies first, as it already did for `.git`. A cross-platform policy test checks the ordering; it fails on the broken order and passes on the fix.

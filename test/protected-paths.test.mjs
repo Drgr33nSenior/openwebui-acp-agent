@@ -29,6 +29,35 @@ test("protected lists cover everything the pinned sandbox runtime protects", asy
     assert(PROMPT_ARGUMENT_NAMES.includes(name), name);
 });
 
+test("runtime child denies precede their protected parents (Linux bubblewrap mountpoints)", async () => {
+  // bwrap cannot create a mountpoint for a child below an already read-only
+  // parent, and the runtime appends its own child denies after ours.
+  const { sandboxPolicy } = await import("../dist/sandbox.js");
+  const runtime = dirname(
+    fileURLToPath(import.meta.resolve("@anthropic-ai/sandbox-runtime")),
+  );
+  const utils = await import(
+    pathToFileURL(join(runtime, "sandbox", "sandbox-utils.js")).href
+  );
+  const root = "/workspace/project";
+  const denied = sandboxPolicy(
+    { mode: "workspace", root, network: async () => false },
+    "/tmp/isolated",
+  ).filesystem.denyWrite.map((entry) => entry.path ?? entry);
+  const children = [
+    ".git/hooks",
+    ".git/config",
+    ...utils.getDangerousDirectories().filter((d) => d.includes("/")),
+  ];
+  for (const child of children) {
+    const parent = child.split("/")[0];
+    if (!EXECUTION_DIRECTORIES.includes(parent)) continue;
+    const c = denied.indexOf(join(root, child)),
+      p = denied.indexOf(join(root, parent));
+    assert(c >= 0 && p >= 0 && c < p, `${child} must precede ${parent}`);
+  }
+});
+
 test("names match whole path segments at any depth, never substrings", () => {
   for (const value of [
     "deploy/id_ed25519",

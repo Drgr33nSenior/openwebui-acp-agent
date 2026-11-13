@@ -197,9 +197,15 @@ export function sandboxPolicy(
           // parents. On Linux, a missing child then cannot get its mountpoint
           // below the read-only parent. Emit the SAME child denies first; the
           // runtime deduplicates its copies. Keep the full .git deny as well.
-          [".git/hooks", ".git/config", ...protectedPaths].map((p) =>
-            join(r, p),
-          ),
+          // The same applies to .claude: the runtime adds .claude/commands and
+          // .claude/agents after a configured .claude parent.
+          [
+            ".git/hooks",
+            ".git/config",
+            ".claude/commands",
+            ".claude/agents",
+            ...protectedPaths,
+          ].map((p) => join(r, p)),
         ),
         ...agentCodePaths(),
         "/tmp/claude",
