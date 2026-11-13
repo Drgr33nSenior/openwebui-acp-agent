@@ -138,9 +138,12 @@ export class Permissions {
   constructor(binding: unknown) {
     this.scope = fingerprint(binding);
   }
-  async selectMode(value: string) {
+  async selectMode(value: string, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const mode = parsePermissionMode(value);
-    this.modeEpoch = elevated(mode) ? (await this.prepare()).epoch : undefined;
+    const epoch = elevated(mode) ? (await this.prepare()).epoch : undefined;
+    signal?.throwIfAborted();
+    this.modeEpoch = epoch;
     this.currentMode = mode;
   }
   async mode() {

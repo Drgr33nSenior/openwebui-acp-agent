@@ -284,6 +284,12 @@ required.
 
 Transcripts are local `session-UUID.json` files. They retain model selection, reasoning and message/tool history. Loading rechecks the workspace and destination and never executes saved tool calls. Interrupted outcomes are marked unknown. The ordinary coding loop creates no Open WebUI chat records. Approved Open WebUI-managed tasks create retained server chats as disclosed in their approval; the agent does not delete them.
 
+A new prompt interrupts a running turn and waits for cleanup before starting.
+If several prompts arrive while cleanup is pending, only the latest starts.
+Partial streamed text and completed tool results remain in history. Stop also
+cancels a waiting replacement. The client controls whether you can send while
+the agent is busy; the tested PyCharm AI Assistant requires Stop first.
+
 Limits include 32 sessions per process, 64 calls per turn, 1 MB response/context budget, 2 MB per transcript, 1000 transcripts and a 64 MB aggregate storage budget. Quota exhaustion stops work; automatic history truncation and deletion are not implemented. Stop the agent and delete selected `session-UUID.json` files to remove history. Preserve configuration and trust unless you also intend to remove them. Transcripts can contain project content; known configured credentials are redacted, but arbitrary secrets embedded in user text cannot be identified reliably.
 
 No telemetry or analytics is added. Open WebUI and its model providers have independent logging and data-handling policies.
