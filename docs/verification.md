@@ -2,6 +2,89 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## Browser phase A (unreleased)
+
+The native macOS spike could not launch Chromium headless shell under the
+agent's existing sandbox: `bootstrap_check_in` failed with Mach bootstrap error
+1100, followed by `SIGTRAP`. The user selected a local HTTP container with ACP
+approval for every browser tool call. This is the implemented route; native
+sandboxed browser support is not established.
+
+The separate wrapper pins Microsoft `@playwright/mcp` 0.0.85, `playwright` and
+`playwright-core` 1.66.0-alpha-2026-11-09, and MCP SDK 1.32.2 through its lockfile.
+Chromium is 158.0.8127.18, revision 1254. The Docker base is Node 24.22.3 on
+bookworm-slim, pinned by digest in [the Dockerfile](../browser/Dockerfile).
+Setup uses `npm ci --ignore-scripts`; browser binaries are installed inside the
+image. The wrapper uses an isolated profile, headless accessibility tools,
+blocked service workers, disabled downloads and temporary output/cache paths.
+See [browser setup and boundaries](browser.md).
+
+Explicit user MCP configuration now supports strict per-server options. Catalog
+filtering excludes tools absent from the exact allowlist, including future tool
+names. The browser route excludes evaluation, arbitrary code, uploads, browser
+installation, screenshots and PDF output. Optional `filename` output is hidden
+and rejected before execution. Images are stripped; oversized text truncates
+with a `browser_find` hint. HTTP JSON, SSE events and stdio frames have bounds
+before parsing; frame overflow closes the connection rather than bypassing the
+text limit. Unknown or invalid configuration fails closed.
+
+Navigation requests show their complete URL with secrets redacted. The loopback
+HTTP route requires approval on every call, even when a scoped grant exists.
+A timed-out configured HTTP call is never replayed: a bounded ping retains a
+responsive connection, while an unresponsive connection closes. Cancellation
+stops the wait and the agent sends DELETE for its owned HTTP session during
+cleanup. Browser continuity is limited to one agent turn; it does not restore a
+profile across new turns.
+
+This scope assumes a single trusted local user. The loopback MCP endpoint has no
+client authentication. Container outbound Internet and LAN access does not pass
+through the agent's per-destination proxy. Page content remains untrusted, and
+approving a navigation does not establish that the page or its scripts are safe.
+The container does not use the user's browser profile or mount the workspace,
+home, credentials or Docker socket.
+
+On macOS 27.0 with Node 26.11.1/npm 11.20.0, the root agent passed `npm ci`,
+typecheck, lint, the repository Prettier scope, build and **247 tests, zero
+failures or skips**. `npm ci` audited 193 packages with zero vulnerabilities.
+The new browser test establishes its private state directory before importing
+application modules and checks that directory before writing. The full run also
+selected fresh external `OPENWEBUI_ACP_HOME` before Node started and confirmed
+that the fallback directory remained empty. Sanitized output is in
+[test-output-browser-agent.txt](test-output-browser-agent.txt).
+
+The final wrapper suite passed **17 tests**, including Host/Origin and request
+bounds, exact settings and catalog, private cache isolation, repeated session
+cleanup and cancellation during lazy browser creation. The wrapper dependency
+audit reported zero vulnerabilities. A live smoke test found that the pinned
+MCP API's default browser factory retained Chromium after session closure. The
+wrapper now owns a fresh nonpersistent context through public Playwright APIs
+and closes its browser when the MCP session ends.
+
+On Docker Engine 29.6.2 through Docker Desktop (Linux arm64), the final restricted image passed both a
+container-local fixture and a fixture served on the Mac's loopback interface:
+**12 successive isolated sessions, 32 tool calls and 12 fixture requests**.
+Checks covered navigation, finding controls, typing, clicking, snapshots and
+profile isolation. Inspection confirmed the non-root user, read-only root,
+dropped capabilities, no-new-privileges, loopback publication and no host mounts.
+The unchanged 256-process limit recorded no limit events; final process/thread
+count was 21, with no memory-limit or OOM events. Only the owned test container
+was stopped. No external site or model inference was used. The first image build
+encountered a Docker metadata I/O error; one unchanged retry succeeded without
+pruning Docker data or changing settings.
+
+`npm pack` and installation outside the checkout passed. The installed agent
+passed its ACP/authentication discovery, context module and real sandbox smoke
+checks, and its dependency audit reported zero vulnerabilities. Explicit package
+file entries include the wrapper and its lockfile but exclude its installed
+dependencies and browser binaries. Sanitized wrapper/container/package evidence
+is in [test-output-browser-container.txt](test-output-browser-container.txt).
+
+A separate CI workflow builds the same restricted Compose service and exercises
+a container-local fixture. Hosted results are recorded below when observed.
+Interactive IDE/model use, Qwen Code, native Windows and Linux host-service
+routing remain unverified. The Qwen Code setup is documented separately and does
+not acquire this agent's sandbox or permission enforcement.
+
 ## Coding harness recovery (unreleased)
 
 The coding loop now returns specific tool errors, redacted before a 2,000-character

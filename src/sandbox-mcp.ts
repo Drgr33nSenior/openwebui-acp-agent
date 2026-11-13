@@ -13,14 +13,23 @@ export class SandboxMcpTransport implements Transport {
   onerror?: (error: Error) => void;
   onmessage?: (message: JSONRPCMessage) => void;
   private process?: Awaited<ReturnType<typeof startSandbox>>;
-  private buffer = new ReadBuffer({ maxBufferSize: 256000 });
+  private buffer: ReadBuffer;
   private failed = false;
   constructor(
     private executable: string,
     private args: string[],
     private run: SandboxRun,
     private signal: AbortSignal,
-  ) {}
+    private maxFrameBytes = 256000,
+  ) {
+    if (
+      !Number.isInteger(maxFrameBytes) ||
+      maxFrameBytes < 256000 ||
+      maxFrameBytes > 8000000
+    )
+      throw new Error("Invalid MCP frame limit");
+    this.buffer = new ReadBuffer({ maxBufferSize: maxFrameBytes });
+  }
   async start() {
     if (this.process) throw new Error("MCP transport already started");
     this.process = await startSandbox(
@@ -65,7 +74,7 @@ export class SandboxMcpTransport implements Transport {
     if (!this.process || this.failed)
       throw new Error("MCP transport not started or failed");
     const line = serializeMessage(message);
-    if (Buffer.byteLength(line) > 256000)
+    if (Buffer.byteLength(line) > this.maxFrameBytes)
       throw new Error("MCP message too large");
     await new Promise<void>((resolve, reject) => {
       this.process!.child.stdin!.write(line, (e) =>

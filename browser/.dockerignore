@@ -1,0 +1,10 @@
+*
+!Dockerfile
+!package.json
+!package-lock.json
+!index.mjs
+!worker.mjs
+!server.mjs
+!connection.mjs
+!settings.mjs
+!allowed-tools.json

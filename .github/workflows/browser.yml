@@ -1,0 +1,45 @@
+name: browser container
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: browser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.3"
+          cache: npm
+          cache-dependency-path: browser/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm audit --omit=dev --audit-level=high
+      - run: docker compose build
+      - run: docker compose up --detach
+      - name: Wait for the owned loopback endpoint
+        run: |
+          node --input-type=module <<'JS'
+          let ready = false;
+          for (let attempt = 0; attempt < 30; attempt++) {
+            try {
+              ready = (await fetch('http://127.0.0.1:8931/mcp', {
+                signal: AbortSignal.timeout(1000),
+              })).status === 400;
+            } catch {}
+            if (ready) break;
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+          if (!ready) throw new Error('Browser container did not become ready');
+          JS
+      - name: Exercise the browser against a container-local fixture
+        run: |
+          docker compose exec -T --workdir /opt/openwebui-browser browser \
+            node --input-type=module - --url http://127.0.0.1:8931/mcp \
+            --fixture-host 127.0.0.1 < smoke.mjs
+      - name: Stop the owned test container
+        if: always()
+        run: docker compose down --timeout 5
