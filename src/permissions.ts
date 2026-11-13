@@ -3,6 +3,7 @@ import { open, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { z } from "zod";
 import { directory, privateDir, readJson, writeJson } from "./config.js";
+import { mentions, PROMPT_ARGUMENT_NAMES } from "./protected-paths.js";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const grantSchema = z
@@ -299,6 +300,10 @@ export function repeatableCommand(
     )
   )
     return false;
+  // A command that names secret or credential-bearing files always asks, even in
+  // development mode: the sandbox must leave some of them readable (Git reads
+  // .git/config), and their contents would reach the model and the server.
+  if (args.some((a) => mentions(PROMPT_ARGUMENT_NAMES, a))) return false;
   if (["sh", "bash", "zsh"].includes(name)) {
     if (args.length !== 2 || !["-c", "-lc"].includes(args[0]!)) return false;
     const commands = literalShellCommands(args[1]!);

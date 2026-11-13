@@ -13,7 +13,13 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import ignore from "ignore";
 import { directory, readJson, writeJson, privateDir } from "./config.js";
-import { agentCodePaths } from "./protected-paths.js";
+import {
+  agentCodePaths,
+  EXECUTION_DIRECTORIES,
+  EXECUTION_FILES,
+  namesPattern,
+  SECRET_NAMES,
+} from "./protected-paths.js";
 const records = z.record(
   z.string(),
   z.object({ destination: z.string(), allow: z.boolean() }).strict(),
@@ -58,9 +64,31 @@ export async function changeTrust(
     await unlink(lock);
   }
 }
-const sensitive =
-  /(^|\/)(\.git|\.agents|\.codex|\.idea|\.vscode|\.ssh|\.aws|\.config|\.npmrc|\.env(?:\..*)?|.*\.(?:pem|key|p12)|ide-mac-key\.json|retrieval-key|node_modules)(\/|$)/i;
-export async function target(r: string, input: string, create = false) {
+// Hidden from the file tools for reading and writing: agent and IDE state, and secrets.
+const sensitive = new RegExp(
+  `(^|/)(?:${namesPattern([
+    ".git",
+    ".agents",
+    ".codex",
+    ".idea",
+    ".vscode",
+    ".config",
+    "node_modules",
+    ...SECRET_NAMES,
+  ])})(/|$)`,
+  "i",
+);
+// Readable, but never written by the agent: their contents run outside the sandbox.
+const executionConfig = new RegExp(
+  `(^|/)(?:${namesPattern([...EXECUTION_DIRECTORIES, ...EXECUTION_FILES])})(/|$)`,
+  "i",
+);
+export async function target(
+  r: string,
+  input: string,
+  create = false,
+  write = create,
+) {
   const candidate = resolve(r, input),
     privateRelative = relative(resolve(directory), candidate);
   for (const protectedPath of agentCodePaths()) {
@@ -88,6 +116,10 @@ export async function target(r: string, input: string, create = false) {
     sensitive.test(rel.replaceAll("\\", "/"))
   )
     throw new Error("Path outside permitted scope or sensitive");
+  if (write && executionConfig.test(rel.replaceAll("\\", "/")))
+    throw new Error(
+      "Protected path: files here run outside the sandbox; edit them yourself",
+    );
   let cur = r;
   for (const part of rel.split(/[\\/]/)) {
     cur = join(cur, part);
