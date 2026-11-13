@@ -1,6 +1,31 @@
 import type { McpServer } from "@agentclientprotocol/sdk";
 import { isAbsolute } from "node:path";
 
+// The verified IDE descriptor contains public routing metadata as well as its
+// credential. Treat all other MCP values conservatively as secrets.
+export function mcpSecrets(servers: McpServer[]): string[] {
+  return servers.flatMap((server) => {
+    const fields = "command" in server ? server.env : server.headers;
+    let ide = false;
+    try {
+      ide = ideMcpConnection(server) !== server;
+    } catch {
+      // Invalid definitions remain fully redacted; activation validates them.
+    }
+    return fields
+      .filter(
+        (field) =>
+          !ide ||
+          ![
+            "IJ_MCP_SERVER_PROJECT_PATH",
+            "IJ_MCP_SERVER_PORT",
+            "IJ_MCP_DEBUG",
+          ].includes(field.name),
+      )
+      .map((field) => field.value);
+  });
+}
+
 // Verified against PyCharm 2026.3 (263.7307.206): the native stdio runner
 // forwards IJ_MCP_* headers to localhost /sse, excluding IJ_MCP_DEBUG and
 // removing only the IJ_MCP_HEADER_ prefix. Do not launch or inspect IDE code.
