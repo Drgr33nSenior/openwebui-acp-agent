@@ -2,6 +2,47 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## Automatic verification after edits (unreleased)
+
+Implemented from `main` at `c095051`, retaining PR #6's interrupt-and-replace
+behavior. The running PyCharm MCP server reported version 2026.3 and 66 tools
+through an actual `tools/list` request. Installed PyCharm build: 263.7307.206;
+IntelliJ IDEA build: 263.7307.200. The catalog and separate live Air IDE
+file-problems result are recorded in [IDE diagnostic contracts](ide-diagnostics.md).
+Only `get_file_problems` receives the scoped diagnostic exemption; a same-named
+tool on another server, terminal tools, run configurations and refactoring do not.
+
+Successful `write_file` operations trigger bounded IDE diagnostics when the model
+tries to finish. Errors can request two repair attempts by default. Optional
+private configuration declares sandboxed checks for exact workspace roots.
+Commands now accept `timeout_ms`: default 120000, maximum 600000. Approval
+records include that timeout; approving one duration does not approve a longer
+one. No project instructions are executed as configuration.
+
+On macOS with Node 26.11.1 and npm 11.20.0, `npm ci`, `npm run typecheck`,
+`npm run lint`, `prettier --check src test package.json package-lock.json registry/agent.json`,
+`npm run build`, and `node --test test/*.test.mjs` passed. The full suite passed
+**240 tests, zero failures or skips**. The first full run identified five older
+approval-payload assertions that needed the new timeout field; those assertions
+now verify the field as well as the original executable, argv and cwd.
+Sanitized final output is in [test-output-verification.txt](test-output-verification.txt).
+
+Tests cover edit/read-only triggers, bridge absence and provenance, schema/path
+restrictions, malicious read-only annotations, repair limits, malformed and
+partial diagnostics, deduplication and aggregate output caps. They also cover
+project opt-in, command limits, declined checks, full-access refusal, policy and
+trust revocation, cancellation, interrupted checks with paired history, and stale
+check invalidation after MCP mutations. Reused partial results remain historical
+and cannot trigger additional repairs from stale errors. Independent source
+review found no remaining defects after these corrections.
+
+Live discovery and a read-only diagnostic call do not establish an end-to-end
+IDE/model repair cycle. That interactive acceptance remains unverified. The
+initial tracker covers `write_file` changes; arbitrary shell/MCP-only edits do
+not supply a changed-file journal. Hosted cross-platform CI results belong to
+the feature PR and are separate from this local macOS run. No live deployment,
+credential, IDE registration or existing session was changed for this feature.
+
 ## Interrupting a turn (unreleased)
 
 Before implementation, a user-assisted capture ran the installed agent 0.3.0

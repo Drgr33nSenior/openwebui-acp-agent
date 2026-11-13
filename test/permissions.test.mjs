@@ -680,6 +680,7 @@ for (const [executable, args] of [
         executable,
         args,
         cwd,
+        timeout_ms: 120000,
       });
       const events = c.updates.filter((u) => u.toolCallId === first.id);
       assert.equal(
@@ -1315,6 +1316,25 @@ test("policy monitoring cancels an active owned runner when administrator rules 
     assert.equal(result.stopReason, "cancelled");
     assert.equal(aborted, true);
     assert.equal(c.executed.length, 0);
+  } finally {
+    await c.close();
+  }
+});
+
+test("remembering a command does not approve a longer execution timeout", async () => {
+  const cwd = await workspace();
+  const c = await client(cwd, (p) => (isTool(p) ? "session" : "once"));
+  try {
+    for (const timeout_ms of [120000, 180000, 180000])
+      await invoke(c, [
+        call("run_command", { executable: "ls", args: [], timeout_ms }),
+      ]);
+    const approvals = c.approvals.filter(isTool);
+    assert.deepEqual(
+      approvals.map((p) => p.toolCall.rawInput.timeout_ms),
+      [120000, 180000],
+    );
+    assert.equal(c.executed.length, 3);
   } finally {
     await c.close();
   }

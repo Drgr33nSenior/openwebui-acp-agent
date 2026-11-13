@@ -1,4 +1,14 @@
 import { spawn } from "node:child_process";
+export const DEFAULT_COMMAND_TIMEOUT_MS = 120000;
+export const MAX_COMMAND_TIMEOUT_MS = 600000;
+export function validateCommandTimeout(timeoutMs: number) {
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > MAX_COMMAND_TIMEOUT_MS
+  )
+    throw new Error("Command timeout must be an integer from 1 to 600000 ms");
+}
 export function childEnv() {
   const env: Record<string, string> = {};
   for (const name of [
@@ -21,9 +31,10 @@ export async function command(
   args: string[],
   cwd: string,
   signal: AbortSignal,
-  limits = { timeoutMs: 30000, outputBytes: 100000 },
+  limits = { timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS, outputBytes: 100000 },
 ) {
   signal.throwIfAborted();
+  validateCommandTimeout(limits.timeoutMs);
   return new Promise<string>((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd,
