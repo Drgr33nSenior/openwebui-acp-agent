@@ -26,7 +26,17 @@ import {
   unavailableVerification,
   type VerificationResult,
 } from "./verification.js";
-import { Jobs } from "./jobs.js";
+import { Jobs, jobStatusText, type JobPoll } from "./jobs.js";
+import {
+  checkpointTurnsSchema,
+  rewindPlan,
+  tagCheckpoints,
+  truncatedCompaction,
+  turnSummaries,
+  userTurns,
+  UNTRACKED_TURN,
+  type CheckpointTurns,
+} from "./rewind.js";
 import {
   Preview,
   previewSchema,
@@ -59,6 +69,7 @@ import { quarantineCreatedFile, UndoRecoveryError } from "./undo-created.js";
 import {
   compactionStateSchema,
   PROJECT_GUIDANCE_PREFIX,
+  STEERING_PREFIX,
   compactHistory,
   type CutOptions,
   canCompact,
@@ -84,7 +95,12 @@ import {
   type ContextUsage,
 } from "./usage.js";
 import { abortable } from "./cancel.js";
-import { Turns, MAX_QUEUED_PROMPTS, type PromptMode } from "./turns.js";
+import {
+  Turns,
+  MAX_QUEUED_PROMPTS,
+  promptModes,
+  type PromptMode,
+} from "./turns.js";
 import {
   loadPolicy,
   enforceDestination,
@@ -110,6 +126,7 @@ import {
   type PromptResponse,
 } from "@agentclientprotocol/sdk";
 import { randomUUID } from "node:crypto";
+import { lstat } from "node:fs/promises";
 import { relative } from "node:path";
 import { z } from "zod";
 import {
@@ -294,6 +311,10 @@ type Session = {
   jobs: Jobs;
   preview: Preview;
   checkpoints: Checkpoint[];
+  // Turn that created each checkpoint, for /rewind. Never grants anything.
+  checkpointTurns: CheckpointTurns;
+  // Tool calls reported as failed, so session/load replays their real status.
+  failedToolCalls: Set<string>;
   instructions: ProjectInstruction[];
   instructionReviewRequired?: boolean;
   root: string;
@@ -417,11 +438,16 @@ export function createAgent(
     if (!s) throw RequestError.invalidParams();
     return s;
   };
-  const update = (client: AgentContext, s: Session, update: SessionUpdate) =>
-    client.notify("session/update", {
+  const update = (client: AgentContext, s: Session, update: SessionUpdate) => {
+    if (update.sessionUpdate === "tool_call_update" && update.status) {
+      if (update.status === "failed") s.failedToolCalls.add(update.toolCallId);
+      else s.failedToolCalls.delete(update.toolCallId);
+    }
+    return client.notify("session/update", {
       sessionId: s.id,
       update: JSON.parse(s.backend.redact(JSON.stringify(update))),
     });
+  };
   const text = (client: AgentContext, s: Session, value: string) =>
     update(client, s, {
       sessionUpdate: "agent_message_chunk",
@@ -451,6 +477,7 @@ export function createAgent(
               "jobs",
               "checkpoints",
               "undo",
+              "rewind",
               "help",
               "compact",
               "autocompact",
@@ -618,10 +645,11 @@ export function createAgent(
             type: "select",
             currentValue: s.promptMode,
             description:
-              "For prompts delivered while busy. Stop cancels active and queued work. The client controls whether sending while busy is available.",
+              "For prompts delivered while busy. Steer adds the message to the running turn after its current tool step, or queues it if the turn ends first. Stop cancels active and waiting work. The client controls whether sending while busy is available.",
             options: [
               { value: "interrupt", name: "Interrupt current turn" },
               { value: "queue", name: "Queue after current turn" },
+              { value: "steer", name: "Steer current turn" },
             ],
           },
           {
@@ -635,6 +663,13 @@ export function createAgent(
             ],
           },
         ];
+  // Failed tool-call IDs still present in the transcript; bounded with it.
+  const failedCalls = (s: Session) => {
+    const ids = new Set(
+      s.messages.flatMap((m) => m.tool_calls?.map((c) => c.id) ?? []),
+    );
+    return [...s.failedToolCalls].filter((id) => ids.has(id)).slice(-2000);
+  };
   const sessionRecord = (s: Session, checkpoints = s.checkpoints) => {
     const value = {
       title: s.title,
@@ -659,6 +694,12 @@ export function createAgent(
       }),
       workflow: s.workflow,
       promptMode: s.promptMode,
+      checkpointTurns: tagCheckpoints(
+        s.checkpointTurns,
+        checkpoints,
+        userTurns(s.messages).length,
+      ),
+      failedToolCalls: failedCalls(s),
       plan: planSchema.parse(
         s.plan.map((entry) => ({
           ...entry,
@@ -672,7 +713,9 @@ export function createAgent(
     return value;
   };
   const save = async (s: Session) => {
-    await writeJson("session-" + s.id + ".json", sessionRecord(s));
+    const record = sessionRecord(s);
+    s.checkpointTurns = record.checkpointTurns;
+    await writeJson("session-" + s.id + ".json", record);
   };
   const reserveEditStorage = async (s: Session, checkpoints: Checkpoint[]) => {
     const record = sessionRecord(s, checkpoints);
@@ -1337,6 +1380,214 @@ export function createAgent(
       ],
     };
   };
+  // Current editor/disk text, or null only when the file is confirmed absent.
+  const currentText = async (
+    client: AgentContext,
+    s: Session,
+    path: string,
+    absolute: string,
+    signal: AbortSignal,
+  ) => {
+    try {
+      return await abortable(read(client, s, path), signal);
+    } catch (error) {
+      signal.throwIfAborted();
+      const missing = await lstat(absolute).then(
+        () => false,
+        (e: NodeJS.ErrnoException) => e.code === "ENOENT",
+      );
+      if (missing) return null;
+      throw error;
+    }
+  };
+  // Rewinds the conversation to before a user turn. Agent edits recorded in the
+  // discarded turns are restored from their checkpoints as one approved
+  // operation. A file changed by anything else is never overwritten.
+  const rewindSession = async (
+    client: AgentContext,
+    s: Session,
+    turn: number,
+    keepFiles: boolean,
+    signal: AbortSignal,
+  ) => {
+    if (s.jobs.hasRunning)
+      throw new Error("Stop background jobs before rewinding: /jobs stop <id>");
+    const plan = rewindPlan(s.messages, s.checkpoints, s.checkpointTurns, turn);
+    const changes: Array<{
+      path: string;
+      absolute: string;
+      current: string;
+      restored: string | null;
+    }> = [];
+    let unchanged = 0;
+    if (!keepFiles && plan.files.length) {
+      await permitted(s, signal);
+      if (
+        s.workflow === "plan" ||
+        (await s.permissions.mode()) === "read_only" ||
+        (await sandboxMode(s)) === "read_only"
+      )
+        throw new CheckpointError(
+          `Restoring files is disabled in read-only mode. Use /rewind ${turn} --keep-files to rewind only the conversation.`,
+        );
+      for (const file of plan.files) {
+        await refreshInstructions(client, s, file.path, signal);
+        const absolute = await target(s.root, file.path, true);
+        const current = await currentText(
+          client,
+          s,
+          file.path,
+          absolute,
+          signal,
+        );
+        if (current === file.restored) {
+          unchanged++;
+          continue;
+        }
+        if (current !== file.expected)
+          throw new CheckpointError(
+            `Cannot rewind ${file.path}: it changed after the agent's last edit, and restoring it would discard that change. Nothing was restored. Review the file, or use /rewind ${turn} --keep-files.`,
+          );
+        if (
+          file.restored === null &&
+          (caps.fs?.readTextFile || caps.fs?.writeTextFile)
+        )
+          throw new CheckpointError(
+            `Rewinding removes ${file.path}, which the agent created, but this client's ACP file methods cannot delete files. Delete it in the IDE after checking unsaved content, then rewind again. Nothing was restored.`,
+          );
+        if (file.restored === null && process.platform !== "linux")
+          throw new UndoRecoveryError(
+            `Rewinding removes ${file.path}, which the agent created, but safe removal is unavailable on this platform. Delete it in your IDE after checking its contents, then rewind again. Nothing was restored.`,
+          );
+        changes.push({
+          path: file.path,
+          absolute,
+          current,
+          restored: file.restored,
+        });
+      }
+    }
+    if (changes.length) {
+      const toolCallId = randomUUID();
+      const diffs = changes.map((c) => ({
+        type: "diff" as const,
+        path: c.absolute,
+        oldText: c.current,
+        newText: c.restored ?? "",
+      }));
+      await update(client, s, {
+        sessionUpdate: "tool_call",
+        toolCallId,
+        title: "rewind",
+        kind: "edit",
+        status: "pending",
+      });
+      const restored: string[] = [];
+      try {
+        const check = await approve(
+          client,
+          s,
+          `Rewind to before turn ${turn}: restore ${changes.length} file${changes.length === 1 ? "" : "s"} changed by the agent`,
+          signal,
+          false,
+          diffs,
+          undefined,
+          {
+            id: toolCallId,
+            kind: "edit",
+            input: { turn, files: changes.map((c) => c.path) },
+          },
+          true,
+        );
+        await check();
+        for (const change of changes) {
+          if (
+            (await currentText(
+              client,
+              s,
+              change.path,
+              change.absolute,
+              signal,
+            )) !== change.current
+          )
+            throw new CheckpointError(
+              `Stale rewind: ${change.path} changed during approval`,
+            );
+          await check();
+          if (change.restored === null)
+            await quarantineCreatedFile(
+              s.root,
+              change.path,
+              change.current,
+              signal,
+            );
+          else if (caps.fs?.writeTextFile)
+            await client.request("fs/write_text_file", {
+              sessionId: s.id,
+              path: change.absolute,
+              content: change.restored,
+            });
+          else
+            await atomicEdit(
+              s.root,
+              change.path,
+              change.current,
+              change.restored,
+            );
+          restored.push(change.path);
+        }
+      } catch (error) {
+        await update(client, s, {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: "failed",
+        });
+        if (!restored.length) throw error;
+        // Restored files now match their earlier state, so a retry skips them.
+        throw new Error(
+          `Rewind stopped after restoring ${restored.join(", ")}; the conversation was not rewound. Inspect the remaining files, then retry /rewind ${turn}. Cause: ${error instanceof Error ? s.backend.redact(error.message).slice(0, 500) : "unknown"}`,
+        );
+      }
+      await update(client, s, {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "completed",
+        content: diffs,
+      });
+    }
+    if (keepFiles) {
+      // Kept edits now predate every later turn and remain available to /undo.
+      for (const id of plan.rewound)
+        s.checkpointTurns[id] = Math.max(UNTRACKED_TURN, turn - 1);
+    } else
+      s.checkpoints = s.checkpoints.filter((c) => !plan.rewound.includes(c.id));
+    const discarded = s.messages.length - plan.cut;
+    s.messages.splice(plan.cut);
+    s.compaction = truncatedCompaction(s.compaction, plan.cut);
+    s.contextUsage = undefined;
+    const hadPlan = s.plan.length > 0;
+    s.plan = [];
+    await save(s);
+    if (hadPlan)
+      await update(client, s, { sessionUpdate: "plan", entries: [] });
+    await text(
+      client,
+      s,
+      [
+        `Rewound to before turn ${turn}; ${discarded} message${discarded === 1 ? "" : "s"} discarded.`,
+        keepFiles
+          ? "Files were left as they are; their agent edits stay available to /undo."
+          : changes.length || unchanged
+            ? `Agent edits restored: ${changes.map((c) => c.path).join(", ") || "none needed"}${unchanged ? `; ${unchanged} file${unchanged === 1 ? "" : "s"} already matched` : ""}.`
+            : "No agent file edits needed restoring.",
+        "Commands, MCP and remote actions, Git operations and other external effects were not reverted" +
+          (plan.untracked
+            ? `, nor ${plan.untracked} earlier agent edit${plan.untracked === 1 ? "" : "s"} without turn information (see /checkpoints).`
+            : "."),
+        "Your client may still display the discarded messages; reopen the session from history to see the shortened transcript.",
+      ].join("\n"),
+    );
+  };
   const execute = async (
     client: AgentContext,
     s: Session,
@@ -1708,22 +1959,11 @@ export function createAgent(
                 content: [
                   {
                     type: "content",
-                    content: { type: "text", text: JSON.stringify(value) },
+                    content: { type: "text", text: jobStatusText(value) },
                   },
                 ],
               }),
-            onComplete: (value) =>
-              update(client, s, {
-                sessionUpdate: "tool_call_update",
-                toolCallId: c.id,
-                status: value.state === "completed" ? "completed" : "failed",
-                content: [
-                  {
-                    type: "content",
-                    content: { type: "text", text: JSON.stringify(value) },
-                  },
-                ],
-              }),
+            onComplete: (value) => jobFinished(client, s, c.id, value),
           },
         );
         return { text: JSON.stringify(job), background: true };
@@ -1750,6 +1990,84 @@ export function createAgent(
       };
     }
     throw new Error("Unknown tool");
+  };
+  // A job's tool call stays in progress after its turn; completion updates it
+  // and, when the client presents notices, also raises a live notice.
+  const jobFinished = async (
+    client: AgentContext,
+    s: Session,
+    toolCallId: string,
+    value: JobPoll,
+  ) => {
+    if (sessions.get(s.id) !== s) return; // Closed sessions receive no updates.
+    await update(client, s, {
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status: value.state === "completed" ? "completed" : "failed",
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: jobStatusText(value) },
+        },
+      ],
+    });
+    if (caps.session?.notices)
+      await update(client, s, {
+        sessionUpdate: "notice",
+        severity: value.state === "completed" ? "info" : "warning",
+        title: `Background job ${value.state}`,
+        description: `Job ${value.id}: exit code ${value.code}, ${value.outputChars} output characters. Use /jobs poll ${value.id} to read it.`,
+      });
+  };
+  // Messages sent in steer mode join the running model turn at a safe point,
+  // after a complete tool group, in arrival order. Others wait for their turn.
+  const absorbSteering = async (
+    client: AgentContext,
+    s: Session,
+    signal: AbortSignal,
+  ) => {
+    let absorbed = 0;
+    for (const candidate of s.turns.steering()) {
+      signal.throwIfAborted();
+      const input = candidate.payload as ReturnType<typeof normalizePrompt>;
+      try {
+        for (const path of input.filePaths)
+          await target(s.root, path, true, false);
+      } catch {
+        break; // It runs as its own turn, which reports the error.
+      }
+      if (!candidate.take()) break;
+      s.messages.push({
+        role: "user",
+        content: STEERING_PREFIX + s.backend.redact(input.content),
+      });
+      absorbed++;
+    }
+    if (absorbed) {
+      await save(s);
+      await text(
+        client,
+        s,
+        `\n\n[${absorbed} steering message${absorbed === 1 ? "" : "s"} added to the current turn.]\n\n`,
+      );
+    }
+    return absorbed > 0;
+  };
+  // Report finished background jobs once, so the model need not poll for them.
+  const reportFinishedJobs = async (s: Session) => {
+    const finished = s.jobs.takeFinished();
+    if (!finished.length) return;
+    s.messages.push({
+      // Assistant housekeeping must not replace compaction's pinned user request.
+      role: "assistant",
+      content: `[Background job status from the agent runtime, not a user request: ${finished
+        .map(
+          (j) =>
+            `${j.id} ${j.state}, exit code ${j.code}, ${j.outputChars} output characters`,
+        )
+        .join("; ")}. Use poll_job to read output if needed.]`,
+    });
+    await save(s);
   };
   const manualTool = async (
     client: AgentContext,
@@ -1819,6 +2137,66 @@ export function createAgent(
     });
     await text(client, s, resultText);
   };
+  // Replays the stored transcript as ACP updates. Tool calls are reported with
+  // their recorded outcome only; nothing is executed or approved again.
+  const replayHistory = async (client: AgentContext, s: Session) => {
+    for (let i = 0; i < s.messages.length; i++) {
+      const m = s.messages[i]!;
+      if (
+        m.role === "user" &&
+        m.content &&
+        !m.content.startsWith(PROJECT_GUIDANCE_PREFIX)
+      )
+        await update(client, s, {
+          sessionUpdate: "user_message_chunk",
+          content: {
+            type: "text",
+            text: m.content.startsWith(STEERING_PREFIX)
+              ? m.content.slice(STEERING_PREFIX.length)
+              : m.content,
+          },
+        });
+      if (m.role !== "assistant") continue;
+      if (m.content)
+        await update(client, s, {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: m.content },
+        });
+      const results = new Map<string, string>();
+      for (let j = i + 1; s.messages[j]?.role === "tool"; j++)
+        results.set(
+          s.messages[j]!.tool_call_id ?? "",
+          s.messages[j]!.content ?? "",
+        );
+      for (const call of m.tool_calls ?? []) {
+        const result = results.get(call.id);
+        await update(client, s, {
+          sessionUpdate: "tool_call",
+          toolCallId: call.id,
+          title: call.function.name,
+          kind: ["write_file", "edit_file"].includes(call.function.name)
+            ? "edit"
+            : call.function.name === "run_command"
+              ? "execute"
+              : "other",
+          status:
+            result === undefined ||
+            s.failedToolCalls.has(call.id) ||
+            result.startsWith("Interrupted execution; outcome unknown")
+              ? "failed"
+              : "completed",
+          content: result
+            ? [
+                {
+                  type: "content",
+                  content: { type: "text", text: result.slice(0, 16000) },
+                },
+              ]
+            : [],
+        });
+      }
+    }
+  };
   app.onRequest("initialize", ({ params }) => {
     caps = params.clientCapabilities ?? {};
     return {
@@ -1831,7 +2209,7 @@ export function createAgent(
       agentCapabilities: {
         auth: { logout: {} },
         loadSession: true,
-        sessionCapabilities: { list: {} },
+        sessionCapabilities: { list: {}, resume: {}, close: {} },
         promptCapabilities: {
           embeddedContext: true,
           image: false,
@@ -1931,6 +2309,8 @@ export function createAgent(
       jobs: new Jobs(),
       preview: new Preview(),
       checkpoints: [],
+      checkpointTurns: {},
+      failedToolCalls: new Set(),
       instructions: [],
       root: await root(params.cwd),
       config: { ...c },
@@ -1976,7 +2356,19 @@ export function createAgent(
     s.announcedMode = sessionMode(s);
     return { sessionId: s.id, configOptions: options(s), modes: modeState(s) };
   });
-  app.onRequest("session/load", async ({ params, client, signal }) => {
+  // session/load replays history; session/resume restores the same state for a
+  // client that kept its own transcript. Neither re-runs tools or jobs.
+  const restoreSession = async (
+    params: {
+      sessionId: string;
+      cwd: string;
+      mcpServers?: McpServer[] | null;
+    },
+    client: AgentContext,
+    signal: AbortSignal,
+    replay: boolean,
+  ) => {
+    const mcpServers = params.mcpServers ?? [];
     const authEpoch = await readJson("auth-state.json");
     await checkAuthentication(authEpoch);
     if (sessions.size >= 32)
@@ -1990,6 +2382,8 @@ export function createAgent(
         title: sessionTitleSchema.optional(),
         createdAt: z.string().optional(),
         checkpoints: checkpointsSchema.default([]),
+        checkpointTurns: checkpointTurnsSchema.default({}),
+        failedToolCalls: z.array(z.string().max(1000)).max(2000).default([]),
         root: z.string(),
         url: z.string(),
         header: z.string().default("Authorization"),
@@ -2000,7 +2394,7 @@ export function createAgent(
           compactionStateSchema.parse({}),
         ),
         workflow: z.enum(["code", "plan"]).default("code"),
-        promptMode: z.enum(["interrupt", "queue"]).default("interrupt"),
+        promptMode: z.enum(promptModes).default("interrupt"),
         plan: planSchema.default([]),
         sandboxMode: z
           .string()
@@ -2103,6 +2497,13 @@ export function createAgent(
       jobs: new Jobs(),
       preview: new Preview(),
       checkpoints: saved.checkpoints,
+      // Checkpoints saved before turn tracking are never reverted by /rewind.
+      checkpointTurns: tagCheckpoints(
+        saved.checkpointTurns,
+        saved.checkpoints,
+        UNTRACKED_TURN,
+      ),
+      failedToolCalls: new Set(saved.failedToolCalls),
       instructions: [],
       messages: restoreHistory(saved.messages),
       compaction: saved.compaction,
@@ -2126,8 +2527,8 @@ export function createAgent(
         policyRevision: administrator.revision,
       }),
       mcp: new Mcp(),
-      servers: accessError ? [] : [...(await userMcp()), ...params.mcpServers],
-      ideServers: accessError ? [] : params.mcpServers,
+      servers: accessError ? [] : [...(await userMcp()), ...mcpServers],
+      ideServers: accessError ? [] : mcpServers,
     };
     s.backend.addSecrets(mcpSecrets(s.servers));
     contextMessages(s.messages, s.compaction); // Validate persisted context boundaries before use.
@@ -2152,13 +2553,7 @@ export function createAgent(
       });
     if (s.plan.length)
       await update(client, s, { sessionUpdate: "plan", entries: s.plan });
-    for (const m of s.messages)
-      if ((m.role === "user" || m.role === "assistant") && m.content)
-        await update(client, s, {
-          sessionUpdate:
-            m.role === "user" ? "user_message_chunk" : "agent_message_chunk",
-          content: { type: "text", text: m.content },
-        });
+    if (replay) await replayHistory(client, s);
     if (s.contextUsage)
       await update(client, s, {
         sessionUpdate: "usage_update",
@@ -2173,6 +2568,25 @@ export function createAgent(
     await checkAuthentication(authEpoch);
     s.announcedMode = sessionMode(s);
     return { configOptions: options(s), modes: modeState(s) };
+  };
+  app.onRequest("session/load", ({ params, client, signal }) =>
+    restoreSession(params, client, signal, true),
+  );
+  app.onRequest("session/resume", ({ params, client, signal }) =>
+    restoreSession(params, client, signal, false),
+  );
+  // Frees a live session. Its saved transcript is kept and can be loaded again.
+  app.onRequest("session/close", async ({ params }) => {
+    const s = sessions.get(params.sessionId);
+    if (!s) return {};
+    sessions.delete(s.id);
+    cancelTurn(s);
+    await s.jobs.stopAll();
+    await s.turns.drain();
+    await s.preview.close();
+    await s.mcp.close();
+    await leaveYolo(s);
+    return {};
   });
   const select = async (
     s: Session,
@@ -2187,12 +2601,13 @@ export function createAgent(
     if (["mode", "workflow", "permissions", "sandbox", "model"].includes(id))
       await s.jobs.stopAll();
     if (id === "prompt_mode") {
-      if (value !== "interrupt" && value !== "queue")
+      const mode = promptModes.find((m) => m === value);
+      if (!mode)
         throw RequestError.invalidParams(
           undefined,
-          "Unknown incoming prompt mode; choose interrupt or queue",
+          "Unknown incoming prompt mode; choose interrupt, queue or steer",
         );
-      s.promptMode = value;
+      s.promptMode = mode;
     } else if (id === "mode") {
       const mode = parseSessionMode(value);
       const allowed = s.administrator.rules.permissionModes;
@@ -2409,6 +2824,8 @@ export function createAgent(
             }
           }
         },
+        // Only ordinary messages may join a running turn; commands always wait.
+        input.text.trim().startsWith("/") ? undefined : input,
       );
     };
   app.onRequest(
@@ -2596,8 +3013,32 @@ export function createAgent(
           );
           return { stopReason: "end_turn" };
         }
+        if (control === "/rewind" && !controlArgs.length) {
+          const turns = turnSummaries(
+            s.messages,
+            s.checkpoints,
+            s.checkpointTurns,
+          );
+          await text(
+            client,
+            s,
+            turns.length
+              ? "Turns (/rewind N discards turn N and later, restoring agent edits made since then; add --keep-files to keep files as they are):\n" +
+                  turns
+                    .map(
+                      (t) =>
+                        `${t.turn}. ${t.preview || "(empty)"}${t.agentEdits ? ` [${t.agentEdits} agent edit${t.agentEdits === 1 ? "" : "s"}]` : ""}`,
+                    )
+                    .join("\n")
+              : "No turns to rewind.",
+          );
+          return { stopReason: "end_turn" };
+        }
         const workspaceControl =
-          compactRequested || control === "/undo" || control === "/export";
+          compactRequested ||
+          control === "/undo" ||
+          control === "/export" ||
+          control === "/rewind";
         if (prompt.startsWith("/") && !workspaceControl) {
           const [cmd, ...rest] = prompt.trim().split(/\s+/);
           if (
@@ -2622,21 +3063,25 @@ export function createAgent(
               (cmd === "/help"
                 ? ""
                 : "Unknown command or invalid arguments. ") +
-                "Commands: /sessions [cursor], /title [text], /fork [title], /export <workspace-file.json|.md>, /jobs [poll|stop <id>], /checkpoints [clear], /undo [id], /help, /status, /doctor, /login, /logout, /permissions, /model, /reasoning, /reviewer, /server-tools, /compact, /autocompact on|off, /mode ask|plan|code, /plan on|off, /queue on|off. Ask mode uses the Read only permission mode; Plan mode permits file inspection and plan updates only; Code mode retains your permission policy.",
+                "Commands: /sessions [cursor], /title [text], /fork [title], /export <workspace-file.json|.md>, /jobs [poll|stop <id>], /checkpoints [clear], /undo [id], /rewind [turn [--keep-files]], /help, /status, /doctor, /login, /logout, /permissions, /model, /reasoning, /reviewer, /server-tools, /compact, /autocompact on|off, /mode ask|plan|code, /plan on|off, /queue on|off|steer. Ask mode uses the Read only permission mode; Plan mode permits file inspection and plan updates only; Code mode retains your permission policy.",
             );
             return { stopReason: "end_turn" };
           }
           if (cmd === "/queue") {
             if (
               rest.length > 1 ||
-              (rest.length && !["on", "off"].includes(rest[0]!))
+              (rest.length && !["on", "off", "steer"].includes(rest[0]!))
             )
-              throw new Error("Use /queue on|off, or /queue to inspect");
+              throw new Error("Use /queue on|off|steer, or /queue to inspect");
             if (rest[0])
               await select(
                 s,
                 "prompt_mode",
-                rest[0] === "on" ? "queue" : "interrupt",
+                rest[0] === "on"
+                  ? "queue"
+                  : rest[0] === "steer"
+                    ? "steer"
+                    : "interrupt",
                 signal,
               );
             await configChanged(client, s);
@@ -2873,6 +3318,25 @@ export function createAgent(
             { id: controlArgs[0] ?? "latest" },
             signal,
             prompt,
+          );
+          return { stopReason: "end_turn" };
+        }
+        if (control === "/rewind") {
+          const [turn, flag] = controlArgs;
+          if (
+            controlArgs.length > 2 ||
+            !/^[1-9][0-9]{0,5}$/.test(turn ?? "") ||
+            (flag !== undefined && flag !== "--keep-files")
+          )
+            throw new Error(
+              "Use /rewind, /rewind <turn> or /rewind <turn> --keep-files",
+            );
+          await rewindSession(
+            client,
+            s,
+            Number(turn),
+            flag === "--keep-files",
+            signal,
           );
           return { stopReason: "end_turn" };
         }
@@ -3283,6 +3747,10 @@ export function createAgent(
         let compactions = 0;
         for (let round = 0; round < s.config.rounds; round++) {
           await permitted(s, signal);
+          // Steered messages and job notes join history before the request is
+          // built, so the compaction check below measures them too.
+          await absorbSteering(client, s, signal);
+          await reportFinishedJobs(s);
           let request = requestContext();
           for (;;) {
             const limits = contextLimits(
@@ -3499,6 +3967,13 @@ export function createAgent(
           s.messages.push(message);
           await save(s);
           if (!message.tool_calls?.length) {
+            // A steering message that arrived during the final reply continues
+            // this turn instead of waiting for a new one.
+            if (
+              round + 1 < s.config.rounds &&
+              (await absorbSteering(client, s, signal))
+            )
+              continue;
             lastVerification = await verify();
             if (
               lastVerification?.failures &&

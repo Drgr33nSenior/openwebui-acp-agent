@@ -36,6 +36,8 @@ const requestChars = (r) =>
 let model = { id: "fixture", context_window: 1_000_000 };
 let pending = [];
 let summary;
+// Optional: awaited before answering the first model request of a test.
+let holdFirst;
 const requests = [];
 const server = createServer(async (req, res) => {
   res.setHeader("Content-Type", "application/json");
@@ -45,6 +47,7 @@ const server = createServer(async (req, res) => {
   for await (const part of req) raw += part;
   const request = JSON.parse(raw);
   requests.push(request);
+  if (requests.length === 1 && holdFirst) await holdFirst;
   const message =
     request.tools.length === 0
       ? { role: "assistant", content: summary(request) }
@@ -67,6 +70,7 @@ await writeJson("config.json", configSchema.parse({ url, model: "fixture" }));
 test.after(() => new Promise((r) => server.close(r)));
 test.beforeEach(() => {
   pending = [];
+  holdFirst = undefined;
   requests.length = 0;
   summary = () =>
     "Task: inspect the fixture files. first.txt was read; nothing was changed. No checks have run.";
@@ -349,6 +353,57 @@ test("a failed compaction stops the turn before an oversized request, keeping hi
     assert.equal(requests.length, 0);
     assert.match(c.text(), /automatic compaction is off/);
   } finally {
+    await c.close();
+  }
+});
+
+test("a steered message joins before the compaction check and survives compaction with the original request pinned", async () => {
+  const usable = await tightModel();
+  const c = await client();
+  let release;
+  try {
+    await c.prompt("/queue steer");
+    requests.length = 0;
+    holdFirst = new Promise((resolve) => {
+      release = resolve;
+    });
+    pending = [read("first.txt", "one"), read("second.txt", "two")];
+    const first = c.prompt("Inspect the fixture files");
+    while (requests.length < 1) await new Promise((r) => setTimeout(r, 5));
+    const steer = c.prompt("Also report the word count");
+    while (c.state().turns.queued < 1)
+      await new Promise((r) => setTimeout(r, 5));
+    release();
+    const results = await Promise.all([first, steer]);
+    assert.deepEqual(
+      results.map((r) => r.stopReason),
+      ["end_turn", "end_turn"],
+    );
+    // The steered text is part of the turn's second request, before the third
+    // round's size check, which then needed a summary.
+    assert.deepEqual(
+      requests.map((r) => r.tools.length > 0),
+      [true, true, false, true],
+    );
+    const steered = (m) =>
+      m.role === "user" && m.content.includes("Also report the word count");
+    assert(requests[1].messages.some(steered));
+    assert(requests[2].messages.some((m) => m.content.includes("Also report")));
+    const continued = requests[3];
+    assert(Math.ceil(requestChars(continued) / 4) <= usable);
+    // After compaction the original request stays pinned and the steering
+    // message survives, either verbatim or in the pinned steering block.
+    assert(
+      continued.messages.some(
+        (m) =>
+          m.role === "user" &&
+          m.content.includes(JSON.stringify("Inspect the fixture files")),
+      ),
+    );
+    assert(continued.messages.some(steered));
+    assert.equal(c.state().compaction.count, 1);
+  } finally {
+    release?.();
     await c.close();
   }
 });

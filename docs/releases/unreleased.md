@@ -12,6 +12,18 @@
   (default 12,288), to discourage oversized replies. Truncated tool replies get
   one re-ask for smaller changes. Server limits and default round limits are unchanged.
 - Recheck scoped project instructions after file approval, before writing.
+- Advertise and implement stable ACP `session/resume` and `session/close`.
+  `session/load` now replays recorded tool calls with their stored results and
+  outcomes. It still never executes or approves them again.
+- Add `/rewind` to return to an earlier turn. It restores the agent's own edits
+  from the discarded turns through checkpoints, with one diff approval. It never
+  overwrites later changes. `--keep-files` rewinds only the conversation.
+- Add the **Steer current turn** prompt mode (`/queue steer`). A message sent
+  while busy joins the running turn after its current tool step, or is queued
+  if the turn ends first. It needs a client that sends prompts while busy.
+- Show background job state, run time, output size and a bounded output tail in
+  the job's tool call, with coalesced updates. When the client supports notices,
+  send one on completion, and report finished jobs to the model once.
 - Add a **Mode** selector (ACP category `mode`) with Ask, Plan and Code. Ask is
   the Read only permission mode, Plan is the existing planning workflow and Code
   keeps the selected Permissions mode. Modes never widen permissions; returning

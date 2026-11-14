@@ -30,7 +30,7 @@ other agents, installed configurations, credentials and sessions.
 | `commands.ts`, `jobs.ts`, `sandbox*.ts`, `macos-sandbox.ts`, `protected-paths.ts` | Bounded owned execution and platform protection                              |
 | `mcp.ts`, `ide-mcp.ts`, `user-mcp.ts`, `server-tools.ts`                          | Direct MCP and separate Open WebUI tasks                                     |
 | `verification.ts`, `compaction.ts`, `planning.ts`                                 | Bounded diagnostics, context summaries and progress plans                    |
-| `checkpoints.ts`, `undo-created.ts`, `session-store.ts`                           | Stale-safe undo, retained recovery, session listing/fork/export              |
+| `checkpoints.ts`, `undo-created.ts`, `session-store.ts`, `rewind.ts`              | Stale-safe undo/rewind, retained recovery, session listing/fork/export       |
 | `test/`, `browser/`, `registry/`                                                  | Automated fixtures, optional browser package and registry artifacts          |
 
 ## Safety invariants

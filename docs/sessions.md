@@ -17,9 +17,10 @@ fallbacks. Diagnostic commands do not make model inference requests.
 | `/reviewer MODEL_ID`, `/reviewer off`                    | Enable or disable approval advice                              |
 | `/plan on`, `/plan off`                                  | Switch between planning and coding                             |
 | `/compact`, `/autocompact on\|off`                       | Compact context or change automatic compaction                 |
-| `/queue on\|off`                                         | Queue incoming prompts or interrupt the active turn            |
+| `/queue on\|off\|steer`                                  | Queue, interrupt or steer with prompts sent while busy         |
 | `/jobs`, `/jobs poll ID [OFFSET]`, `/jobs stop ID`       | Inspect, read or stop a background job                         |
 | `/checkpoints`, `/checkpoints clear`, `/undo [ID]`       | Inspect edit history, clear it, or propose reversal            |
+| `/rewind`, `/rewind TURN [--keep-files]`                 | List turns, or return to before a turn                         |
 | `/sessions [CURSOR]`                                     | Browse saved sessions for this workspace/backend               |
 | `/title [TEXT]`                                          | Set or clear the current session title                         |
 | `/fork [TITLE]`                                          | Create a separate saved conversation                           |
@@ -124,9 +125,40 @@ permissions. Stop cancels the active turn and all queued prompts. Logout and
 disconnect discard waiting work; restore never restarts it. Individual request
 cancellation removes that request. No Send now action is provided.
 
-The client must allow sending overlapping prompts for queuing to be useful.
-The selector cannot add a send button to an IDE that only offers Stop while busy.
-The selected queue mode persists, but pending messages do not.
+**Steer current turn** (`/queue steer`) adds a message sent while busy to the
+running turn. It joins after the current model reply and any tool calls from
+that reply finish, before the next model request. Messages join in arrival
+order. A message that arrives during a final reply makes the turn continue.
+If the turn ends first, for example at the round limit, or the running turn is
+a slash command, the message runs as the next queued turn. Slash commands
+never join a running turn. A joined message's request returns when that turn ends, with
+the same stop reason. Cancelling only that request after it joined does not
+remove it from history; Stop cancels the whole turn.
+
+A joined message is stored with a short marker that tells the model it adds to
+the running request. It joins before the next request is built, so the
+pre-request size check and automatic compaction include it. When compaction
+summarizes past it, the turn's original request stays pinned, and up to ten
+joined messages after that request are kept verbatim beside it.
+
+The client must allow sending overlapping prompts for queuing or steering to be
+useful. The selector cannot add a send button to an IDE that only offers Stop
+while busy. The selected mode persists, but pending messages do not.
+
+### What current clients can express
+
+ACP v1 has no steering or queue field. Both are proposals for ACP v2
+(agent-client-protocol RFD PR 1261, "steer and queue prompts"), so the agent
+selects behavior through this session option rather than per message.
+
+| Client | Sending while busy | Use |
+| --- | --- | --- |
+| Zed (external agents) | Zed queues the message itself and sends it after the turn ends. **Send Now** stops the turn, then sends. Zed documents its steer toggle for its own agent only. | The default interrupt mode. Overlapping prompts do not arrive, so steer mode has no effect. |
+| JetBrains AI Assistant / Air | Earlier testing found only Stop while a turn runs. The JetBrains ACP documentation does not describe queueing or steering. | No overlapping prompts arrive. Stop, then send. |
+| Clients that send `session/prompt` while one is pending | Each request reaches the agent. | Choose queue or steer. |
+
+Recheck this against the installed client version; it is not a compatibility
+guarantee.
 
 ## Commands and background jobs
 
@@ -139,9 +171,19 @@ returns bounded pages. New network requests made while no turn is active are
 refused rather than creating unattended approval requests. Unsandboxed YOLO
 jobs do not use the network approval proxy.
 
-Jobs can continue after a successful turn. Stop, logout, disconnect, revocation
-and relevant permission/model changes stop owned jobs. Interrupted turns also
-stop their jobs. Jobs are not restored or copied to forks. Process cleanup cannot
+A background job's tool call stays in progress while the job runs. About once
+a second it shows the job state, run time, retained output size and the last
+2,000 characters of output. When the job ends, the tool call becomes completed
+(exit code 0) or failed (stopped, limited or nonzero). Clients that advertise the
+ACP `session.notices` capability also receive a notice. At its next model
+request, the model receives one short status line per finished job, so it does
+not need to poll repeatedly. `poll_job` and `/jobs poll` still page the full
+retained output. Clients might not show updates that arrive after a turn has
+ended.
+
+Jobs can continue after a successful turn. Stop, logout, disconnect, session
+close, revocation and relevant permission/model changes stop owned jobs.
+Interrupted turns also stop their jobs. Jobs are not restored or copied to forks. Process cleanup cannot
 undo completed writes, external requests or detached work on a remote server.
 
 ## Checkpoints and instructions
@@ -150,6 +192,38 @@ Successful agent text edits record exact before/after content. `/undo` proposes
 a diff and requests approval outside confirmed YOLO. It re-reads before applying
 and refuses when later changes make the checkpoint stale. Undo covers agent file writes,
 not shell commands, MCP actions, Git operations or remote tasks.
+
+### Rewind
+
+`/rewind` lists the session's user turns with a short excerpt and the number of
+agent edits in each one. `/rewind N` discards turn N and every later message,
+and restores files changed by agent edits in those turns. The next prompt
+continues from the shortened history. Slash commands such as `/undo` count as
+turns, as do joined steering messages.
+
+Each affected file must still contain the agent's last edit. A file that
+already matches its earlier content is skipped. If any file changed after the
+agent's edit, or between two agent edits, nothing is restored and history is
+unchanged. Review the file, or use `/rewind N --keep-files`, which only rewinds
+the conversation. Files then stay as they are, and their checkpoints stay
+available to `/undo`.
+
+All restorations appear in one diff approval, unless YOLO is confirmed. Each
+file is re-read before it is written. A file that changed during approval
+stops the rewind. Restored files then match their earlier content, so a retry
+skips them. A rewind cannot run while background jobs are running. Restoring
+files follows the `/undo` rules: it is unavailable in Plan or read-only mode,
+and removing a file the agent created is limited in the same way. Delete such
+a file manually, then rewind again. Rewind clears the task plan and the context
+indicator. It also drops a compaction summary that covered discarded messages.
+
+Rewind restores only agent text edits recorded as checkpoints. It does not
+revert commands, MCP or remote actions, Git operations, or edits made without a
+checkpoint. Checkpoints created before this version have no turn information;
+rewind leaves them for `/undo`. Your client may still show discarded messages
+until you reopen the session from history. ACP v1 has no history-truncation
+update. The rewind proposal in agent-client-protocol PR 1321 is an unmerged ACP
+v2 draft, so this is a slash command.
 
 Keep at most twenty checkpoints with a combined 500 KB content budget.
 `/checkpoints clear` discards only undo history, not files or transcripts.
@@ -180,6 +254,13 @@ remote-task runtime state. Open a fork from the client's session history.
 Export writes a proposed Markdown or JSON transcript after approval; confirmed
 YOLO supplies that approval automatically.
 Review exported content before sharing it.
+
+Clients can open saved sessions through ACP `session/load`, which replays the
+transcript, or `session/resume`, which restores it without replay. Replay
+includes user and agent messages and each recorded tool call with its stored
+result and outcome. Nothing is executed or approved again. Resume is for
+clients that keep their own transcript. `session/close` stops a live session's
+turns and jobs and frees its slot. It keeps the saved transcript.
 
 Local `session-UUID.json` files retain transcripts, reasoning and bounded state.
 Loading rechecks roots, consent and policy; executed tools never replay. Limits

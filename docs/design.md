@@ -43,9 +43,13 @@ includes the installed entrypoint. CLI setup routing takes precedence even when
 `acp` is also present, and exits after login. Credentials never enter the ACP
 stream. Manual CLI login is a fallback, not OAuth.
 
-Sessions use the canonical cwd supplied by ACP. New/load, streaming prompt
-updates, cancellation, model/config selectors, slash commands and session listing
-use stable v1 APIs. Session config options use the categories `model`,
+Sessions use the canonical cwd supplied by ACP. New/load/resume/close, streaming
+prompt updates, cancellation, model/config selectors, slash commands, session
+listing and client-gated notices use stable v1 APIs. Load replays stored messages
+and recorded tool outcomes as updates. It never executes or approves them again.
+Steering and rewind have no stable v1 method; v2 drafts exist only as
+proposals. They use a session option and the `/rewind` command, respectively.
+Session config options use the categories `model`,
 `thought_level` and `mode`. The same Ask/Plan/Code modes are also returned as
 v1 `modes`, with `session/set_mode` and `current_mode_update`, for clients
 without config-option support. See [session modes](sessions.md#session-modes).
@@ -55,7 +59,14 @@ runner because an ACP terminal capability does not guarantee OS isolation.
 
 Incoming requests pass through a per-session turn scheduler. Interrupt mode
 aborts and awaits cleanup, keeping the latest replacement; queue mode preserves
-arrival order. Every prompt returns its own stop reason. Cancellation closes
+arrival order. Steer mode lets the oldest waiting ordinary prompt join the
+active model turn. It joins after a complete tool group, before the next model
+request. Embedded file paths are checked first, and the joined request returns
+with the turn's stop reason. Prompts that are not absorbed run as queued turns.
+Joined prompts carry `STEERING_PREFIX`. Compaction pins the latest unmarked
+user request and quotes up to ten later marked prompts verbatim, so steering
+never replaces the turn's pinned request.
+Every prompt returns its own stop reason. Cancellation closes
 pending permission waits and owned processes. Late replies cannot approve work.
 Completed tool groups and partial text remain paired in history.
 
@@ -236,6 +247,19 @@ disabled until appropriate ACL handling exists.
 Sessions restore conversation without replaying tools. Forks exclude live grants,
 processes and checkpoints; exports require an approved workspace write.
 Background jobs belong to one live session and stop with cancellation/revocation.
+Job progress updates are coalesced to about one per second and carry a bounded
+output tail. Finished jobs are reported to the model once, as assistant-role
+runtime notes, so compaction keeps the real user request pinned.
+
+Rewind maps each checkpoint to the user turn that created it. The mapping lives
+in a top-level session field, so the strict checkpoint schema is unchanged.
+Rewind restores a file only from the agent's own checkpoint chain. The current
+text must equal the last agent edit, and consecutive agent edits must be
+contiguous. Otherwise nothing is restored. Restoration reuses the undo path:
+scoped instructions, protected-path target checks, one diff approval, a
+re-read before each write, client file methods or atomic local writes, and
+Linux-only safe removal of created files. History truncation happens only
+after every file succeeds.
 See [session behavior](sessions.md), [sandbox](sandbox.md) and
 [administrator policy](managed-policy.md).
 
