@@ -366,6 +366,52 @@ ACP handshake and sandbox command. Both checkout and installed production audits
 found zero vulnerabilities. No live Open WebUI or JetBrains session was run, so
 JetBrains rendering of the fourth mode and removal of the warning are unverified.
 
+## Paged reads, capped search and definition of done (unreleased)
+
+`test/reading.test.mjs` covers numbered whole reads of small files, files without
+a final newline and empty files; default 400-line pages, `offset`/`limit`, the
+last page, a limit past the end and an offset past the end; CRLF display and
+footer; truncated long lines and the page character cap. Through the agent it
+pages a 600-line file, then refuses an `edit_file` whose `old_string` carries
+copied prefixes and a `write_file` whose `before` does, writing nothing, and
+applies the same edit without prefixes. Search tests cover the 50-result
+default and count note, `max_results`, `path`, name and path globs, literal
+regex characters, no matches, default-ignored `.venv`, and refusal of outside,
+sensitive and file paths and an oversized `max_results`. Reminder tests cover
+one reminder after a code edit with no later run, none after docs-only edits,
+none when a run follows the last code edit, a fresh reminder in the next turn,
+and none when project checks are configured. Removing either of the last two
+conditions from the built agent makes its test fail. A unit test checks that the
+definition of done appears only when `run_command` is offered, and an ACP test
+parses the example calls in the `edit_file` and `run_command` descriptions. Existing tests
+that compared a read result with raw file text now expect the numbered format;
+the automatic-compaction fixture files became about 20,000 characters of short lines,
+because a single 60,000-character line is now cut to 2,000 characters.
+
+`test/manual-read-tokens.mjs` replays a fixed read-heavy task with a scripted
+fake model, offline: `list_files`, two searches and `read_file` without
+`offset` for 13 files from main `c9dbc9f` (ten `src` modules of 2–23 KB and
+three test files of 36–49 KB). Tokens are estimated at four characters each.
+
+| Build                              | Read calls | Read-result characters | Estimated tokens |
+| ---------------------------------- | ---------: | ---------------------: | ---------------: |
+| main `c9dbc9f`, whole files        |         13 |                275,340 |           68,835 |
+| this change, default page          |         13 |                179,469 |           44,867 |
+| this change, every page to the end |         28 |                308,198 |           77,050 |
+
+The default first page saves 35%: two thirds on the three test files and 8% on
+the ten modules, most of which are 400–600 lines and fit nearly whole in a page. A
+task that needs every line pays about 12% more for line numbers and footers, in
+more calls. Search results were unchanged at fewer than 50 matches. These are
+replayed calls, not model behavior: whether a model reads fewer pages, or
+finishes tasks better, needs the live comparison in the research plan.
+
+On macOS 27.0 with Node 26.11.1, `npm ci --ignore-scripts`, lint, typecheck,
+Prettier, build and `npm test` passed: **488 tests, 482 passed, six platform
+skips, zero failures**. `npm pack`, installation into a fresh temporary prefix
+and `test/package-install.mjs` passed. Checkout and installed production audits
+found zero vulnerabilities. No live Open WebUI or IDE session was run.
+
 ## Compatibility
 
 | Component                            | Scope                                                                                                |

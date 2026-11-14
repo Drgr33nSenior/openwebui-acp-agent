@@ -9,6 +9,65 @@ search guidance requires an enabled server-task catalog with that feature.
 Plan and read-only modes omit execution guidance. This is model guidance, not a
 guarantee of successful verification or additional permission.
 
+## Definition of done
+
+When `run_command` is offered, the guidance adds a definition of done: before
+finishing, name the check that proves the change works (a test, a run of the
+entrypoint or a play-through) and run it after the last edit. For a bug, first
+run something that fails for the reported reason, then fix it and rerun the same
+check; if it cannot be reproduced in two attempts, say so. The final message
+lists each command run with its result, and what was not verified.
+
+One reminder enforces this lightly. It is sent at most once per turn, through
+the same continuation as a verification repair round, when all of these hold:
+
+- the model replies without tool calls;
+- a successful `write_file` or `edit_file` changed a file that can change
+  behavior, and no `run_command`, `start_preview` or `browser_*` MCP call was
+  attempted after it (a declined or failed call counts; one rejected for invalid
+  arguments does not);
+- `run_command` is offered, no project checks are configured for the workspace
+  (those run automatically and count as the check), and a model round remains.
+
+Prose and notice files do not trigger it: `.md`, `.markdown`, `.mdx`, `.txt`,
+`.rst`, `.adoc`, `.asciidoc`, `.org`, and `LICENSE`, `NOTICE`, `AUTHORS`,
+`CHANGELOG`, `CHANGES` and `COPYING` with any extension. `requirements*.txt`
+and `CMakeLists.txt` do. The reminder names the files and is shown to the user;
+if the model still does not run anything, the turn ends normally.
+
+## Reading files
+
+`read_file` returns numbered lines. Each line starts with its 1-based number and
+`→`, which is not part of the file:
+
+```text
+1→import sys
+2→
+3→def main():
+[lines 1–3 of 3; end of file]
+```
+
+A file up to 8 KB comes back whole. A larger file comes back 400 lines at a
+time; the footer gives the range and the next offset, for example
+`[lines 1–400 of 1210; continue with offset=401]`. Pass `offset` (the first
+line, 1-based) and `limit` (at most 2,000 lines) to read another range:
+
+```json
+{ "path": "src/app.py", "offset": 401, "limit": 100 }
+```
+
+An offset past the last line is an error that states the line count. A page also
+stops at about 24,000 characters, and a line longer than 2,000 characters is cut
+with a marker giving its length. For a file with CRLF line endings, lines are
+shown without the carriage return and the footer says so; a multi-line
+`edit_file` `old_string` must still contain `\r\n`. The existing limits still
+apply: files over 100,000 bytes and files containing NUL bytes are refused.
+
+Four hundred lines is about 4,000 tokens of typical source and usually holds a
+whole class or module section. SWE-agent found a 100-line viewer resolved more
+issues than whole-file reads, but each further page costs a model round on a
+local model, so the page is larger here.
+
 ## Listing and searching files
 
 `list_files` lists workspace files. It honours `.gitignore` files at every
@@ -41,8 +100,25 @@ workspace, cannot be a symlink, and cannot be a sensitive directory. Ancestor
 explicitly, such as `.venv`, is listed; files excluded by a project `.gitignore`
 stay hidden.
 
-`search_text` searches every file `list_files` would return without its cap.
-It returns up to about 90,000 characters of matching lines.
+`search_text` finds literal, case-sensitive text (no regular expressions) in
+every file `list_files` would return without its cap. It returns up to
+`max_results` lines (default 50, at most 200) as `path:line: text`, in path
+order. A matching line over 200 characters is shortened around the first match.
+When more lines match, a final line counts them; counting stops at 1,000 matches
+and then reports a lower bound:
+
+```text
+[13 more matches in 7 files not shown; narrow with path or glob, or search for longer text]
+```
+
+`path` limits the search to a workspace directory, with the same checks as
+`list_files`. `glob` filters file paths: a pattern without `/`, such as `*.py`
+or `*.{ts,tsx}`, matches file names at any depth; one with `/`, such as
+`src/**/*.ts`, matches the workspace-relative path.
+
+```json
+{ "text": "parse_config", "path": "src", "glob": "*.py" }
+```
 
 ## Text-file edits
 
@@ -57,12 +133,24 @@ Use `edit_file` for small changes to an existing file:
 ```
 
 Read the file first. `old_string` must be nonempty and match exactly once,
-including whitespace and line endings. Zero or multiple matches return the
-count and ask for current text with enough surrounding lines. Set
-`replace_all: true` only to replace every non-overlapping occurrence. Replacement
-text is literal: `$&` and similar sequences have no special meaning. The tool
-does not normalize CRLF or add a trailing newline. The resulting file must fit
-within 100,000 characters.
+including whitespace and line endings. Copy it from the file text without
+`read_file`'s line-number prefixes. When an `old_string` that matches nothing
+would match once every line's prefix is removed, the error says to remove them;
+a `write_file` `before` that equals the file once prefixes are removed gets the
+same answer. The agent does not strip them itself: a file line can start with
+digits and an arrow, and a `new_string` mixes copied numbered lines with new
+ones, so a silent rewrite could change text the model did not mean to change.
+Zero or multiple matches return the count and ask for current text with enough
+surrounding lines. Set `replace_all: true` only to replace every non-overlapping
+occurrence. Replacement text is literal: `$&` and similar sequences have no
+special meaning. The tool does not normalize CRLF or add a trailing newline. The
+resulting file must fit within 100,000 characters.
+
+The `edit_file` description carries one example call with `old_string` and
+`new_string`. The `run_command` description shows `executable` holding only the
+program, each argument as a separate `args` item, and an explicit `sh -c` for
+shell syntax: the [edit comparison](edit-verification.md) recorded an exit 127
+when a whole command line was sent as `executable`.
 
 A call that omits a required argument and adds undeclared ones, such as
 `edit_file` with `write_file`'s `before` and `after`, is rejected with those

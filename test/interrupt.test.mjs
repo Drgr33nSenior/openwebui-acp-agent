@@ -216,7 +216,7 @@ test(
           (m) =>
             m.role === "tool" &&
             m.tool_call_id === "read-before-interrupt" &&
-            m.content === "original",
+            m.content === "1→original\n[lines 1–1 of 1; end of file]",
         ),
       );
       assert(
@@ -849,7 +849,9 @@ test(
         requests
           .at(-1)
           .messages.some(
-            (m) => m.tool_call_id === "first-read" && m.content === "original",
+            (m) =>
+              m.tool_call_id === "first-read" &&
+              m.content === "1→original\n[lines 1–1 of 1; end of file]",
           ),
       );
       assert(requests.at(-1).messages.some((m) => m.content === "done second"));

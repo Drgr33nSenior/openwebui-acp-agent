@@ -472,7 +472,10 @@ test("load replays text and tool calls with recorded outcomes without re-running
       ],
     );
     // The replayed result is the recorded one, not a new read.
-    assert.equal(calls[0].content[0].content.text, "original");
+    assert.equal(
+      calls[0].content[0].content.text,
+      "1→original\n[lines 1–1 of 1; end of file]",
+    );
     assert.equal(loaded.approvals.length, 0);
     assert.match(texts(loaded.updates), /looking.*inspected/s);
   } finally {

@@ -79,6 +79,8 @@ return to the model before a model-proposed write. The existing explicitly
 approved manual-export path retains its instruction-gate exception.
 Only an actual successful file change adds a verification target and advances
 the file mutation revision. No-op and rejected changes do neither.
+`read_file` numbers its lines; an edit argument copied with those numbers is
+refused with an explanation rather than rewritten (see [tools](tools.md#text-file-edits)).
 
 ## Open WebUI requests
 
@@ -229,7 +231,10 @@ Automatic verification collects bounded IDE file problems after agent edits and
 runs explicitly configured project checks in the selected sandbox, or with
 explicitly confirmed session-only YOLO access. Errors return to the model within
 a finite repair budget. Incomplete/denied checks never count
-as passing. See [the diagnostic contract](ide-diagnostics.md).
+as passing. See [the diagnostic contract](ide-diagnostics.md). Before that, a
+turn that changed behavior-affecting files without a later run gets one
+reminder through the same continuation; see
+[definition of done](tools.md#definition-of-done).
 
 ## Permissions, files and state
 

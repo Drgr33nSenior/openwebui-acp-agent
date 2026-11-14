@@ -25,7 +25,7 @@ other agents, installed configurations, credentials and sessions.
 | `agent.ts`, `turns.ts`, `modes.ts`                                                | ACP sessions, model/tool rounds, queue/interruption, selectors, verification |
 | `backend.ts`, `harness.ts`, `reasoning.ts`, `usage.ts`                            | Inference parsing, safe recovery, workflow prompt, model controls and usage  |
 | `config.ts`, `auth.ts`, `setup.ts`, `cli.ts`                                      | Private state, secure-store authentication and executable routing            |
-| `workspace.ts`, `prompt.ts`, `instructions.ts`                                    | Canonical boundaries, editor context and scoped AGENTS.md                    |
+| `workspace.ts`, `reading.ts`, `prompt.ts`, `instructions.ts`                      | Boundaries, paged reads/search, editor context and scoped AGENTS.md          |
 | `permissions.ts`, `policy.ts`, `reviewer.ts`                                      | Grants, administrator rules and advisory-only review                         |
 | `commands.ts`, `jobs.ts`, `sandbox*.ts`, `macos-sandbox.ts`, `protected-paths.ts` | Bounded owned execution and platform protection                              |
 | `mcp.ts`, `ide-mcp.ts`, `user-mcp.ts`, `server-tools.ts`                          | Direct MCP and separate Open WebUI tasks                                     |

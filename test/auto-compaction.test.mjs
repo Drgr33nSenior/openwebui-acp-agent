@@ -90,7 +90,8 @@ test.beforeEach(() => {
     "Task: inspect the fixture files. first.txt was read; nothing was changed. No checks have run.";
 });
 
-const FILE = 60000;
+// Each file is one read_file page (under 400 lines and 24,000 characters).
+const FILE = 20000;
 const read = (path, id) => ({
   role: "assistant",
   content: null,
@@ -104,8 +105,14 @@ const read = (path, id) => ({
 });
 async function client() {
   const cwd = await realpath(await mkdtemp(join(temporary, "project-")));
-  await writeFile(join(cwd, "first.txt"), "first ".repeat(FILE / 6));
-  await writeFile(join(cwd, "second.txt"), "second ".repeat(FILE / 7));
+  await writeFile(
+    join(cwd, "first.txt"),
+    ("first ".repeat(9) + "first\n").repeat(Math.floor(FILE / 60)),
+  );
+  await writeFile(
+    join(cwd, "second.txt"),
+    ("second ".repeat(7) + "second\n").repeat(Math.floor(FILE / 56)),
+  );
   const app = new ClientApp(),
     agent = createAgent(),
     updates = [];
