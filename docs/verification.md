@@ -286,6 +286,42 @@ no issues. No live inference or interactive IDE acceptance was run for this
 revision. The context wheel still depends on
 subsequent provider usage; no estimated percentage or artificial reset is sent.
 
+## Saved session size and file listings (unreleased)
+
+`test/session-store.test.mjs` covers the trimming function: an unchanged record
+within the limit, oldest-first excerpts with intact tool-call pairing, IDs,
+names, paths and failure status, untouched latest turns, system message,
+guidance, summary and pinned request, deterministic output, the fallback that
+keeps only the summary and latest turns (with remapped compaction index and
+turn tags), the 10,000-message limit, a near-8 MB record that saves, lists and
+loads, and a fork fitted by UTF-8 bytes. `test/sessions.test.mjs` adds ACP
+tests: a 9 MB transcript saves under 8 MB with redacted excerpts, the live
+transcript is unchanged and the notice appears once; a trimmed session loads
+without inference or approval, replays markers and rewinds files exactly from
+checkpoints; after turns are dropped, `/rewind` refuses missing turn numbers and
+leaves edits from dropped turns to `/undo`. `test/next-workflows.test.mjs` now
+checks that a transcript larger than the limit no longer blocks an edit and
+that its checkpoint is stored exactly; it previously asserted the refusal.
+`test/core.test.mjs` covers the default ignores, `.gitignore` re-inclusion, a
+large `.venv` that previously exceeded the discovery limit, the listing cap and
+note, `path` subtrees with refusal of outside, sensitive, symlinked and file
+paths, and `search_text` finding a match beyond the capped listing.
+
+Synthetic timing on macOS 27.0 with Node 26.11.1 (sessions of 7.99 MB and 1588
+messages, built from the size profile of a real long session, not its content):
+listing 1, 8 and 31 such sessions took 34, 142 and 686 ms; one validated load
+took 10 to 14 ms. Fitting a 10.7 MB in-memory transcript took 25 to 62 ms and the
+private atomic write 43 to 75 ms per save. Process peak RSS, including fixture
+generation, stayed under 270 MB. ACP replay sends one update per message, with
+tool results capped at 16,000 characters, so no single message approaches the
+2 MB inbound line limit.
+
+On macOS 27.0 with Node 26.11.1, `npm ci --ignore-scripts`, lint, typecheck,
+Prettier, build and `npm test` passed: **462 tests, 456 passed, six platform
+skips, zero failures**. `npm pack`, installation into a fresh temporary prefix
+and `test/package-install.mjs` passed. Checkout and installed production audits
+found zero vulnerabilities. No live Open WebUI or IDE session was run; how a
+client renders the notice and replayed markers is unverified.
 ## Compaction summary requests (unreleased)
 
 `test/auto-compaction.test.mjs` sets the session to `xhigh` with levels declared

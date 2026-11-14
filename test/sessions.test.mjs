@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, realpath, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, readFile, writeFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
@@ -11,7 +11,8 @@ const temporary = await mkdtemp(join(tmpdir(), "ow-sessions-"));
 process.env.OPENWEBUI_ACP_HOME = join(temporary, "state");
 process.env.OPENWEBUI_API_KEY = "synthetic-sessions-credential";
 const { createAgent } = await import("../dist/agent.js");
-const { configSchema, writeJson, readJson } = await import("../dist/config.js");
+const { configSchema, writeJson, readJson, SESSION_RECORD_BYTES, directory } =
+  await import("../dist/config.js");
 const { Turns } = await import("../dist/turns.js");
 const { Jobs, jobStatusText } = await import("../dist/jobs.js");
 const {
@@ -165,8 +166,9 @@ async function client({
   };
 }
 
-// Two turns, each with one approved agent edit to a.txt.
-async function twoEdits(c) {
+// Two turns, each with one approved agent edit to a.txt. `between` runs
+// after the first turn.
+async function twoEdits(c, between = () => {}) {
   respond = (request, res) => {
     if (afterTool(request)) return reply(res, `done ${latestUser(request)}`);
     if (latestUser(request) === "first edit")
@@ -188,6 +190,7 @@ async function twoEdits(c) {
     reply(res, "unexpected");
   };
   assert.equal((await c.prompt("first edit")).stopReason, "end_turn");
+  between();
   assert.equal((await c.prompt("second edit")).stopReason, "end_turn");
   assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "two");
 }
@@ -781,6 +784,171 @@ test("rewinding an agent-created file needs a safe delete", async () => {
     }
   } finally {
     await c.close();
+  }
+});
+
+// ------------------------------------------------- saved-copy trimming
+
+// Completed older turns: one read_file group of `bytes` characters each.
+function oldTurns(count, bytes, first = "") {
+  const out = [];
+  for (let i = 0; i < count; i++)
+    out.push(
+      { role: "user", content: `old ${i}` },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [call("read_file", { path: `old-${i}.txt` }, `old-${i}`)],
+      },
+      {
+        role: "tool",
+        tool_call_id: `old-${i}`,
+        content: (i ? "" : first) + "x".repeat(bytes),
+      },
+      { role: "assistant", content: `read ${i}` },
+    );
+  return out;
+}
+// Inserts them after the system message as history an earlier compaction
+// already summarized, as a long session holds it.
+function addSummarizedTurns(c, turns) {
+  const s = c.state();
+  s.messages.splice(1, 0, ...turns);
+  s.compaction = {
+    summary: "Earlier file reads were summarized.",
+    through: 1 + turns.length,
+    count: 1,
+    automatic: false,
+  };
+}
+const trimmedNotice =
+  /Older tool output was trimmed from this session's saved copy/g;
+
+test("saving trims only the stored copy, redacts excerpts and tells the user once", async () => {
+  const c = await client();
+  try {
+    await c.prompt("start");
+    // About 9 MB of earlier results, more than one saved session may hold.
+    addSummarizedTurns(
+      c,
+      oldTurns(90, 100000, "synthetic-sessions-credential "),
+    );
+    const live = c.state().messages.length;
+    c.updates.length = 0;
+    assert.equal((await c.prompt("next")).stopReason, "end_turn");
+    const file = join(directory, `session-${c.id}.json`);
+    assert((await stat(file)).size <= SESSION_RECORD_BYTES);
+    const saved = await readJson(`session-${c.id}.json`);
+    assert.equal(saved.messages.length, c.state().messages.length);
+    assert.match(
+      saved.messages[3].content,
+      /^\[REDACTED\] x+\n\[trimmed from the saved session: \d+ bytes\]\nx+$/,
+    );
+    assert(!JSON.stringify(saved).includes("synthetic-sessions-credential"));
+    assert.equal(saved.messages[2].tool_calls[0].id, "old-0");
+    // The latest turns are stored whole.
+    assert.deepEqual(saved.messages.slice(-6), c.state().messages.slice(-6));
+    // The live transcript is unchanged.
+    assert.equal(c.state().messages.length, live + 2);
+    assert.equal(c.state().messages[3].content.length, 100000 + 30);
+    assert.equal(texts(c.updates).match(trimmedNotice)?.length, 1);
+    c.updates.length = 0;
+    await c.prompt("again");
+    assert.equal(texts(c.updates).match(trimmedNotice), null);
+    assert((await stat(file)).size <= SESSION_RECORD_BYTES);
+  } finally {
+    await c.close();
+  }
+});
+
+test("a trimmed session loads, replays markers and rewinds files from exact checkpoints", async () => {
+  const c = await client();
+  try {
+    await c.prompt("start");
+    addSummarizedTurns(c, oldTurns(90, 100000));
+    await twoEdits(c);
+  } finally {
+    await c.close();
+  }
+  const before = requests.length;
+  const loaded = await client({
+    method: "session/load",
+    sessionId: c.id,
+    cwd: c.cwd,
+  });
+  try {
+    assert.equal(requests.length, before, "load makes no inference request");
+    assert.equal(loaded.approvals.length, 0);
+    const calls = loaded.updates
+      .map((u) => u.update)
+      .filter((u) => u.sessionUpdate === "tool_call");
+    assert.equal(calls[0].toolCallId, "old-0");
+    assert.equal(calls[0].status, "completed");
+    assert.match(
+      calls[0].content[0].content.text,
+      /\[trimmed from the saved session: 100000 bytes\]/,
+    );
+    assert.deepEqual(
+      calls.slice(-2).map((u) => [u.toolCallId, u.status]),
+      [
+        ["w1", "completed"],
+        ["w2", "completed"],
+      ],
+    );
+    // Turn 92 is "first edit": 90 older turns, then "start".
+    loaded.updates.length = 0;
+    await loaded.prompt("/rewind");
+    assert.match(texts(loaded.updates), /92\. first edit \[1 agent edit\]/);
+    await loaded.prompt("/rewind 92");
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "original");
+    assert.equal(
+      loaded.approvals.at(-1).toolCall.content[0].newText,
+      "original",
+    );
+  } finally {
+    await loaded.close();
+  }
+});
+
+test("turns dropped from the saved copy cannot be rewound; their edits stay for /undo", async () => {
+  const c = await client();
+  try {
+    c.state().compaction.automatic = false;
+    // Grow past the message limit between the two edits' turns.
+    await twoEdits(c, () => {
+      for (let i = 0; i < 5100; i++)
+        c.state().messages.push(
+          { role: "user", content: `filler ${i}` },
+          { role: "assistant", content: `ok ${i}` },
+        );
+    });
+  } finally {
+    await c.close();
+  }
+  const saved = await readJson(`session-${c.id}.json`);
+  assert(saved.messages.length <= 10000);
+  assert.deepEqual(Object.values(saved.checkpointTurns).sort(), [0, 3]);
+  const loaded = await client({
+    method: "session/load",
+    sessionId: c.id,
+    cwd: c.cwd,
+  });
+  try {
+    await loaded.prompt("/rewind 9");
+    assert.match(texts(loaded.updates), /Choose a turn from 1 to 3/);
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "two");
+    loaded.updates.length = 0;
+    // Turn 3 is now "second edit". The first edit's turn is gone, so the
+    // rewind cannot reach "original"; it reports the edit left for /undo.
+    await loaded.prompt("/rewind 3");
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "one");
+    assert.match(
+      texts(loaded.updates),
+      /nor 1 earlier agent edit without turn information/,
+    );
+    assert.equal(loaded.state().checkpoints.length, 1);
+  } finally {
+    await loaded.close();
   }
 });
 

@@ -7,6 +7,7 @@ import {
   readFile,
   symlink,
   stat,
+  rm,
 } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
@@ -23,8 +24,17 @@ assert.equal(
   process.env.OPENWEBUI_ACP_HOME,
   "Application state must use the test's private directory before any writes",
 );
-const { root, target, files, atomicEdit, changeTrust, trust } =
-  await import("../dist/workspace.js");
+const {
+  root,
+  target,
+  files,
+  listing,
+  atomicEdit,
+  changeTrust,
+  trust,
+  LISTING_ENTRIES,
+  LISTING_BYTES,
+} = await import("../dist/workspace.js");
 const { Backend } = await import("../dist/backend.js");
 const { createAgent } = await import("../dist/agent.js");
 const { reasoningChoices, reasoningPayload, defaultReasoning } =
@@ -1272,6 +1282,167 @@ test("nested ignore rules and scoped negation", async () => {
   assert(result.includes("sub/public.txt"));
   assert(!result.includes("sub/skip.log"));
   assert(!result.includes("sub/private.txt"));
+});
+async function tree(r, paths) {
+  for (const p of paths) {
+    await mkdir(join(r, p, ".."), { recursive: true });
+    await writeFile(join(r, p), "text");
+  }
+}
+test("generated environments, caches and build output are skipped without .gitignore", async () => {
+  const r = join(temp, "default-ignores");
+  await tree(r, [
+    "src/main.py",
+    "README.md",
+    ".venv/lib/site.py",
+    "venv/lib/site.py",
+    "pkg/__pycache__/main.cpython.pyc",
+    ".mypy_cache/x.json",
+    ".pytest_cache/v",
+    ".tox/py/x",
+    "dist/out.js",
+    "web/build/out.js",
+    "target/classes/A.class",
+    ".gradle/cache",
+    "src/.DS_Store",
+    "node_modules/x/index.js",
+    ".git/HEAD",
+    ".idea/workspace.xml",
+  ]);
+  assert.deepEqual((await files(r)).sort(), ["README.md", "src/main.py"]);
+  // A project .gitignore negation lists a default-ignored directory again.
+  await writeFile(join(r, ".gitignore"), "!build/\n");
+  assert.deepEqual((await files(r)).sort(), [
+    ".gitignore",
+    "README.md",
+    "src/main.py",
+    "web/build/out.js",
+  ]);
+  // A large environment no longer exhausts the discovery limit.
+  for (let i = 0; i < 101; i++)
+    await tree(
+      r,
+      Array.from({ length: 100 }, (_, j) => `.venv/p${i}/m${j}.py`),
+    );
+  assert.equal((await files(r)).length, 4);
+});
+test("list_files output is capped with a count and a path hint", async () => {
+  const paths = [
+    "README.md",
+    ...Array.from({ length: 700 }, (_, i) => `src/deep/m${i}.ts`),
+    ...Array.from({ length: 50 }, (_, i) => `docs/d${i}.md`),
+  ];
+  const text = listing(paths);
+  const [json, note] = text.split("\n");
+  const shown = JSON.parse(json);
+  assert(shown.length <= LISTING_ENTRIES);
+  assert(Buffer.byteLength(text) <= LISTING_BYTES);
+  // The shallowest entries come first, so the layout stays visible.
+  assert(shown.includes("README.md"));
+  assert(shown.includes("docs/d49.md"));
+  assert.match(
+    note,
+    new RegExp(
+      `^\\[${paths.length - shown.length} more entries not shown, in src/ \\(\\d+\\)(, docs/ \\(\\d+\\))?; pass \`path\` to list a subdirectory\\]$`,
+    ),
+  );
+  // Small listings keep the previous plain JSON form.
+  assert.equal(listing(["a.txt", "b/c.txt"]), '["a.txt","b/c.txt"]');
+  // Omitted entries are counted per directory below the listed path.
+  const sub = listing(
+    Array.from({ length: 600 }, (_, i) => `src/deep/x${i}/m.ts`),
+    "src/deep",
+  );
+  assert.match(sub, /more entries not shown, in src\/deep\/x\d+\/ \(1\)/);
+});
+test("list_files path lists a subtree through the workspace checks", async () => {
+  const r = join(temp, "path-listing");
+  await tree(r, [
+    "a.txt",
+    "src/one.ts",
+    "src/lib/two.ts",
+    "src/build/gen.js",
+    "build/out.js",
+  ]);
+  await writeFile(join(r, "src", ".gitignore"), "lib/\n");
+  await writeFile(join(r, ".gitignore"), "*.ts\n!two.ts\n");
+  assert.deepEqual(await files(r, "src"), ["src/.gitignore"]);
+  await writeFile(join(r, "src", ".gitignore"), "one.ts\n");
+  assert.deepEqual((await files(r, "src")).sort(), [
+    "src/.gitignore",
+    "src/lib/two.ts",
+  ]);
+  assert.deepEqual(await files(r, "src/lib/"), ["src/lib/two.ts"]);
+  assert.deepEqual((await files(r, ".")).sort(), (await files(r)).sort());
+  // A default-ignored directory named explicitly is listed.
+  assert.deepEqual(await files(r, "build"), ["build/out.js"]);
+  await mkdir(join(r, "node_modules", "x"), { recursive: true });
+  await mkdir(join(r, ".git"), { recursive: true });
+  for (const refused of [
+    "..",
+    "../path-listing",
+    "/etc",
+    "node_modules",
+    ".git",
+  ])
+    await assert.rejects(
+      files(r, refused),
+      /outside permitted scope|sensitive/,
+    );
+  await assert.rejects(files(r, "a.txt"), /must be a workspace directory/);
+  await assert.rejects(files(r, "missing"), { code: "ENOENT" });
+  await symlink(join(r, "src"), join(r, "linked"));
+  await assert.rejects(files(r, "linked"), /Symlink access refused/);
+});
+test("list_files path and cap through the agent; search_text searches every file", async () => {
+  const bulk = join(workspace, "bulk");
+  await tree(
+    workspace,
+    Array.from({ length: 650 }, (_, i) => `bulk/d${i % 13}/f${i}.txt`),
+  );
+  await writeFile(join(bulk, "d12", "f649.txt"), "needle-in-the-last-file");
+  try {
+    requests = [];
+    response = async (_, res) =>
+      json(
+        res,
+        requests.length === 1
+          ? {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                call("list_files", {}, "all"),
+                call("list_files", { path: "bulk/d3" }, "sub"),
+                call("list_files", { path: "../" }, "outside"),
+                call("list_files", { path: "node_modules" }, "protected"),
+                call("search_text", { text: "needle-in-the" }, "search"),
+              ],
+            }
+          : { role: "assistant", content: "done" },
+      );
+    const c = await client();
+    await c.c.agent.request("session/prompt", {
+      sessionId: c.s.sessionId,
+      prompt: [{ type: "text", text: "inspect" }],
+    });
+    await c.close();
+    const results = Object.fromEntries(
+      requests[1].messages
+        .filter((m) => m.role === "tool")
+        .map((m) => [m.tool_call_id, m.content]),
+    );
+    assert.match(results.all, /more entries not shown, in bulk\/ \(\d+\)/);
+    assert(Buffer.byteLength(results.all) <= LISTING_BYTES);
+    assert.equal(JSON.parse(results.sub).length, 50);
+    assert.match(results.outside, /outside permitted scope/);
+    assert.match(results.protected, /outside permitted scope or sensitive/);
+    assert.equal(
+      results.search,
+      "bulk/d12/f649.txt:1: needle-in-the-last-file",
+    );
+  } finally {
+    await rm(bulk, { recursive: true });
+  }
 });
 test("command internal timeout and output limit kill owned processes", async () => {
   const signal = AbortSignal.timeout(5000);

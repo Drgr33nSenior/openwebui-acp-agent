@@ -256,7 +256,10 @@ writes re-read under a lock and atomically replace files without losing unrelate
 records. Malformed/symlinked stores fail closed. Native Windows persistence is
 disabled until appropriate ACL handling exists.
 
-Sessions restore conversation without replaying tools. Forks exclude live grants,
+Sessions restore conversation without replaying tools. Saving fits each record
+to 8 MB by trimming the oldest tool output in the stored copy only. Checkpoints,
+the compaction summary and pinned requests are never trimmed, and the latest
+three turns only when they alone exceed the limit. Forks exclude live grants,
 processes and checkpoints; exports require an approved workspace write.
 Background jobs belong to one live session and stop with cancellation/revocation.
 Job progress updates are coalesced to about one per second and carry a bounded

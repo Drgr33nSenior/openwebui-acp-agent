@@ -18,7 +18,8 @@ const temp = await mkdtemp(join(tmpdir(), "ow-next-flows-"));
 process.env.OPENWEBUI_ACP_HOME = join(temp, "state");
 process.env.OPENWEBUI_API_KEY = "synthetic-next-flow-key";
 const { createAgent } = await import("../dist/agent.js");
-const { writeJson, readJson, configSchema } = await import("../dist/config.js");
+const { writeJson, readJson, configSchema, SESSION_RECORD_BYTES } =
+  await import("../dist/config.js");
 let pending = [];
 const requests = [];
 const server = createServer(async (req, res) => {
@@ -391,42 +392,51 @@ test("manual undo and export outcomes reach subsequent inference and restore wit
   }
 });
 
-test("edit storage preflight refuses a checkpoint near the transcript quota before approval or mutation", async () => {
+test("a transcript beyond the session storage limit no longer blocks an edit or its exact checkpoint", async () => {
   const c = await client();
   try {
     await c.prompt("Prepare a long-lived coding session");
     const before = "B".repeat(90000),
       after = "A".repeat(90000);
     await writeFile(join(c.cwd, "a.txt"), before);
+    // Nine large completed results: more than one saved session may hold.
     c.state().messages.push(
-      { role: "assistant", content: "X".repeat(800000) },
-      { role: "assistant", content: "Y".repeat(800000) },
+      ...Array.from({ length: 9 }, (_, i) => ({
+        role: "assistant",
+        content: String(i).repeat(1_000_000),
+      })),
     );
     // Keep original history locally while sending only its established summary.
     c.state().compaction = {
       summary:
-        "Two large completed fixture results; the next file edit is pending.",
+        "Nine large completed fixture results; the next file edit is pending.",
       through: c.state().messages.length,
       count: 1,
       automatic: false,
     };
     const approvals = c.approvals.length;
     pending = [[call("write_file", { path: "a.txt", before, after }, "quota")]];
-    await c.prompt("Apply the proposed change only if its checkpoint fits");
-    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), before);
-    assert.equal(c.approvals.length, approvals);
-    assert.equal(c.state().checkpoints.length, 0);
-    const failure = events(c)
-      .filter((e) => e.toolCallId === "quota")
-      .at(-1);
-    assert.equal(failure.status, "failed");
-    assert.match(
-      JSON.stringify(failure.content),
-      /Session checkpoint budget exceeded/,
+    await c.prompt("Apply the proposed change");
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), after);
+    assert.equal(c.approvals.length, approvals + 1);
+    assert.equal(c.state().checkpoints.length, 1);
+    assert.equal(
+      events(c)
+        .filter((e) => e.toolCallId === "quota")
+        .at(-1).status,
+      "completed",
     );
     const saved = await readJson(`session-${c.id}.json`);
-    assert.equal(saved.checkpoints.length, 0);
-    assert(saved.messages.some((m) => m.content === "X".repeat(800000)));
+    assert(Buffer.byteLength(JSON.stringify(saved)) <= SESSION_RECORD_BYTES);
+    // The checkpoint is stored exactly; older transcript text is trimmed.
+    assert.equal(saved.checkpoints[0].before, before);
+    assert.equal(saved.checkpoints[0].after, after);
+    assert.match(
+      saved.messages.find((m) => m.content?.startsWith("0")).content,
+      /trimmed from the saved session: 1000000 bytes/,
+    );
+    // The live transcript keeps every result.
+    assert(c.state().messages.some((m) => m.content === "8".repeat(1_000_000)));
   } finally {
     await c.close();
   }

@@ -66,6 +66,17 @@
   Keep context notices out of buffered model text and show them once per turn.
   Explain output-limit truncation separately from malformed replies, while
   preserving the single-retry and three-compaction limits.
+- Saving a session no longer fails with "Session storage budget exceeded". The
+  per-session limit rises from 2 MB to 8 MB (10,000 messages; 256 MB in total).
+  Beyond it, the oldest tool results and arguments in the saved copy become
+  marked excerpts, then older turns are dropped. The live conversation,
+  checkpoints, the compaction summary and the latest three turns are kept, and
+  the user is told once. Large transcripts no longer block edits.
+- `list_files` skips generated environments, caches and build output by default
+  (`.venv`, `__pycache__`, `dist`, `build`, `target` and others; a `.gitignore`
+  negation lists one again), returns at most 500 entries or 16 KB with a count of
+  the rest, and accepts a `path` to list a subdirectory. `search_text` still
+  searches every file.
 
 See [verification](../verification.md), [session modes](../sessions.md#session-modes),
 [ACP v2 readiness](../design.md#acp-v2-readiness) and the

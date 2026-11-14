@@ -64,6 +64,8 @@ import {
   exportStoredSession,
   normalizeSessionTitle,
   sessionTitleSchema,
+  fitSessionRecord,
+  SESSION_MESSAGE_LIMIT,
 } from "./session-store.js";
 import { quarantineCreatedFile, UndoRecoveryError } from "./undo-created.js";
 import {
@@ -140,6 +142,7 @@ import {
   readJson,
   writeJson,
   checkJsonWrite,
+  SESSION_RECORD_BYTES,
   type Config,
 } from "./config.js";
 import {
@@ -156,6 +159,7 @@ import {
   target,
   readText,
   files,
+  listing,
   atomicEdit,
 } from "./workspace.js";
 import { command, childEnv } from "./commands.js";
@@ -229,7 +233,9 @@ function restoreHistory(messages: Message[]) {
   return messages;
 }
 const schemas = {
-  list_files: z.object({}).strict(),
+  list_files: z
+    .object({ path: z.string().min(1).max(4096).optional() })
+    .strict(),
   read_file: z.object({ path: z.string() }).strict(),
   search_text: z.object({ text: z.string().min(1).max(1000) }).strict(),
   write_file: z
@@ -276,7 +282,8 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
   function: {
     name,
     description: {
-      list_files: "List workspace files",
+      list_files:
+        "List workspace files, honouring .gitignore and skipping generated environments, caches and build output (for example .venv, __pycache__, dist, build, target). Large listings are capped and report how many entries were omitted; pass path, a workspace-relative directory, to list a subtree.",
       read_file: "Read a text file",
       search_text: "Search literal project text",
       write_file:
@@ -319,6 +326,8 @@ type Session = {
   checkpointTurns: CheckpointTurns;
   // Tool calls reported as failed, so session/load replays their real status.
   failedToolCalls: Set<string>;
+  // Whether the user was told that the saved copy was trimmed (once per session).
+  storageNotice?: "pending" | "sent";
   instructions: ProjectInstruction[];
   instructionReviewRequired?: boolean;
   root: string;
@@ -673,9 +682,18 @@ export function createAgent(
     const ids = new Set(
       s.messages.flatMap((m) => m.tool_calls?.map((c) => c.id) ?? []),
     );
-    return [...s.failedToolCalls].filter((id) => ids.has(id)).slice(-2000);
+    return [...s.failedToolCalls]
+      .filter((id) => ids.has(id))
+      .slice(-SESSION_MESSAGE_LIMIT);
   };
+  // The record written for a session. The stored copy can be trimmed to fit
+  // SESSION_RECORD_BYTES; the live transcript and turn tags stay complete.
   const sessionRecord = (s: Session, checkpoints = s.checkpoints) => {
+    const checkpointTurns = tagCheckpoints(
+      s.checkpointTurns,
+      checkpoints,
+      userTurns(s.messages).length,
+    );
     const value = {
       title: s.title,
       createdAt: s.createdAt,
@@ -699,11 +717,7 @@ export function createAgent(
       }),
       workflow: s.workflow,
       promptMode: s.promptMode,
-      checkpointTurns: tagCheckpoints(
-        s.checkpointTurns,
-        checkpoints,
-        userTurns(s.messages).length,
-      ),
+      checkpointTurns,
       failedToolCalls: failedCalls(s),
       plan: planSchema.parse(
         s.plan.map((entry) => ({
@@ -713,23 +727,30 @@ export function createAgent(
       ),
       serverRuns: s.serverRuns,
     };
-    if (Buffer.byteLength(JSON.stringify(value)) > 2_000_000)
-      throw new Error("Session storage budget exceeded");
-    return value;
+    return { ...fitSessionRecord(value), checkpointTurns };
   };
   const save = async (s: Session) => {
-    const record = sessionRecord(s);
-    s.checkpointTurns = record.checkpointTurns;
+    const { record, checkpointTurns, trimmed } = sessionRecord(s);
+    s.checkpointTurns = checkpointTurns;
+    if (trimmed && !s.storageNotice) s.storageNotice = "pending";
     await writeJson("session-" + s.id + ".json", record);
   };
+  // Tells the user once per live session, between turns, that the saved copy
+  // was trimmed. Display only: the notice is not added to the transcript.
+  const storageNotice = async (client: AgentContext, s: Session) => {
+    if (s.storageNotice !== "pending") return;
+    s.storageNotice = "sent";
+    await text(
+      client,
+      s,
+      `\n\n[Older tool output was trimmed from this session's saved copy to keep it within ${SESSION_RECORD_BYTES / 1_000_000} MB. This conversation is unchanged until you reopen it; reopened history shows trimmed entries with a marker. File checkpoints for /undo and /rewind are kept exactly.]\n`,
+    );
+  };
   const reserveEditStorage = async (s: Session, checkpoints: Checkpoint[]) => {
-    const record = sessionRecord(s, checkpoints);
-    // Leave room for the operation outcome. File and transcript writes are not
-    // one transaction; reject known quota failures before the workspace write.
-    if (Buffer.byteLength(JSON.stringify(record)) > 1_950_000)
-      throw new CheckpointError(
-        "Session checkpoint budget exceeded; export or start a new session before editing",
-      );
+    // The fitted record always meets the per-session limit; this rejects known
+    // aggregate quota failures before the workspace write. File and transcript
+    // writes are not one transaction.
+    const { record } = sessionRecord(s, checkpoints);
     await checkJsonWrite("session-" + s.id + ".json", record);
   };
   const permitted = async (s: Session, signal: AbortSignal) => {
@@ -1806,7 +1827,8 @@ export function createAgent(
         kind: name === "search_text" ? "search" : "read",
         rawInput: args,
       });
-    if (name === "list_files") return JSON.stringify(await files(s.root));
+    if (name === "list_files")
+      return listing(await files(s.root, a.path), a.path);
     if (name === "read_file") return read(client, s, a.path);
     if (name === "search_text") {
       const hits: string[] = [];
@@ -2412,7 +2434,10 @@ export function createAgent(
         createdAt: z.string().optional(),
         checkpoints: checkpointsSchema.default([]),
         checkpointTurns: checkpointTurnsSchema.default({}),
-        failedToolCalls: z.array(z.string().max(1000)).max(2000).default([]),
+        failedToolCalls: z
+          .array(z.string().max(1000))
+          .max(SESSION_MESSAGE_LIMIT)
+          .default([]),
         root: z.string(),
         url: z.string(),
         header: z.string().default("Authorization"),
@@ -2456,7 +2481,7 @@ export function createAgent(
               })
               .strict(),
           )
-          .max(2000),
+          .max(SESSION_MESSAGE_LIMIT),
       })
       .parse(await readJson("session-" + params.sessionId + ".json"));
     const r = await root(params.cwd);
@@ -2863,7 +2888,9 @@ export function createAgent(
           s.abort = turnAbort;
           const historyStart = s.messages.length;
           try {
-            return await run({ ...context, signal });
+            const response = await run({ ...context, signal });
+            await storageNotice(context.client, s);
+            return response;
           } finally {
             try {
               // This also covers cancellation during the handler's final save.
