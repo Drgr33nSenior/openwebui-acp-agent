@@ -618,6 +618,8 @@ const server = createServer(async (req, res) => {
   res.setHeader("Content-Type", "application/json");
   if (req.url === "/api/models")
     return res.end(JSON.stringify({ data: [model] }));
+  // Decoded as a stream: a multi-byte character may span two chunks.
+  req.setEncoding("utf8");
   let raw = "";
   for await (const part of req) raw += part;
   const request = JSON.parse(raw);
@@ -650,7 +652,10 @@ test.beforeEach(() => {
   model = { id: "fixture", context_window: 1_000_000 };
 });
 
+// About 20,000 characters in short lines: one read_file result whether reads
+// return the whole file or a numbered page of it.
 const FILE = 20000;
+const WHOLE = 15000; // any uncleared read result is longer than this
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"].map((n) => `${n}.txt`);
 const tool = (id, name, args) => ({
   role: "assistant",
@@ -661,7 +666,10 @@ async function client(cwd, sessionId) {
   if (!cwd) {
     cwd = await realpath(await mkdtemp(join(temporary, "project-")));
     for (const name of FILES)
-      await writeFile(join(cwd, name), `${name} `.padEnd(FILE, "x"));
+      await writeFile(
+        join(cwd, name),
+        (`${name} `.padEnd(59, "x") + "\n").repeat(Math.floor(FILE / 60)),
+      );
   }
   const app = new ClientApp(),
     agent = createAgent(),
@@ -810,6 +818,8 @@ test("the agent masks in batches before compacting, saves the boundary and sends
     assert.equal(sent.length, FILES.length + 1);
     assert.equal(requests.length, sent.length, "no summary request was needed");
     const stubs = (r) => r.messages.filter(cleared).length;
+    const recorded = (id) =>
+      c.state().messages.find((m) => m.tool_call_id === id).content;
     const batches = [];
     for (let i = 1; i < sent.length; i++) {
       if (extendsPrefix(sent[i - 1], sent[i])) continue;
@@ -821,25 +831,27 @@ test("the agent masks in batches before compacting, saves the boundary and sends
     // every round: every other request reuses the previous prefix.
     assert(batches.length >= 2 && batches.length <= 3, String(batches));
     for (const r of sent) {
-      assert(requestChars(r) / 4 <= 40000 * 0.55 + FILE / 4);
+      assert(requestChars(r) / 4 <= 40000 * 0.55 + (FILE + 4000) / 4);
       // Every call and result is still paired; the latest two results are whole.
       const results = r.messages.filter((m) => m.role === "tool");
       assert.equal(
         results.length,
         r.messages.flatMap((m) => m.tool_calls ?? []).length,
       );
-      for (const m of results.slice(-2)) assert.equal(m.content.length, FILE);
+      // The latest two results are exactly what the tools returned.
+      for (const m of results.slice(-2))
+        assert.equal(m.content, recorded(m.tool_call_id));
     }
-    assert.match(
+    assert.equal(
       sent.at(-1).messages.find(cleared).content,
-      /^\[cleared from context: read_file \{"path":"a\.txt"\} returned 20000 chars; re-run to see it again\]$/,
+      `[cleared from context: read_file {"path":"a.txt"} returned ${recorded("r1").length} chars; re-run to see it again]`,
     );
     // The transcript keeps every result.
     assert(
       c
         .state()
         .messages.filter((m) => m.role === "tool")
-        .every((m) => m.content.length === FILE),
+        .every((m) => m.content.length > WHOLE),
     );
     saved = JSON.parse(
       await readFile(
