@@ -35,9 +35,11 @@ export const policySchema = z
       .max(3)
       .optional(),
     permissionModes: z
-      .array(z.enum(["read_only", "ask", "scoped", "edits", "development"]))
+      .array(
+        z.enum(["read_only", "ask", "scoped", "edits", "development", "yolo"]),
+      )
       .min(1)
-      .max(5)
+      .max(6)
       .optional(),
     inferenceUrls: urls.optional(),
     mcpHttpUrls: urls.optional(),

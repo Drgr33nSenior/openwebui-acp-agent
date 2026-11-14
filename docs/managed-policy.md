@@ -58,11 +58,17 @@ URL in that list. These controls do not restrict downstream tools inside an
 allowed server; Open WebUI's account/model policy controls them. Delegated tasks
 require approval or a user-selected scoped grant and retain server chats.
 `alwaysAsk: ["mcp-tool"]` forces fresh approval for these tasks and direct MCP
-tools. Automatic local permission modes do not grant remote access. Internal
-server calls do not receive separate ACP approvals.
+tools. Development/edit permission modes do not grant remote access; confirmed
+YOLO approves configured remote calls unless administrator rules require a
+decision. Internal server calls do not receive separate ACP approvals.
 `alwaysAsk` overrides saved grants and automatic permission modes for the listed
 operation categories. It exposes only a single-operation allow option. A model
 review cannot override these rules or authorize a denied operation.
+
+To prohibit YOLO, omit `yolo` from an explicit `permissionModes` allowlist,
+forbid `full_access` in `sandboxModes`, or configure `networkDestinations`.
+`alwaysAsk` remains authoritative in YOLO, including for undo and server tasks.
+YOLO disables advisory review; enabling a reviewer exits YOLO.
 
 Selectors omit prohibited modes. At least one sandboxed mode and one permission
 mode that requires human decisions must remain available. Policy revisions are

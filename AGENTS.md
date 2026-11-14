@@ -39,7 +39,11 @@ Workspace activation precedes project context, executable startup and MCP.
 Canonical exact-root trust does not cover siblings, home or parent directories.
 Workspace trust, operation approval and OS isolation remain separate. Preserve
 administrator denies, revocation and late-approval cancellation. Do not add
-broad command-prefix grants or unrestricted fallbacks.
+broad command-prefix grants or unrestricted fallbacks. YOLO is a deliberate
+session-only exception: require explicit cancellable confirmation after workspace
+activation, bind it to the permission epoch and never persist/replay confirmation.
+Administrator rules still win. Preserve safe defaults and reset on revocation;
+never enter YOLO because an operation failed.
 
 Editor methods take precedence for unsaved text. A denial cannot cause a local
 fallback. Show diffs, re-read before writing, detect staleness and preserve atomic

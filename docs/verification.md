@@ -42,6 +42,15 @@ verification repair limits, compaction, jobs, checkpoints, scoped instructions
 and session listing/fork/export. Browser wrapper tests and the optional container
 fixture smoke are described in [browser setup](browser.md).
 
+## YOLO permissions
+
+`test/yolo.test.mjs` checks one-time confirmation, rejected/invalid/late decisions,
+actual unsandboxed commands, cancellation, cross-session revocation, safe restore
+and fork, administrator restrictions, MCP filters and optional project checks.
+Server-task tests cover YOLO approval and administrator overrides separately.
+These fixtures use synthetic services and isolated temporary state. Live IDE
+selector rendering and the confirmation flow still require manual acceptance.
+
 ## Compatibility
 
 | Component                            | Scope                                                                                                |
@@ -60,6 +69,9 @@ CI checks macOS and Linux suites, Windows rejection behavior and separately
 installed packages. A configured workflow is not a test result. Consult the
 source PR's checks for the exact revision; skipped platform tests do not establish
 support. Standalone Air is not interchangeable with Air in JetBrains IDEs.
+
+Native Windows implementation and preview acceptance are tracked in the
+[Windows plan](windows-plan.md); this release does not enable that platform.
 
 Manual acceptance must cover a real backend, secure-store setup, IDE controls
 and registry installation. Automated mocks cannot prove provider tool calling,

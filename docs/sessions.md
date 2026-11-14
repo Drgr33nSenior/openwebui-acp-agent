@@ -25,6 +25,20 @@ fallbacks. Diagnostic commands do not make model inference requests.
 | `/export PATH.md`, `/export PATH.json`                   | Propose an export into the workspace                           |
 | `/server-tools on\|off\|refresh`                         | Control optional Open WebUI-managed tools                      |
 
+## YOLO permissions
+
+Choose **YOLO — full access (session)** or `/permissions mode yolo`. The next
+workspace prompt asks for one explicit confirmation after workspace activation.
+A denied, invalid or cancelled reply returns to the administrator-compatible
+default approval mode. No model inference or configured process starts while
+that confirmation is pending. `/status` shows `yolo.confirmed`.
+
+Confirmation skips routine approvals and selects unsandboxed commands/local
+MCP for this session. Administrator rules and resource limits still apply.
+Restore, fork, logout and revocation do not preserve confirmation. Use
+`/permissions mode scoped` to exit; changing Sandbox or enabling Approval advice
+also exits. Plan mode still blocks execution. See [the access scope](../README.md#permissions).
+
 ## Models and context
 
 Reasoning choices come from structured Open WebUI metadata. **Model default**
@@ -69,11 +83,13 @@ The selected queue mode persists, but pending messages do not.
 ## Commands and background jobs
 
 Command output appears as bounded, redacted tool-log updates before completion.
-Background launches always require explicit approval, even in development mode.
+Background launches require explicit approval, even in development mode;
+confirmed YOLO supplies session-wide approval instead.
 There can be four running jobs and sixteen retained job results per session.
 Each job has a maximum ten-minute lifetime and 100 KB output limit; polling
 returns bounded pages. New network requests made while no turn is active are
-refused rather than creating unattended approval requests.
+refused rather than creating unattended approval requests. Unsandboxed YOLO
+jobs do not use the network approval proxy.
 
 Jobs can continue after a successful turn. Stop, logout, disconnect, revocation
 and relevant permission/model changes stop owned jobs. Interrupted turns also
@@ -83,8 +99,8 @@ undo completed writes, external requests or detached work on a remote server.
 ## Checkpoints and instructions
 
 Successful agent text edits record exact before/after content. `/undo` proposes
-a diff and always requests approval. It re-reads before applying and refuses
-when later changes make the checkpoint stale. Undo covers agent file writes,
+a diff and requests approval outside confirmed YOLO. It re-reads before applying
+and refuses when later changes make the checkpoint stale. Undo covers agent file writes,
 not shell commands, MCP actions, Git operations or remote tasks.
 
 Keep at most twenty checkpoints with a combined 500 KB content budget.
@@ -110,7 +126,8 @@ explicit, not automatically extracted from potentially sensitive prompts.
 Forks copy conversation, valid model settings, queue preference and plan state;
 they reset broad execution modes and omit jobs, tool grants, checkpoints and
 remote-task runtime state. Open a fork from the client's session history.
-Export writes a proposed Markdown or JSON transcript after explicit approval.
+Export writes a proposed Markdown or JSON transcript after approval; confirmed
+YOLO supplies that approval automatically.
 Review exported content before sharing it.
 
 Local `session-UUID.json` files retain transcripts, reasoning and bounded state.

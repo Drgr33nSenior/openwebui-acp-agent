@@ -68,7 +68,7 @@ export const storedSessionSchema = z.object({
   workflow: z.enum(["code", "plan"]).default("code"),
   plan: planSchema.default([]),
   permissionMode: z
-    .enum(["read_only", "ask", "scoped", "edits", "development"])
+    .enum(["read_only", "ask", "scoped", "edits", "development", "yolo"])
     .default("scoped"),
   sandboxMode: z
     .enum(["workspace", "read_only", "full_access"])

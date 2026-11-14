@@ -861,7 +861,7 @@ async function status(c) {
   return JSON.parse(c.updates.at(-1).content.text);
 }
 
-test("Permissions selector exposes five modes and rejects invalid values without inference", async () => {
+test("Permissions selector exposes six modes and rejects invalid values without inference", async () => {
   const c = await client(await workspace());
   try {
     const before = requests.length;
@@ -871,7 +871,7 @@ test("Permissions selector exposes five modes and rejects invalid values without
     assert.equal(option.currentValue, "ask");
     assert.deepEqual(
       option.options.map((o) => o.value),
-      ["read_only", "ask", "scoped", "edits", "development"],
+      ["read_only", "ask", "scoped", "edits", "development", "yolo"],
     );
     await assert.rejects(setMode(c, "full_access"));
     assert.equal((await status(c)).permissionMode, "ask");

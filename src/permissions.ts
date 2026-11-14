@@ -120,6 +120,12 @@ export const permissionModes = [
     description:
       "Approve workspace edits and recognized inspection/test/build commands, including GitHub reads. Network, scope expansion, other commands and MCP still need approval.",
   },
+  {
+    value: "yolo",
+    name: "YOLO — full access (session)",
+    description:
+      "After explicit confirmation, skip operation approvals and run commands and local MCP without a sandbox for this session. Administrator rules still apply. Resets on restore or revocation.",
+  },
 ] as const;
 export type PermissionMode = (typeof permissionModes)[number]["value"];
 export function parsePermissionMode(value: string): PermissionMode {
@@ -128,7 +134,7 @@ export function parsePermissionMode(value: string): PermissionMode {
   return value as PermissionMode;
 }
 const elevated = (mode: PermissionMode) =>
-  mode === "edits" || mode === "development";
+  mode === "edits" || mode === "development" || mode === "yolo";
 
 export class Permissions {
   readonly scope: string;

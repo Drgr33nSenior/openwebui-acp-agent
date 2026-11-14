@@ -38,7 +38,8 @@ that publication succeeded.
   Publish the reviewed tarball and verify the public package's integrity.
 
 Native Windows must remain excluded from support until state ACLs and execution
-are implemented and tested. Mock tests cannot replace live IDE/backend acceptance.
+are implemented and tested; see the [deferred Windows plan](windows-plan.md).
+Mock tests cannot replace live IDE/backend acceptance.
 No dependency audit or security control should be weakened to obtain a release.
 
 ## ACP registry

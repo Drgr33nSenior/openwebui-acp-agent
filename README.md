@@ -14,7 +14,8 @@ for the core coding workflow.
 
 Use Node.js 26 LTS and npm on macOS or Linux. The package also accepts Node 24;
 see [compatibility and testing](docs/verification.md). Native Windows is not
-supported. Linux needs bubblewrap, socat and ripgrep for command isolation.
+supported; see the [Windows plan](docs/windows-plan.md) for a later version.
+Linux needs bubblewrap, socat and ripgrep for command isolation.
 
 ```sh
 npm install --global https://github.com/Drgr33nSenior/openwebui-acp-agent/releases/download/v0.4.0/openwebui-acp-agent-0.4.0.tgz
@@ -109,13 +110,28 @@ Another project or Air worktree needs its own decision.
 | Use scoped approvals                 | Reuse explicit matching grants, otherwise ask.                                                                     |
 | Allow workspace edits                | Automatically approve workspace text edits for this session.                                                       |
 | Allow edits and development commands | Also approve recognized inspection/test/build commands; other commands, network access and MCP retain their rules. |
+| YOLO — full access (session) | After one confirmation, automatically approve operations and run commands/local MCP without an OS sandbox. |
 
 Where supported, approvals offer one operation, the current session, or a
 remembered workspace/backend scope. Command grants match exact arguments, not
 prefixes. Unsandboxed commands, background launches and local HTTP MCP tools
-require fresh approval. The narrow IDE file-problems exception is described in
+require fresh approval outside confirmed YOLO mode. The narrow IDE file-problems
+exception is described in
 [verification after edits](docs/ide-diagnostics.md). Optional approval advice
 also forces a human decision.
+
+Select **YOLO — full access (session)** or send `/permissions mode yolo`, then
+confirm at the next workspace prompt. Workspace activation is still required.
+YOLO permits arbitrary commands, background jobs, edits, configured MCP calls
+and enabled Open WebUI tasks without routine approval. Commands have your user
+account’s filesystem and network access, including outside the project; they can
+delete files, disclose data or change remote services. Approval advice is disabled.
+
+YOLO is session-only and resets on restore, fork, logout or revocation. Changing
+the permission mode, Sandbox setting or enabling advice exits it. Administrator
+rules, Plan mode, authentication, TLS, tool validation and resource limits remain
+enforced. File tools retain workspace/stale-content checks; MCP allowlists remain
+in effect. Optional server tools still need enabling separately.
 
 Use `/permissions` to inspect or revoke grants. Broader automatic modes reset
 when restoring a session. The separate **Sandbox** selector controls filesystem

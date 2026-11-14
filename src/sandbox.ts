@@ -42,7 +42,7 @@ export const sandboxModes = [
     value: "full_access",
     name: "Unsandboxed (session)",
     description:
-      "No OS isolation. Every command requires explicit approval. Resets on restore/revocation.",
+      "No OS isolation. Commands require approval unless YOLO is confirmed. Resets on restore/revocation.",
   },
 ] as const;
 export type SandboxMode = (typeof sandboxModes)[number]["value"];
