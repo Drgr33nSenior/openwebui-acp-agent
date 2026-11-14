@@ -9,6 +9,41 @@ search guidance requires an enabled server-task catalog with that feature.
 Plan and read-only modes omit execution guidance. This is model guidance, not a
 guarantee of successful verification or additional permission.
 
+## Listing and searching files
+
+`list_files` lists workspace files. It honours `.gitignore` files at every
+level and always skips generated environments, caches and build output, even
+without a `.gitignore`: `.venv/`, `venv/`, `__pycache__/`, `.mypy_cache/`,
+`.pytest_cache/`, `.ruff_cache/`, `.tox/`, `.nox/`, `dist/`, `build/`,
+`target/`, `.gradle/` and `.DS_Store`. These are recreated by tools, can hold
+thousands of files and are rarely what the model needs to read. A project rule
+lists one again, for example `!build/` in `.gitignore`. `.git/`, `.idea/`,
+`node_modules/` and secret files are hidden from all file tools and cannot be
+listed or read.
+
+A listing returns at most 500 entries and 16,000 bytes. A larger result shows
+the shallowest entries first, so the project layout stays visible. A final line
+counts the rest by directory, for example:
+
+```text
+[1834 more entries not shown, in src/ (1200), tests/ (634); pass `path` to list a subdirectory]
+```
+
+Pass `path`, a workspace-relative directory, to list only that subtree:
+
+```json
+{ "path": "src/components" }
+```
+
+The path gets the same checks as `read_file`: it must stay inside the
+workspace, cannot be a symlink, and cannot be a sensitive directory. Ancestor
+`.gitignore` files still apply inside it. A default-ignored directory named
+explicitly, such as `.venv`, is listed; files excluded by a project `.gitignore`
+stay hidden.
+
+`search_text` searches every file `list_files` would return without its cap.
+It returns up to about 90,000 characters of matching lines.
+
 ## Text-file edits
 
 Use `edit_file` for small changes to an existing file:

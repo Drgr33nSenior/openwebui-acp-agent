@@ -107,7 +107,8 @@ the turn continues. When it would not fit and compaction fails, is switched off,
 has reached the limit or has no complete older history left, the turn stops
 before sending anything and says why; history and tool results are retained.
 Summaries are untrusted text, not permission grants. Compaction cannot reduce an
-indivisible oversized message or remove the local session-storage limit.
+indivisible oversized message. It does not shrink the saved transcript; see
+[saved session size](#saved-session-size).
 
 The same checks run before the single corrected-reply attempt after a malformed
 or truncated response. That request is rebuilt from the current compaction
@@ -277,9 +278,45 @@ turns and jobs and frees its slot. It keeps the saved transcript.
 
 Local `session-UUID.json` files retain transcripts, reasoning and bounded state.
 Loading rechecks roots, consent and policy; executed tools never replay. Limits
-include 32 live sessions, 1000 stored sessions, 2 MB per serialized session and
-64 MB aggregate storage. Quota exhaustion stops work rather than deleting or
-silently truncating history. Stop the agent before deleting selected transcript
-files. Keep configuration/trust files unless you intend to remove those too.
-Known configured secrets are redacted, but arbitrary secrets in user text or
-source files cannot be recognized reliably.
+include 32 live sessions, 1000 stored sessions, 8 MB and 10,000 messages per
+saved session, and 256 MB aggregate storage. A session that outgrows its own
+limit is trimmed as described below. Aggregate quota exhaustion stops work
+rather than deleting other sessions. Stop the agent before deleting selected
+transcript files. Keep configuration/trust files unless you intend to remove
+those too. Known configured secrets are redacted, but arbitrary secrets in user
+text or source files cannot be recognized reliably.
+
+### Saved session size
+
+The saved file keeps the full transcript, so long sessions grow even when
+compaction keeps the model's context small. Saving never fails because one
+session is too large. When the record would exceed 8 MB or 10,000 messages,
+the agent trims the saved copy, oldest messages first, and stops as soon as it
+fits:
+
+1. Large tool results and tool-call arguments (over 4,000 bytes) in turns
+   before the latest three become an excerpt: the first 1,200 and last 600
+   characters around `[trimmed from the saved session: N bytes]`, where N is the
+   original size. Arguments stay JSON with the same keys, so file paths, tool
+   names, call IDs, result pairing and recorded success or failure are kept.
+2. If that is not enough, older message text keeps only its first 160
+   characters and the marker.
+3. Then older turns are removed. The compaction summary, the request it pins
+   with its steering messages, the system message and the AGENTS.md guidance
+   message are kept, together with the latest three turns.
+4. Only if the latest turns alone are too large are their results, then the
+   older of those turns, reduced the same way. The current request is kept until
+   nothing else remains.
+
+Excerpts are cut from the already redacted text. The live conversation is not
+changed: the model and `/rewind` keep using the full transcript until the
+session is reopened. The first time a session is trimmed, a notice appears at
+the end of that turn. Reopened history shows each trimmed entry with its
+marker, and a resumed model sees the marker instead of the removed text.
+
+File checkpoints are never trimmed. They must stay exact, and their own limit
+(twenty checkpoints, 500 KB) keeps them well within the session limit. A
+reopened session therefore rewinds files from exact content. If whole turns
+were removed, their numbers are gone: `/rewind` lists the remaining turns and
+refuses others. Edits made in removed turns are no longer tied to a turn. Rewind
+leaves them in place and reports them, and they remain available to `/undo`.

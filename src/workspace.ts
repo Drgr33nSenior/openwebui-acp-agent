@@ -7,7 +7,15 @@ import {
   unlink,
 } from "node:fs/promises";
 import { constants } from "node:fs";
-import { resolve, relative, isAbsolute, parse, dirname, join } from "node:path";
+import {
+  resolve,
+  relative,
+  isAbsolute,
+  parse,
+  dirname,
+  join,
+  basename,
+} from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -233,11 +241,53 @@ export async function readText(r: string, p: string) {
   if (text.includes("\0")) throw new Error("Binary file refused");
   return text;
 }
-export async function files(r: string) {
+// Generated environments, caches and build output that projects normally keep
+// out of version control. Applied before any .gitignore, so a project rule such
+// as `!build/` lists one again. .git, .idea and node_modules are hidden by the
+// sensitive-path rule above and cannot be listed or read at all.
+export const DEFAULT_IGNORES = [
+  ".venv/",
+  "venv/",
+  "__pycache__/",
+  ".mypy_cache/",
+  ".pytest_cache/",
+  ".ruff_cache/",
+  ".tox/",
+  ".nox/",
+  "dist/",
+  "build/",
+  "target/",
+  ".gradle/",
+  ".DS_Store",
+];
+// `name` rules match an entry's own name only. The defaults are name patterns,
+// and matching the whole path would also hide the contents of a directory a
+// project rule re-included, because the matcher checks parent directories.
+type IgnoreRules = {
+  base: string;
+  matcher: ReturnType<typeof ignore>;
+  name?: boolean;
+};
+const ignoredBy = (rules: IgnoreRules[], p: string, directory: boolean) => {
+  let ignored = false;
+  for (const rule of rules) {
+    const decision = rule.matcher.test(
+      (rule.name ? basename(p) : relative(rule.base, p).replaceAll("\\", "/")) +
+        (directory ? "/" : ""),
+    );
+    if (decision.ignored) ignored = true;
+    else if (decision.unignored) ignored = false;
+  }
+  return ignored;
+};
+// Workspace files, honouring DEFAULT_IGNORES and nested .gitignore files. With
+// `path`, only that workspace directory is walked; ancestor .gitignore files
+// still apply below it. A default-ignored directory can be named explicitly;
+// target() still refuses sensitive, outside and symlinked paths.
+export async function files(r: string, path?: string) {
   const out: string[] = [];
   let visited = 0;
-  type Rules = { base: string; matcher: ReturnType<typeof ignore> };
-  async function walk(dir: string, inherited: Rules[]) {
+  async function rulesFor(dir: string, inherited: IgnoreRules[]) {
     const rules = [...inherited];
     try {
       const path = await target(r, relative(r, join(dir, ".gitignore")));
@@ -245,27 +295,83 @@ export async function files(r: string) {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
     }
+    return rules;
+  }
+  async function walk(dir: string, inherited: IgnoreRules[]) {
+    const rules = await rulesFor(dir, inherited);
     for (const e of await readdir(dir, { withFileTypes: true })) {
-      if (++visited > 10000) throw new Error("Discovery limit exceeded");
+      if (++visited > 10000)
+        throw new Error(
+          "Discovery limit exceeded; pass a narrower path to list_files",
+        );
       const p = join(dir, e.name),
         rel = relative(r, p).replaceAll("\\", "/");
       if (e.isSymbolicLink() || sensitive.test(rel)) continue;
-      let ignored = false;
-      for (const rule of rules) {
-        const decision = rule.matcher.test(
-          relative(rule.base, p).replaceAll("\\", "/") +
-            (e.isDirectory() ? "/" : ""),
-        );
-        if (decision.ignored) ignored = true;
-        else if (decision.unignored) ignored = false;
-      }
-      if (ignored) continue;
+      if (ignoredBy(rules, p, e.isDirectory())) continue;
       if (e.isDirectory()) await walk(p, rules);
       else if (e.isFile()) out.push(rel);
     }
   }
-  await walk(r, []);
+  let start = r;
+  let rules: IgnoreRules[] = [
+    { base: r, matcher: ignore().add(DEFAULT_IGNORES), name: true },
+  ];
+  const requested = path?.replaceAll("\\", "/").replace(/\/+$/, "");
+  if (requested && requested !== ".") {
+    start = await target(r, requested);
+    if (!(await lstat(start)).isDirectory())
+      throw new Error("list_files path must be a workspace directory");
+    // Ancestors' .gitignore files apply to the requested subtree.
+    const parts = relative(r, start).split(/[\\/]/);
+    for (let i = 0, dir = r; i < parts.length; dir = join(dir, parts[i++]!))
+      rules = await rulesFor(dir, rules);
+  }
+  await walk(start, rules);
   return out;
+}
+// list_files output bounds. The full set stays available to search_text.
+export const LISTING_ENTRIES = 500;
+export const LISTING_BYTES = 16_000;
+// Bounded model-facing listing. When the set is larger, the shallowest entries
+// are shown (so the project's layout is visible) and the rest are counted per
+// directory, pointing the model at `path` for a subtree.
+export function listing(paths: string[], path?: string) {
+  if (paths.length <= LISTING_ENTRIES) {
+    const text = JSON.stringify(paths);
+    if (Buffer.byteLength(text) <= LISTING_BYTES) return text;
+  }
+  const depth = (p: string) => p.split("/").length;
+  const ordered = paths
+    .map((p, index) => ({ p, index }))
+    .sort((a, b) => depth(a.p) - depth(b.p) || a.index - b.index);
+  const shown: string[] = [];
+  let bytes = 2;
+  for (const { p } of ordered) {
+    const size = Buffer.byteLength(JSON.stringify(p)) + 1;
+    if (shown.length >= LISTING_ENTRIES || bytes + size > LISTING_BYTES - 1000)
+      break;
+    shown.push(p);
+    bytes += size;
+  }
+  const visible = new Set(shown);
+  const base = path?.replaceAll("\\", "/").replace(/\/+$/, "") ?? "";
+  const prefix = base && base !== "." ? base + "/" : "";
+  const omitted = new Map<string, number>();
+  for (const p of paths) {
+    if (visible.has(p)) continue;
+    const rest = p.startsWith(prefix) ? p.slice(prefix.length) : p;
+    const dir = rest.includes("/") ? prefix + rest.split("/")[0] + "/" : "./";
+    omitted.set(dir, (omitted.get(dir) ?? 0) + 1);
+  }
+  const directories = [...omitted]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 20)
+    .map(([dir, count]) => `${dir} (${count})`)
+    .join(", ");
+  return (
+    JSON.stringify(shown.sort()) +
+    `\n[${paths.length - shown.length} more entries not shown${directories ? `, in ${directories}` : ""}; pass \`path\` to list a subdirectory]`
+  );
 }
 export async function atomicEdit(
   r: string,

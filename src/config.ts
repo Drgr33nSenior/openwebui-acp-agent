@@ -13,6 +13,11 @@ import {
 import { randomUUID } from "node:crypto";
 import { verificationSchema } from "./verification.js";
 import { DEFAULT_OUTPUT_TOKEN_BUDGET } from "./usage.js";
+// One saved session-UUID.json record, in serialized bytes. Saving trims older
+// tool output from the stored copy to stay within it (session-store.ts).
+export const SESSION_RECORD_BYTES = 8_000_000;
+// All saved session files together. Listing reads at most this much.
+export const SESSION_STORAGE_BYTES = 256_000_000;
 export const directory =
   process.env.OPENWEBUI_ACP_HOME ??
   join(
@@ -98,7 +103,8 @@ export async function readJson(name: string): Promise<unknown> {
     if (
       !s.isFile() ||
       s.isSymbolicLink() ||
-      s.size > 4_000_000 ||
+      s.size >
+        (name.startsWith("session-") ? SESSION_RECORD_BYTES : 4_000_000) ||
       s.mode & 0o077
     )
       throw new Error("Unsafe application state file");
@@ -122,7 +128,7 @@ export async function checkJsonWrite(name: string, value: unknown) {
       );
     let total = 0;
     for (const n of names) total += (await lstat(join(directory, n))).size;
-    if (total + Buffer.byteLength(encoded) > 64_000_000)
+    if (total + Buffer.byteLength(encoded) > SESSION_STORAGE_BYTES)
       throw new Error(
         "Transcript storage quota reached; delete old sessions explicitly",
       );
