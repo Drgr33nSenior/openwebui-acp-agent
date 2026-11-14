@@ -439,7 +439,10 @@ test("invalid summary cannot execute tools or replace retained context", async (
     assert.equal(c.state().compaction.count, 0);
     assert.deepEqual(c.state().messages, original);
     assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "unchanged");
-    assert.match(lastText(c), /invalid or incomplete summary/);
+    assert.match(
+      lastText(c),
+      /Compaction failed: the summary reply contained tool calls\. Original context retained/,
+    );
     assert.equal(c.executed.length, 0);
   } finally {
     await c.close();

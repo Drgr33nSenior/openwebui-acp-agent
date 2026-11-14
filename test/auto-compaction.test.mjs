@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, writeFile, realpath } from "node:fs/promises";
+import { mkdtemp, writeFile, realpath, rm } from "node:fs/promises";
+import { readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClientApp } from "@agentclientprotocol/sdk";
@@ -48,14 +49,27 @@ const server = createServer(async (req, res) => {
   const request = JSON.parse(raw);
   requests.push(request);
   if (requests.length === 1 && holdFirst) await holdFirst;
+  // A summary answer is its text, or { content, finish_reason } or { status }.
+  const answer = request.tools.length === 0 ? summary(request) : undefined;
+  if (answer?.status) {
+    res.statusCode = answer.status;
+    return res.end(
+      JSON.stringify({ error: { message: "synthetic summary failure" } }),
+    );
+  }
   const message =
     request.tools.length === 0
-      ? { role: "assistant", content: summary(request) }
+      ? { role: "assistant", content: answer?.content ?? answer }
       : (pending.shift() ?? { role: "assistant", content: "Done" });
   res.end(
     JSON.stringify({
       choices: [
-        { message, finish_reason: message.tool_calls ? "tool_calls" : "stop" },
+        {
+          message,
+          finish_reason:
+            answer?.finish_reason ??
+            (message.tool_calls ? "tool_calls" : "stop"),
+        },
       ],
       usage: {
         prompt_tokens: Math.ceil(requestChars(request) / 4),
@@ -118,6 +132,12 @@ async function client() {
         .filter((u) => u.sessionUpdate === "agent_message_chunk")
         .map((u) => u.content.text)
         .join(""),
+    select: (configId, value) =>
+      connection.agent.request("session/set_config_option", {
+        sessionId,
+        configId,
+        value,
+      }),
     prompt: (text = "Inspect the fixture files") =>
       connection.agent.request("session/prompt", {
         sessionId,
@@ -143,12 +163,13 @@ async function baseline() {
 }
 // Two file reads fit one at a time but not together: the third request of the
 // turn exceeds the usable input while reported usage stays under the 80% rule.
-async function tightModel() {
+async function tightModel(extra = {}) {
   const usable = Math.ceil(((await baseline()) + 1.5 * FILE) / 4);
   model = {
     id: "fixture",
     context_window: usable + 8000,
     max_output_tokens: 8000,
+    ...extra,
   };
   return usable;
 }
@@ -340,7 +361,7 @@ test("a failed compaction stops the turn before an oversized request, keeping hi
     );
     assert.match(
       c.text(),
-      /Context is full: the next request needs about \d+ input tokens.*automatic compaction failed\. Nothing was sent/,
+      /Context is full: the next request needs about \d+ input tokens.*automatic compaction failed \(the summary was empty\)\. Nothing was sent/,
     );
     assert.doesNotMatch(c.text(), /Continuing within existing context limits/);
     assert.equal(c.state().compaction.count, 0);
@@ -436,6 +457,194 @@ test("automatic compaction is bounded per turn", async () => {
     );
     assert(paired(contextMessages(s.messages, s.compaction)));
   } finally {
+    await c.close();
+  }
+});
+
+// Provider effort levels, declared out of order with an expensive default.
+const efforts = {
+  provider_model_controls: {
+    reasoning_effort: {
+      default: "medium",
+      options: { xhigh: {}, medium: {}, none: { label: "Off" }, low: {} },
+    },
+  },
+};
+const summaries = () => requests.filter((r) => r.tools.length === 0);
+// A session at 85% reported usage with older complete groups to summarize; the
+// next request itself still fits, so a failed compaction lets the turn go on.
+async function seeded(extra = {}) {
+  model = { id: "fixture", context_window: 1_000_000, ...extra };
+  const c = await client();
+  await c.prompt("Measure");
+  const s = c.state();
+  for (let i = 0; i < 6; i++)
+    s.messages.push(read("first.txt", `seed-${i}`), {
+      role: "tool",
+      tool_call_id: `seed-${i}`,
+      content: "y".repeat(20000),
+    });
+  s.contextUsage = { used: 850_000, size: 1_000_000 };
+  requests.length = 0;
+  return c;
+}
+
+test("summary requests use the lowest declared effort and an explicit output cap, not the session's level", async () => {
+  const usable = await tightModel(efforts);
+  const c = await client();
+  try {
+    await c.select("reasoning", '["reasoning_effort","xhigh"]');
+    pending = [read("first.txt", "one"), read("second.txt", "two")];
+    assert.equal((await c.prompt()).stopReason, "end_turn");
+    assert.deepEqual(
+      requests.map((r) => r.tools.length > 0),
+      [true, true, false, true],
+    );
+    const [first, second, summaryRequest, continued] = requests;
+    for (const r of [first, second, continued]) {
+      assert.equal(r.reasoning_effort, "xhigh");
+      assert.equal(r.max_tokens, undefined);
+    }
+    assert.equal(summaryRequest.reasoning_effort, "low");
+    assert.equal(summaryRequest.max_tokens, 6000);
+    assert.match(
+      summaryRequest.messages[0].content,
+      /at most 12000 characters/,
+    );
+    // The summary input and its capped reply fit the window together.
+    assert(
+      Math.ceil(requestChars(summaryRequest) / 4) + summaryRequest.max_tokens <=
+        usable + 8000,
+    );
+    assert.equal(c.state().compaction.count, 1);
+  } finally {
+    await c.close();
+  }
+});
+
+test("a summary cut off at the output limit is retried once over fewer older messages", async () => {
+  const c = await seeded(efforts);
+  try {
+    let calls = 0;
+    summary = () =>
+      ++calls === 1
+        ? { content: "Partial", finish_reason: "length" }
+        : "Task: inspect the fixtures. The seed files were read; nothing changed.";
+    assert.equal((await c.prompt("Continue")).stopReason, "end_turn");
+    const [cut, retry] = summaries();
+    assert.equal(summaries().length, 2);
+    const history = (r) => JSON.parse(r.messages[1].content).history.length;
+    assert(history(retry) < history(cut));
+    assert(requestChars(retry) < requestChars(cut));
+    assert.equal(retry.max_tokens, 6000);
+    assert.equal(retry.reasoning_effort, "low");
+    assert.equal(c.state().compaction.count, 1);
+    assert.match(c.text(), /Context compacted/);
+    assert.doesNotMatch(c.text(), /compaction failed/i);
+    assert(requests.at(-1).tools.length > 0);
+  } finally {
+    await c.close();
+  }
+});
+
+test("automatic compaction failure notices state the reason without reply content", async () => {
+  for (const [answer, reason, attempts] of [
+    [
+      () => ({ status: 500 }),
+      "the summary request was refused \\(HTTP 500: synthetic summary failure[^)]*\\)\\)",
+      1,
+    ],
+    [() => "", "the summary was empty", 1],
+    [
+      () => ({ content: "PARTIALREPLY", finish_reason: "length" }),
+      "the summary was cut off at the output limit",
+      2,
+    ],
+    [
+      () => "PARTIALREPLY".repeat(1400),
+      "the summary exceeded 16000 characters",
+      2,
+    ],
+  ]) {
+    const c = await seeded();
+    try {
+      summary = answer;
+      assert.equal((await c.prompt("Continue")).stopReason, "end_turn");
+      assert.equal(summaries().length, attempts);
+      assert.match(
+        c.text(),
+        new RegExp(
+          `Automatic compaction failed: ${reason}\\. Original context retained\\. Continuing within existing context limits\\. Use /compact to retry`,
+        ),
+      );
+      assert.doesNotMatch(c.text(), /PARTIALREPLY/);
+      assert.equal(c.state().compaction.count, 0);
+      // The turn continued with the coding request.
+      assert(requests.at(-1).tools.length > 0);
+    } finally {
+      await c.close();
+    }
+  }
+});
+
+test("manual /compact uses the same summary request and reports why it failed", async () => {
+  const controls = { max_output_tokens: 3000, ...efforts };
+  let c = await seeded(controls);
+  try {
+    await c.select("reasoning", '["reasoning_effort","xhigh"]');
+    await c.prompt("/compact");
+    assert.equal(requests.length, 1);
+    const [request] = summaries();
+    assert.equal(request.reasoning_effort, "low");
+    // Capped at the model's smaller advertised allowance.
+    assert.equal(request.max_tokens, 3000);
+    assert.match(request.messages[0].content, /at most 6000 characters/);
+    assert.equal(c.state().compaction.count, 1);
+  } finally {
+    await c.close();
+  }
+
+  c = await seeded(controls);
+  try {
+    summary = () => "";
+    await c.prompt("/compact");
+    assert.match(
+      c.text(),
+      /Compaction failed: the summary was empty\. Original context retained\. Use \/compact to retry/,
+    );
+    assert.equal(c.state().compaction.count, 0);
+  } finally {
+    await c.close();
+  }
+
+  // Storage: fill the transcript quota during the summary request so that only
+  // the larger, compacted record fails to save; the unchanged one still fits.
+  c = await seeded(controls);
+  const filler = join(directory, "session-quota-filler.json");
+  try {
+    // Persist the seeded transcript so the measured record is the current one.
+    await c.select("autocompact", "on");
+    const own = join(directory, `session-${c.state().id}.json`);
+    summary = () => {
+      const total = readdirSync(directory)
+        .filter((n) => /^session-.*\.json$/.test(n))
+        .reduce((sum, n) => sum + statSync(join(directory, n)).size, 0);
+      writeFileSync(
+        filler,
+        "0".repeat(64_000_000 - total - statSync(own).size - 3000),
+      );
+      return "Task: inspect the fixtures. ".padEnd(6000, ".");
+    };
+    const checkpoint = structuredClone(c.state().compaction);
+    assert.equal((await c.prompt("/compact")).stopReason, "end_turn");
+    assert.match(
+      c.text(),
+      /Compaction failed: the compacted session could not be saved \(Transcript storage quota reached; delete old sessions explicitly\)\. Original context retained/,
+    );
+    assert.deepEqual(c.state().compaction, checkpoint);
+    assert.doesNotMatch(c.text(), /\.{100}/);
+  } finally {
+    await rm(filler, { force: true });
     await c.close();
   }
 });

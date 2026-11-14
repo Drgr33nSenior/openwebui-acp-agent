@@ -110,7 +110,9 @@ single re-ask requests smaller `edit_file` calls only when that tool is offered.
 Runtime guidance uses a positive integer `max_output_tokens` from model metadata
 (top level, then `openai`), or the private `outputTokenBudget` fallback of 12,288.
 This is a planning allowance, not a measured output count or a request override.
-No `max_tokens` or equivalent parameter is added to inference requests.
+No `max_tokens` or equivalent parameter is added to coding requests. Compaction
+summary requests are the exception: they send a fixed low reasoning setting and
+`max_tokens` (see [sessions](sessions.md#compaction-summary-requests)).
 
 The default remains 40 model rounds, maximum 100, with 64 attempted tool calls
 per turn. Schema failures still consume a round and tool-call allowance. No free
@@ -210,6 +212,8 @@ Compaction is separate: it retains the full local transcript and a validated
 summary checkpoint over complete older tool groups. Before each model request
 the loop estimates the request against the usable input and compacts first when
 it would not fit, at most three times per turn; see [sessions](sessions.md).
+A failed compaction reports its reason; a summary that runs out of output room
+is retried once over fewer older messages.
 Summaries, project instructions, retrieved data and tool output are untrusted
 model input. They cannot restore grants or alter destinations.
 
