@@ -2,6 +2,34 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## Browser schema compatibility (unreleased)
+
+The installation check found that Playwright MCP 0.0.85 declares JSON Schema
+2020-12 in its real tool catalog. The agent's draft-07 Ajv instance rejected that
+catalog before exposing tools, although direct wrapper smoke tests passed.
+The agent now selects Ajv's existing 2020-12 implementation for that explicit
+dialect, retaining the older validator for existing schemas. It does not remove
+schema declarations or bypass validation; unsupported dialects still fail closed.
+No dependency versions changed.
+
+On macOS 27.0/Node 26.11.1/npm 11.20.0, npm ci, typecheck, lint, the required
+Prettier scope and build passed. **276 agent tests and 17 wrapper tests passed**,
+with no failures or skips. Tests cover 2020-12-specific tuple and unevaluated
+property validation, forbidden file output, unknown dialect rejection and no
+invalid tool execution. The external fallback state directory remained empty.
+The optional `node test/browser-catalog.mjs` check passed against the actual
+pinned Playwright package through the agent's MCP client: 17 allowed tools,
+argument validation and per-call approval scope. It needs wrapper dependencies,
+launches no browser and now has a separate step in browser CI.
+
+The installed package passed its ACP/authentication discovery and real sandbox
+checks. Its MCP client discovered the 17 allowed browser tools, navigated to an
+owned local fixture and read its snapshot. These checks used isolated application
+state and no inference credentials. On 2026-11-14, the owner reported that the
+updated PyCharm installation works; this does not replace the full manual
+acceptance matrix. Hosted CI results are reported on the accompanying PR.
+Sanitized output is in [test-output-mcp-schema.txt](test-output-mcp-schema.txt).
+
 ## Browser and verification merge integration (unreleased)
 
 Merged `main` at `ccdee36` (PR #7) into the existing PR #9 branch without

@@ -109,6 +109,15 @@ The entry connects to `http://127.0.0.1:8931/mcp`. The strict `options` include:
   file-output arguments before execution. Upstream snapshot/find/console/network
   tools can otherwise save explicitly named files despite `--output-dir`.
 
+The pinned Playwright catalog declares JSON Schema 2020-12. The agent selects
+the corresponding validator from its existing Ajv dependency; it keeps the
+declared schema and validates arguments before execution. Older or undeclared
+schemas retain the previous validator, and unknown dialects fail closed. See
+[Ajv's dialect guidance](https://ajv.js.org/json-schema.html#draft-2020-12-breaking).
+After building the agent and installing the wrapper dependencies,
+`node test/browser-catalog.mjs` verifies the real pinned catalog through the
+agent without launching Chromium. The browser CI workflow runs this check too.
+
 Browser calls can change remote state. They are not read-only simply because
 some upstream tool annotations say so. The agent closes MCP sessions at the end
 of each turn; browser state survives responsive call timeouts within that turn,
