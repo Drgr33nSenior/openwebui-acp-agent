@@ -83,6 +83,7 @@ test("sandbox input and scope exceptions validate exact paths", async () => {
   const p = sandboxPolicy(plan, "/private/tmp/isolated");
   assert(p.filesystem.allowWrite.some((x) => x.path === root && x.literal));
   assert.equal(p.network.allowAllUnixSockets, false);
+  assert.equal(p.network.allowLocalBinding, false);
   assert.equal(p.enableWeakerNestedSandbox, false);
   assert.deepEqual(p.network.allowedDomains, []);
   await assert.rejects(

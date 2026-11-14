@@ -126,6 +126,31 @@ inside the container). The MCP connection itself remains host loopback. Linux
 host-service routing differs; do not assume the Mac fixture path proves Linux
 host routing or native Windows support.
 
+### Starting an application for browser checks
+
+`run_command` supports bounded background jobs. Use workspace-relative paths,
+inspect readiness and errors with `poll_job`, and stop the owned job with
+`stop_job` after verification. A running job does not establish a reachable
+HTTP service.
+
+The default macOS command sandbox blocks local socket binding. A development
+server can therefore fail with `Operation not permitted` even after command
+approval. Docker host routing does not remove that restriction. The browser
+smoke fixture starts its host server outside the command sandbox; it does not
+prove that an agent-launched server is reachable. On Linux, sandbox loopback
+belongs to its network namespace and is not the browser container's loopback.
+The agent must report blocked verification and ask for an approved hosting
+arrangement; it must not silently change execution routes or isolation.
+
+Automatic localhost browser grants and grouped snapshot grants are not enabled.
+A malicious local page can redirect, load remote resources, submit a form or
+make requests from page scripts. Checking the initial URL cannot confine those
+effects to localhost. A server can also attach effects to a nominally read-only
+tool. Before reducing approvals, implement and test an origin boundary that
+covers those paths and a bounded, approved application-hosting route. The current
+per-call approvals, tool allowlist and download/code-execution restrictions stay
+in force.
+
 ## Isolation and trust limits
 
 The supplied Compose service runs as UID/GID 1000, with no capabilities, no new

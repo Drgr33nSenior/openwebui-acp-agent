@@ -7,6 +7,7 @@ import {
 } from "./auth.js";
 import {
   codingInstruction,
+  runtimeInstruction,
   coerceToolInput,
   PermissionDeclinedError,
   toolFailure,
@@ -216,7 +217,7 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
       read_file: "Read a text file",
       search_text: "Search literal project text",
       write_file:
-        "Propose full text replacement; before must match current text, or null for creation",
+        "Propose full text replacement. before must be the entire current file, including whitespace and the final newline, not a search fragment; after is the entire replacement. Read first. Use before=null only for creation.",
       list_jobs:
         "List this session's bounded command jobs; jobs are not restarted on restore",
       poll_job:
@@ -3009,6 +3010,17 @@ export function createAgent(
               ? [serverTaskDefinition(s.serverCatalog)]
               : []),
           ];
+          const runtimeGuidance = runtimeInstruction(
+            tools,
+            s.mcp.tools,
+            s.serverCatalog?.features.includes("web_search") ?? false,
+          );
+          if (runtimeGuidance)
+            modelContext.splice(
+              modelContext.findIndex((m) => m.role !== "system"),
+              0,
+              { role: "system", content: runtimeGuidance },
+            );
           let message: Message | undefined;
           for (let attempt = 0; attempt < 2; attempt++) {
             await permitted(s, signal);

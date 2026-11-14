@@ -159,6 +159,8 @@ export async function mcpReadPaths(server: McpServer): Promise<string[]> {
 }
 export type RemoteTool = {
   label: string;
+  // Catalog identity for availability guidance only, never an authorization.
+  upstreamName: string;
   // Runs on this machine outside the agent's sandbox: a local HTTP/SSE server,
   // including the IDE bridge (terminal, run configurations). Like any unsandboxed
   // execution, each call needs its own approval; no session or remembered grant.
@@ -376,6 +378,7 @@ export class Mcp {
           const validate = validator.compile(schema);
           this.tools.set(name, {
             label: `${s.name}/${t.name}`,
+            upstreamName: t.name,
             ...(diagnosticScope && isIdeFileProblemsTool(t)
               ? { ideFileProblems: diagnosticScope }
               : {}),

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "browser-game",
+    "prompt": "Build a tiny browser game in index.html: a Start button, a target button that adds one point when clicked, a visible text score, and Restart that resets the score. Use plain HTML/CSS/JavaScript, no dependencies or external assets. Make sure it works. Document how to run it.",
+    "files": {}
+  },
+  {
+    "id": "cli-bad-input",
+    "prompt": "Create sum.mjs, a Node.js CLI that prints the sum of two integer arguments. For missing or invalid input, print a short error to stderr and exit nonzero without a stack trace. Use no dependencies. Make sure it works and document usage.",
+    "files": {}
+  },
+  {
+    "id": "regression-first",
+    "prompt": "Fix clamp(5, 0, 10): it currently returns 10 instead of 5. Add and run a failing regression test before changing the implementation, then fix it and rerun the tests. Preserve existing behavior for values below and above the range.",
+    "files": {
+      "package.json": "{\"type\":\"module\",\"scripts\":{\"test\":\"node --test\"}}\n",
+      "clamp.js": "export const clamp = (value, min, max) => Math.max(min, Math.max(max, value));\n",
+      "clamp.test.js": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport {clamp} from './clamp.js';\ntest('upper boundary', () => assert.equal(clamp(10, 0, 10), 10));\n"
+    }
+  },
+  {
+    "id": "current-documentation",
+    "prompt": "Consult the current official Node.js test-runner documentation at https://nodejs.org/api/test.html. Explain the current way to mock Date and timers in a node:test test, give a minimal example and the command to run it, and cite the official documentation. Do not rely on memory alone.",
+    "files": {}
+  }
+]
