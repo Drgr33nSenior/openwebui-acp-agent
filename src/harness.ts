@@ -40,6 +40,10 @@ export function runtimeInstruction(
       );
   }
   if (browsers.length) {
+    if (names.has("start_preview") && names.has("stop_preview"))
+      guidance.push(
+        "To test static HTML/CSS/JavaScript or built frontend output, use start_preview with the HTML entry and an explicit list of its workspace assets. It returns a ready immutable snapshot without a shell server or sandbox exception. Use containerUrl for the documented Docker Desktop browser, url for a browser on the host. Recreate the snapshot after edits, and call stop_preview after checks. This does not run framework servers, backend APIs or hot reload.",
+      );
     guidance.push(
       "Use the available browser navigation and accessibility snapshots to inspect web output. A remote browser has its own filesystem and localhost: do not invent file URLs or assume it shares the workspace. Check the configured connection topology before choosing a dev-server URL. For the documented Docker Desktop browser, host.docker.internal addresses the host; it does not open a blocked listener or grant network access.",
     );

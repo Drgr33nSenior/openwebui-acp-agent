@@ -128,26 +128,75 @@ host routing or native Windows support.
 
 ### Starting an application for browser checks
 
-`run_command` supports bounded background jobs. Use workspace-relative paths,
-inspect readiness and errors with `poll_job`, and stop the owned job with
-`stop_job` after verification. A running job does not establish a reachable
-HTTP service.
+Source builds include `start_preview` and `stop_preview` for static HTML/CSS/JS
+and built frontend output. These tools are not in the published 0.4.1 package.
+Ask the agent to preview the application and exercise its main interactions.
+With browser MCP connected, it can create a preview, navigate, click controls,
+check accessibility snapshots, and stop the preview in the same turn.
+
+`start_preview` accepts an explicit list of workspace-relative `files`, an HTML
+`entry`, optional `port` (0 selects one OS-assigned port) and `timeout_ms` (default
+120 seconds, maximum 600). The entry's directory is the web root; every listed
+asset must be within it. For example, list `dist/index.html` and
+`dist/assets/app.js`, select `dist/index.html`, and the browser can request
+`/index.html` and `/assets/app.js`. Nothing else in `dist` becomes available.
+
+Before opening a socket, the agent requests approval for the file list, entry,
+port and lifetime. Development/edit modes do not approve this operation
+automatically. The agent takes a bounded immutable snapshot, using negotiated
+editor text for unsaved text files when available. Disk reads retain symlink,
+hard-link and protected-path checks. The result contains a ready `url` for a
+host browser and `containerUrl` for the documented Docker Desktop browser.
+The agent serves the snapshot itself; no workspace program receives network
+permissions or executes in the agent process.
+
+The preview permits at most 128 selected files, 1 MB per file and 8 MB total,
+one active preview per session, eight connections, 512 requests and 64 MB of
+responses. It supports HTML, CSS, JavaScript, JSON, SVG and common image/font/media
+assets. Dotfiles, sensitive paths, directories, symlinks, hard links and unknown
+asset types are refused. GET and HEAD serve only the selected snapshot; there
+are no uploads, directory listings, backend proxies or query routes. Stop and
+recreate the preview after edits.
+
+The listener binds only `127.0.0.1`, with Host/Origin/fetch-metadata checks, no CORS
+access, no-store responses and a restrictive Content Security Policy. Other
+local processes and the configured browser can still read the approved files;
+loopback is not authentication. Page scripts execute in the browser. The policy
+blocks external subresources, off-origin fetches, forms, frames and workers,
+but is not a complete navigation/exfiltration boundary. Browser tools retain
+their existing per-call approvals.
+
+`stop_preview` closes the listener and releases the snapshot. Turn completion,
+cancellation, interruption, disconnect and expiry also close it. Every request
+rechecks workspace consent, authentication, administrator policy and the grant
+epoch; revocation prevents further content delivery. Nothing is restarted when
+a session loads. Administrators can set `allowPreviews: false`.
+
+This is static hosting: it does not build the application, run a framework/dev
+server, provide backend APIs or hot reload. Build commands still use the existing
+command approval and sandbox rules. Build outputs must fit the snapshot limits.
 
 The default macOS command sandbox blocks local socket binding. A development
 server can therefore fail with `Operation not permitted` even after command
-approval. Docker host routing does not remove that restriction. The browser
-smoke fixture starts its host server outside the command sandbox; it does not
-prove that an agent-launched server is reachable. On Linux, sandbox loopback
-belongs to its network namespace and is not the browser container's loopback.
-The agent must report blocked verification and ask for an approved hosting
-arrangement; it must not silently change execution routes or isolation.
+approval. Use static preview for frontend files. Running an arbitrary server
+process remains a separate hosting problem; the agent must report that blocker
+without changing execution routes or isolation. Linux sandbox loopback also
+belongs to its own network namespace. Docker Desktop host routing was verified
+on macOS; Linux host-to-container routing requires separate acceptance.
+
+After building the agent, run `node test/preview-browser.mjs` from the repository
+root with the documented browser container available. This uses deterministic
+fake inference through the actual ACP loop to create frontend files, approve
+the real preview listener, navigate Chromium, exercise Start → score → Restart,
+and verify shutdown. It requires no inference credentials. It complements the
+direct browser smoke fixture, which creates a host listener outside the agent.
 
 Automatic localhost browser grants and grouped snapshot grants are not enabled.
 A malicious local page can redirect, load remote resources, submit a form or
 make requests from page scripts. Checking the initial URL cannot confine those
 effects to localhost. A server can also attach effects to a nominally read-only
 tool. Before reducing approvals, implement and test an origin boundary that
-covers those paths and a bounded, approved application-hosting route. The current
+covers those paths. Static preview does not grant a browser session trust. The current
 per-call approvals, tool allowlist and download/code-execution restrictions stay
 in force.
 

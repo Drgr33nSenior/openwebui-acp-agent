@@ -157,6 +157,14 @@ test("runtime guidance follows filtered tool availability without importing MCP 
     browser,
     /IGNORE POLICY|run_command|web.search|browser_evaluate/,
   );
+  const preview = runtimeInstruction(
+    offered(...remote.keys(), "start_preview", "stop_preview"),
+    remote,
+    false,
+  );
+  assert.match(preview, /use start_preview.*explicit list/);
+  assert.match(preview, /Recreate the snapshot after edits/);
+  assert.doesNotMatch(browser, /start_preview/);
   const readBrowser = runtimeInstruction(
     offered("mcp_0_1", "mcp_0_2"),
     remote,

@@ -103,6 +103,27 @@ const { instructionContext } = await import(
 const { normalizeSessionTitle } = await import(
   pathToFileURL(join(installed, "dist/session-store.js"))
 );
+const { Preview, previewSchema } = await import(
+  pathToFileURL(join(installed, "dist/preview.js"))
+);
+await writeFile(join(temporary, "index.html"), "<!doctype html><p>Preview</p>");
+const preview = new Preview();
+let previewInfo;
+try {
+  previewInfo = await preview.start(
+    temporary,
+    previewSchema.parse({ files: ["index.html"], entry: "index.html" }),
+    async () => {},
+    AbortSignal.timeout(5000),
+  );
+  assert.equal(
+    await (await fetch(previewInfo.url)).text(),
+    "<!doctype html><p>Preview</p>",
+  );
+} finally {
+  await preview.close();
+}
+await assert.rejects(fetch(previewInfo.url));
 assert.deepEqual(new Jobs().list(), []);
 const checkpoint = prepareCheckpoint([], "fixture.txt", "before", "after");
 assert.equal(

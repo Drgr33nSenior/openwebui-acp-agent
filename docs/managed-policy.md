@@ -30,6 +30,7 @@ sandboxed execution, and always asks for commands and edits:
   "mcpHttpUrls": [],
   "allowStdioMcp": false,
   "allowServerTools": false,
+  "allowPreviews": false,
   "allowScopeExpansion": false,
   "networkDestinations": [],
   "alwaysAsk": ["command", "edit", "mcp-server", "mcp-tool", "network"],
@@ -41,6 +42,14 @@ Omitted fields add no administrator restriction. Empty destination/model lists
 deny all entries. Installation and MCP URLs match complete normalized URLs,
 including path prefixes. They are not prefix or wildcard grants. An approved
 URL still needs the user's normal authentication and permissions.
+
+`allowPreviews: false` disables the agent-owned static preview listener.
+Otherwise, each snapshot requires approval under the `network` operation kind;
+development/edit modes do not approve it automatically. Confirmed YOLO follows
+its normal approval behavior; `alwaysAsk: ["network"]` still forces a decision.
+Preview hosting does not grant socket access to workspace commands or proxy
+requests to a backend. Its loopback listener is separate from the outbound
+`networkDestinations` policy.
 
 `networkDestinations` contains exact `{ "host": "example.org", "port": 443 }`
 entries. It restricts connections from sandboxed commands and local MCP

@@ -95,8 +95,46 @@ the temporary cache. No cache ownership or IDE configuration was changed.
 The [live comparison and source evidence](runtime-verification.md) distinguish
 actual execution from source inspection and mocks. Live tests use normal agent
 sign-in, isolated scratch workspaces and fixed prompts. OpenCode was unavailable
-locally. The default macOS sandbox blocks a dev-server listener; the browser
-play-through remains unverified. No permission or reasoning default changed.
+locally. At that revision the macOS sandbox blocked a dev-server listener, so
+browser play-through was unverified. The static preview follow-up below covers
+the missing hosting path without changing command socket permissions.
+
+## Approved static preview (unreleased)
+
+`start_preview` serves only approved frontend files from an immutable snapshot;
+`stop_preview`, turn completion, cancellation and expiry close the listener.
+Tests cover denied/invalid/late approvals, revocation, interrupt-and-replace,
+administrator denial, unsaved editor content, no fallback after editor denial,
+path/symlink/hard-link boundaries, asset mapping, occupied ports, output/request
+limits and HTTP Host/Origin/method checks. Plan/read-only tool catalogs omit
+preview startup. The command sandbox still denies local binding.
+
+On macOS 27.0 with Node 26.11.1, lint, typecheck, build, Prettier and the full
+suite passed: **382 tests passed, six platform skips, zero failures**. An initial
+attempt under the outer execution sandbox could not bind test listeners; the
+suite passed with the permissions required for real sandbox tests. No agent
+enforcement check was disabled. `npm ci` was already completed for this branch;
+the dependency files are unchanged.
+
+`npm pack`, installation into a fresh temporary prefix and
+`test/package-install.mjs` passed, including preview startup/fetch/shutdown,
+clean ACP/auth discovery and real command isolation outside the checkout.
+Checkout and installed production audits found zero vulnerabilities. The first
+audit attempt had no DNS access; the network-enabled retry passed. Documentation
+clarity audits found no issues. The installed IDE agent remains unchanged.
+
+The explicit `test/preview-browser.mjs` check passed through the actual ACP loop
+with deterministic fake inference and the real configured Chromium container:
+write files → approve preview → navigate → Start → score 1 → Restart → score 0
+→ stop. It used 12 tools and 13 approvals, with no workspace server process.
+The [browser guide](browser.md#starting-an-application-for-browser-checks)
+documents static-only scope, resource limits and local-reader exposure.
+
+Two signed-in live model attempts failed before coding with HTTP 503
+`requested_model_unavailable`. Autonomous model play-through and interactive IDE
+acceptance remain unverified. These tests ran on macOS; they do not establish
+Linux container routing or Windows support. See the
+[follow-up results](runtime-verification-results.md#static-preview-follow-up).
 
 ## Compatibility
 

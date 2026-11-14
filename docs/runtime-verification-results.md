@@ -1,10 +1,12 @@
 # Recorded runtime-verification runs
 
-These are live scratch-workspace observations from 14 November 2026. The fixed
+The initial runs are live scratch-workspace observations from 14 November 2026. The fixed
 prompts are in `test/fixtures/runtime-tasks.json`; setup, versions and limitations
 are in [the evidence record](runtime-verification.md). Commands and tool results
 below are trimmed, with private paths replaced by workspace-relative names.
-No generated application code was added to this repository.
+No model-generated application code was added to this repository. The static
+preview follow-up below uses a deterministic fixture and a real browser; it is
+recorded separately from the live model runs.
 
 ## Counts and outcomes
 
@@ -164,10 +166,47 @@ sentence is correct or the example works on all Node releases; answer accuracy
 was not independently scored. Browser shutdown occurred when each turn closed
 its MCP session, including the final run without an explicit browser-close call.
 
+## Static preview follow-up
+
+The agent now owns an approved temporary listener for an explicit frontend
+snapshot. `node test/preview-browser.mjs` passed on the same Mac and browser
+container. A deterministic fake backend requested tools through the actual ACP
+loop; Chromium and the preview listener were real.
+
+```text
+write_file site/index.html; write_file site/assets/game.js
+start_preview → approved loopback snapshot; entry directory is web root
+browser_navigate → host.docker.internal preview URL
+browser_snapshot → Start control
+browser_click Start; browser_snapshot → Target control
+browser_click Target; browser_snapshot → Score: 1
+browser_click Restart; browser_snapshot → Score: 0
+stop_preview → host fetch fails because the listener is closed
+```
+
+The run used 12 model-requested tool calls and 13 ACP approvals, including
+workspace/MCP activation. No workspace server command ran; command sandbox
+`allowLocalBinding` stayed false. The page used an external JavaScript asset
+under `/assets/`, so the check also exercised the entry-directory web root.
+This proves the agent-to-browser workflow, not autonomous model tool selection
+or interactive IDE acceptance.
+
+Two normal signed-in model attempts used the original game prompt and fresh
+workspaces. Both stopped before coding with
+`Backend failed (HTTP 503): requested_model_unavailable (retry after 5 s)`.
+Each had two activation approvals and zero coding tool calls (1.390 and 1.104
+seconds). The agent's `end_turn` response was an error report, not a successful
+play-through. The parent test runner did not retrieve or export credentials.
+Live autonomous play-through remains unverified until inference is available.
+
 ## Remaining work
 
-- Design and test a narrowly approved application preview host and browser-origin
-  boundary before reducing localhost/snapshot approvals.
+- Test framework/backend server hosting separately if required. Static preview
+  does not run a build, backend API or hot reload.
+- Verify a complete browser-origin boundary before reducing localhost/snapshot
+  approvals; the static preview does not grant broader browser trust.
+- Repeat the live model game task when inference is available, and verify Linux
+  host-to-container routing independently.
 - Repeat these tasks across more runs and available models before claiming a
   quality or latency improvement. The CLI and game took longer in the final run.
 - Run the identical task set through OpenCode when it is available, keeping the
