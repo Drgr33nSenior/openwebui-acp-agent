@@ -134,6 +134,8 @@ async function client({
         configId,
         value,
       }),
+    setMode: (modeId) =>
+      connection.agent.request("session/set_mode", { sessionId: id, modeId }),
     cancel: () => connection.agent.notify("session/cancel", { sessionId: id }),
     close: async () => {
       connection.close();
@@ -145,6 +147,15 @@ async function invoke(c, calls = []) {
   rounds = [calls.length ? calls : undefined, undefined];
   return c.prompt("perform fixture task");
 }
+const option = (result, id) =>
+  result.configOptions.find((o) => o.id === id) ?? null;
+const lastUpdate = (c, kind) =>
+  c.updates.findLast((u) => u.sessionUpdate === kind);
+const exists = (path) =>
+  access(path).then(
+    () => true,
+    () => false,
+  );
 async function enabled(c) {
   await c.set("permissions", "yolo");
   await invoke(c);
@@ -336,11 +347,135 @@ test("administrator mode/sandbox/network restrictions hide and reject YOLO", asy
         c.set("permissions", "yolo"),
         /Administrator policy denies/,
       );
+      // The Mode selector hides and refuses YOLO under the same rules,
+      // including a value a client replays from an earlier session.
+      assert(
+        !option(c.initial, "mode").options.some((o) => o.value === "yolo"),
+      );
+      assert(!c.initial.modes.availableModes.some((m) => m.id === "yolo"));
+      await assert.rejects(c.set("mode", "yolo"), /do not allow yolo mode/);
+      await assert.rejects(c.setMode("yolo"), /do not allow yolo mode/);
+      assert.notEqual(c.state().permissions.currentMode, "yolo");
       assert.equal(c.approvals.length, 0);
       assert.equal(c.state().sandbox, "workspace");
     } finally {
       await c.close();
     }
+  }
+});
+
+// JetBrains remembers the last value per ACP category and replays it onto new
+// sessions. Before the Mode selector, Permissions carried category "mode", so
+// a remembered "yolo" now arrives at the Mode selector.
+for (const via of ["session/set_config_option", "session/set_mode"])
+  for (const answer of ["enable-yolo", "deny"])
+    test(`replayed yolo through ${via} is accepted but still needs confirmation (${answer})`, async () => {
+      const outside = join(
+        temporary,
+        `replay-${via.replace("/", "-")}-${answer}-${Date.now()}.txt`,
+      );
+      const atConsent = [];
+      const c = await client({
+        choose: async (p) => {
+          if (!isYolo(p)) return "once";
+          atConsent.push({ ran: await exists(outside), sent: requests.length });
+          return answer;
+        },
+      });
+      try {
+        if (via === "session/set_mode") {
+          assert.deepEqual(await c.setMode("yolo"), {});
+          const config = lastUpdate(c, "config_option_update");
+          assert.equal(option(config, "mode").currentValue, "yolo");
+          assert.equal(option(config, "permissions").currentValue, "yolo");
+        } else {
+          const result = await c.set("mode", "yolo");
+          assert.equal(option(result, "mode").currentValue, "yolo");
+          assert.equal(option(result, "permissions").currentValue, "yolo");
+        }
+        assert.equal(
+          lastUpdate(c, "current_mode_update").currentModeId,
+          "yolo",
+        );
+        // Selecting YOLO is not consent: nothing is approved or unsandboxed.
+        assert.equal(c.approvals.length, 0);
+        assert.equal(c.state().sandbox, "workspace");
+        assert.equal(c.state().yoloEpoch, undefined);
+        await invoke(c, [
+          run(
+            `require('node:fs').writeFileSync(${JSON.stringify(outside)}, 'replayed')`,
+          ),
+        ]);
+        assert.deepEqual(atConsent, [{ ran: false, sent: 0 }]);
+        if (answer === "enable-yolo") {
+          assert.equal(await readFile(outside, "utf8"), "replayed");
+          assert.equal(c.approvals.length, 2); // workspace and YOLO only
+          assert.equal(c.state().sandbox, "full_access");
+          assert.equal(
+            option(lastUpdate(c, "config_option_update"), "mode").currentValue,
+            "yolo",
+          );
+        } else {
+          assert.equal(await exists(outside), false);
+          assert.equal(requests.length, 0);
+          assert.equal(c.state().permissions.currentMode, "scoped");
+          assert.equal(c.state().sandbox, "workspace");
+          assert.equal(
+            option(lastUpdate(c, "config_option_update"), "mode").currentValue,
+            "code",
+          );
+          assert.equal(
+            lastUpdate(c, "current_mode_update").currentModeId,
+            "code",
+          );
+        }
+      } finally {
+        await c.close();
+      }
+    });
+
+test("YOLO mode mirrors the Permissions selector; Code leaves it and Plan keeps it", async () => {
+  const c = await client();
+  try {
+    // Selecting YOLO through Permissions shows YOLO as the mode.
+    const viaPermissions = await c.set("permissions", "yolo");
+    assert.equal(option(viaPermissions, "mode").currentValue, "yolo");
+    // Code leaves YOLO for the earlier non-elevated choice.
+    await c.set("permissions", "ask");
+    await c.set("mode", "yolo");
+    const code = await c.set("mode", "code");
+    assert.equal(option(code, "mode").currentValue, "code");
+    assert.equal(option(code, "permissions").currentValue, "ask");
+    assert.equal(c.state().sandbox, "workspace");
+    assert.equal(c.approvals.length, 0);
+    // Confirmed YOLO survives a Plan round trip without a second confirmation.
+    await c.set("mode", "yolo");
+    await invoke(c);
+    assert.equal(c.approvals.filter(isYolo).length, 1);
+    const plan = await c.set("mode", "plan");
+    assert.equal(option(plan, "mode").currentValue, "plan");
+    assert.equal(option(plan, "permissions").currentValue, "yolo");
+    assert.equal(
+      option(await c.set("mode", "yolo"), "mode").currentValue,
+      "yolo",
+    );
+    await invoke(c, [run("console.log('still confirmed')")]);
+    assert.equal(c.approvals.filter(isYolo).length, 1);
+    assert.equal(c.state().sandbox, "full_access");
+    // Code from confirmed YOLO removes unsandboxed automatic access and
+    // restores the Ask each time choice made before YOLO.
+    const left = await c.set("mode", "code");
+    assert.equal(option(left, "permissions").currentValue, "ask");
+    assert.equal(c.state().sandbox, "workspace");
+    assert.equal(c.state().yoloEpoch, undefined);
+    assert.deepEqual(
+      c.updates
+        .filter((u) => u.sessionUpdate === "current_mode_update")
+        .map((u) => u.currentModeId),
+      ["yolo", "code", "yolo", "code", "yolo", "plan", "yolo", "code"],
+    );
+  } finally {
+    await c.close();
   }
 });
 
