@@ -301,9 +301,7 @@ export async function files(r: string, path?: string) {
     const rules = await rulesFor(dir, inherited);
     for (const e of await readdir(dir, { withFileTypes: true })) {
       if (++visited > 10000)
-        throw new Error(
-          "Discovery limit exceeded; pass a narrower path to list_files",
-        );
+        throw new Error("Discovery limit exceeded; pass a narrower path");
       const p = join(dir, e.name),
         rel = relative(r, p).replaceAll("\\", "/");
       if (e.isSymbolicLink() || sensitive.test(rel)) continue;
@@ -320,7 +318,7 @@ export async function files(r: string, path?: string) {
   if (requested && requested !== ".") {
     start = await target(r, requested);
     if (!(await lstat(start)).isDirectory())
-      throw new Error("list_files path must be a workspace directory");
+      throw new Error("path must be a workspace directory");
     // Ancestors' .gitignore files apply to the requested subtree.
     const parts = relative(r, start).split(/[\\/]/);
     for (let i = 0, dir = r; i < parts.length; dir = join(dir, parts[i++]!))

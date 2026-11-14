@@ -13,8 +13,24 @@ import {
   toolFailure,
   replyRecoveryHint,
   parseToolArguments,
+  ToolArgumentsError,
+  checkReminder,
+  needsRuntimeCheck,
 } from "./harness.js";
 import { firstChangedLine, replaceText } from "./edits.js";
+import {
+  LINE_MARK,
+  LINE_NUMBER_HINT,
+  READ_MAX_LINES,
+  READ_PAGE_LINES,
+  READ_WHOLE_BYTES,
+  SEARCH_MAX_RESULTS,
+  SEARCH_RESULTS,
+  SearchResults,
+  globMatch,
+  pageText,
+  withoutLineNumbers,
+} from "./reading.js";
 import { userMcp, mcpOptions } from "./user-mcp.js";
 import { mcpSecrets, ideFileProblemsArguments } from "./ide-mcp.js";
 import {
@@ -133,7 +149,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import { randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
-import { relative } from "node:path";
+import { relative, resolve } from "node:path";
 import { z } from "zod";
 import {
   config,
@@ -236,8 +252,26 @@ const schemas = {
   list_files: z
     .object({ path: z.string().min(1).max(4096).optional() })
     .strict(),
-  read_file: z.object({ path: z.string() }).strict(),
-  search_text: z.object({ text: z.string().min(1).max(1000) }).strict(),
+  read_file: z
+    .object({
+      path: z.string(),
+      offset: z.number().int().min(1).optional(),
+      limit: z.number().int().min(1).max(READ_MAX_LINES).optional(),
+    })
+    .strict(),
+  search_text: z
+    .object({
+      text: z.string().min(1).max(1000),
+      path: z.string().min(1).max(4096).optional(),
+      glob: z.string().min(1).max(200).optional(),
+      max_results: z
+        .number()
+        .int()
+        .min(1)
+        .max(SEARCH_MAX_RESULTS)
+        .default(SEARCH_RESULTS),
+    })
+    .strict(),
   write_file: z
     .object({
       path: z.string(),
@@ -284,12 +318,11 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
     description: {
       list_files:
         "List workspace files, honouring .gitignore and skipping generated environments, caches and build output (for example .venv, __pycache__, dist, build, target). Large listings are capped and report how many entries were omitted; pass path, a workspace-relative directory, to list a subtree.",
-      read_file: "Read a text file",
-      search_text: "Search literal project text",
+      read_file: `Read a text file as numbered lines "N${LINE_MARK}text"; the "N${LINE_MARK}" prefix is not file content. Files up to ${READ_WHOLE_BYTES / 1024} KB return whole; larger files return ${READ_PAGE_LINES} lines per page. offset is the 1-based first line, limit the number of lines; the footer gives the range and the next offset.`,
+      search_text: `Search for literal, case-sensitive text in the files list_files would return. Returns up to max_results (default ${SEARCH_RESULTS}) "path:line: text" lines and counts the rest. Narrow with path (a workspace directory) or glob ("*.py" matches names anywhere, "src/**/*.ts" matches paths).`,
       write_file:
-        "Create a file with before=null or deliberately rewrite a whole file. before must be the entire current file, including whitespace and the final newline; after is the entire replacement. Read first. Prefer edit_file for changes to existing files. Create large files as a small skeleton, then extend with small edits.",
-      edit_file:
-        "Make a small literal replacement in an existing text file. Read first. Arguments are old_string and new_string, not write_file's before and after. old_string must occur exactly once; include enough surrounding lines. replace_all=true explicitly replaces all non-overlapping occurrences. Preserve line endings and trailing newlines. The resulting file must stay within 100,000 characters. Shows a diff and uses the normal approvals and checkpoints.",
+        "Create a file with before=null or deliberately rewrite a whole file. before must be the entire current file, including whitespace and the final newline, without read_file's line-number prefixes; after is the entire replacement. Read first. Prefer edit_file for changes to existing files. Create large files as a small skeleton, then extend with small edits.",
+      edit_file: `Replace literal text in an existing file; read it first. old_string must occur exactly once (include surrounding lines) unless replace_all=true. Copy it from the file text without read_file's "N${LINE_MARK}" prefixes, keeping indentation and line endings. Example: {"path":"src/app.py","old_string":"    return total - bonus\\n","new_string":"    return total + bonus\\n"}. The resulting file must stay within 100,000 characters.`,
       list_jobs:
         "List this session's bounded command jobs; jobs are not restarted on restore",
       poll_job:
@@ -304,7 +337,7 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
       undo_edit:
         "Propose reverting the latest agent edit or a checkpoint ID; requires explicit approval and unchanged current content",
       run_command:
-        "Run an executable with argv in the session workspace, subject to approval and the selected OS sandbox. Use workspace-relative paths for persistent files and TMPDIR for temporary files within one command. Shell syntax requires an explicit shell executable. background=true starts an explicitly approved bounded job; use poll_job/stop_job.",
+        'Run one program in the workspace sandbox. executable is the program only; each argument is a separate args item: {"executable":"python3","args":["-m","pytest"]}. Shell syntax needs a shell: {"executable":"sh","args":["-c","make | tail"]}. Use workspace-relative paths for persistent files and TMPDIR for temporary files within one command. background=true starts a job; use poll_job/stop_job.',
     }[name],
     parameters: z.toJSONSchema(schema),
   },
@@ -1257,14 +1290,33 @@ export function createAgent(
     if ("old_string" in proposal) {
       if (before === null)
         throw new Error("edit_file requires an existing file");
-      after = replaceText(
-        before,
-        proposal.old_string,
-        proposal.new_string,
-        proposal.replace_all,
-      );
+      try {
+        after = replaceText(
+          before,
+          proposal.old_string,
+          proposal.new_string,
+          proposal.replace_all,
+        );
+      } catch (error) {
+        const unnumbered = withoutLineNumbers(proposal.old_string);
+        if (unnumbered && before.includes(unnumbered))
+          throw new Error(
+            `old_string includes line numbers; ${LINE_NUMBER_HINT}, in old_string and new_string. Nothing was written.`,
+          );
+        throw error;
+      }
     } else {
-      if (before !== proposal.before) throw new Error("Stale edit proposal");
+      if (before !== proposal.before) {
+        if (
+          before !== null &&
+          proposal.before !== null &&
+          withoutLineNumbers(proposal.before) === before
+        )
+          throw new Error(
+            `before includes line numbers; ${LINE_NUMBER_HINT}, in before and after. Nothing was written.`,
+          );
+        throw new Error("Stale edit proposal");
+      }
       after = proposal.after;
     }
     if (before === after) return "No change needed";
@@ -1829,21 +1881,21 @@ export function createAgent(
       });
     if (name === "list_files")
       return listing(await files(s.root, a.path), a.path);
-    if (name === "read_file") return read(client, s, a.path);
+    if (name === "read_file")
+      return pageText(await read(client, s, a.path), a.offset, a.limit);
     if (name === "search_text") {
-      const hits: string[] = [];
-      for (const p of await files(s.root)) {
+      const found = new SearchResults(a.text, a.max_results);
+      for (const p of (await files(s.root, a.path)).sort()) {
+        if (found.done) break;
+        if (a.glob && !globMatch(p, a.glob)) continue;
         await permitted(s, signal);
         try {
-          const t = await read(client, s, p);
-          for (const [i, line] of t.split("\n").entries())
-            if (line.includes(a.text)) hits.push(`${p}:${i + 1}: ${line}`);
+          found.add(p, await read(client, s, p));
         } catch {
           /* Skip non-text files. */
         }
-        if (hits.join("\n").length > 90000) break;
       }
-      return hits.join("\n").slice(0, 100000);
+      return found.format().slice(0, 100000);
     }
     if (name === "write_file" || name === "edit_file")
       return applyFileEdit(client, s, a, signal, c.id, changedFiles, forceOnce);
@@ -3549,6 +3601,10 @@ export function createAgent(
         let autoCompactionFailed = false;
         let contextWarningSent = false;
         let fixRounds = 0;
+        // Behavior-changing files edited since the last command, preview or
+        // browser call; one reminder per turn (see checkReminder).
+        const unchecked = new Set<string>();
+        let checkReminded = false;
         let lastVerification: VerificationResult | undefined;
         let mutationRevision = 0;
         const stoppedChecks = new Map<string, VerificationResult>();
@@ -4082,6 +4138,21 @@ export function createAgent(
               (await absorbSteering(client, s, signal))
             )
               continue;
+            // Configured project checks run in verify() below and count as the run.
+            if (
+              unchecked.size &&
+              !checkReminded &&
+              availableTools.includes("run_command") &&
+              round + 1 < s.config.rounds &&
+              !(await verificationCommands(s.config.verify, s.root)).length
+            ) {
+              checkReminded = true;
+              const notice = s.backend.redact(checkReminder([...unchecked]));
+              s.messages.push({ role: "assistant", content: notice });
+              await text(client, s, notice + "\n");
+              await save(s);
+              continue;
+            }
             lastVerification = await verify();
             if (
               lastVerification?.failures &&
@@ -4113,6 +4184,12 @@ export function createAgent(
           }
           for (const c of message.tool_calls) {
             let result = "Not executed: turn cancelled or limit reached";
+            const runs =
+              c.function.name === "run_command" ||
+              c.function.name === "start_preview" ||
+              /^browser_/.test(
+                s.mcp.tools.get(c.function.name)?.upstreamName ?? "",
+              );
             try {
               signal.throwIfAborted();
               if (count >= 64) {
@@ -4146,8 +4223,18 @@ export function createAgent(
                 ["write_file", "edit_file"].includes(c.function.name) &&
                 typeof outcome !== "string" &&
                 !outcome.failed
-              )
+              ) {
                 mutationRevision++;
+                const path = String(JSON.parse(c.function.arguments).path);
+                if (needsRuntimeCheck(path))
+                  unchecked.add(
+                    relative(s.root, resolve(s.root, path)).replaceAll(
+                      "\\",
+                      "/",
+                    ),
+                  );
+              }
+              if (runs) unchecked.clear();
               result = typeof outcome === "string" ? outcome : outcome.text;
               const tally =
                 typeof outcome === "string" || !outcome.failed
@@ -4176,6 +4263,10 @@ export function createAgent(
                   ],
                 });
             } catch (error) {
+              // A declined or failed run still ends the reminder; nothing ran
+              // only when its arguments were invalid.
+              if (runs && !(error instanceof ToolArgumentsError))
+                unchecked.clear();
               failed.set(
                 c.function.name,
                 (failed.get(c.function.name) ?? 0) + 1,

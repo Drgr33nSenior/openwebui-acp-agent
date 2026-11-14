@@ -764,7 +764,9 @@ test("recovery allowance resets per round and logs a bounded cumulative count", 
     assert.equal((await c.prompt()).stopReason, "end_turn");
     assert.equal(requests.length, 4);
     assert.equal(
-      toolResults(requests[3]).filter((x) => x === "original").length,
+      toolResults(requests[3]).filter(
+        (x) => x === "1→original\n[lines 1–1 of 1; end of file]",
+      ).length,
       1,
     );
     assert.deepEqual(

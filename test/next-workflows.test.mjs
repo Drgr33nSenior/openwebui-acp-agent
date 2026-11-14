@@ -559,7 +559,8 @@ test("nested instructions are scoped, refreshed and precede a first proposed edi
         .messages.find(
           (m) => m.role === "tool" && m.tool_call_id === "read_file",
         ).content,
-      "after",
+      // read_file returns numbered lines and a range footer.
+      "1→after\n[lines 1–1 of 1; end of file]",
     );
   } finally {
     await c.close();
