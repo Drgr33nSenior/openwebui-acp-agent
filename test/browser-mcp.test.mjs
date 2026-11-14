@@ -190,6 +190,7 @@ test("explicit allowlist excludes dangerous and future tools, prevents filename 
     );
     for (const name of excluded) assert.equal(find(m, name), undefined);
     const snapshot = find(m, "browser_snapshot");
+    assert.equal(snapshot.upstreamName, "browser_snapshot");
     assert.equal(
       snapshot.definition.function.parameters.properties.filename,
       undefined,
@@ -608,6 +609,15 @@ test("loopback container calls require approval every time even with no always-a
     let raw = "";
     for await (const chunk of req) raw += chunk;
     const body = JSON.parse(raw);
+    const runtime = body.messages.find((message) =>
+      message.content?.startsWith("Runtime verification"),
+    );
+    assert.match(
+      runtime.content,
+      /available browser navigation and accessibility snapshots/,
+    );
+    assert.match(runtime.content, /official documentation/);
+    assert.doesNotMatch(runtime.content, /main interaction and reset/);
     if (round === 0) {
       const state = [...agent.sessions.values()][0];
       const remote = find(state.mcp, "browser_navigate");

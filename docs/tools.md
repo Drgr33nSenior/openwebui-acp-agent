@@ -1,5 +1,14 @@
 # MCP and Open WebUI-managed tools
 
+The agent refreshes runtime-verification guidance from the tools offered in each
+model request. When commands are available, it asks the model to run executable
+entrypoints and relevant failure cases in addition to tests. When browser
+navigation and snapshots are available on the same MCP server, it adds browser
+and documentation guidance; interactive checks also require a click tool. Web
+search guidance requires an enabled server-task catalog with that feature.
+Plan and read-only modes omit execution guidance. This is model guidance, not a
+guarantee of successful verification or additional permission.
+
 ## Direct MCP
 
 Configure MCP servers through the client's ACP `mcpServers` definitions or the

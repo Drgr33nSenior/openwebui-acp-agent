@@ -68,6 +68,36 @@ skips and no failures. `npm pack` and the isolated installed-package check passe
 including discovery with a synthetic future version. Documentation audits found
 no issues.
 
+## Runtime verification guidance (unreleased)
+
+The harness refreshes entrypoint, failure-case, background-job, browser and
+documentation guidance from each request's filtered tools. Tests cover absent
+tools, separate MCP servers, missing interaction tools, server-search feature
+gating, untrusted descriptions, Plan/read-only transitions and non-persistence.
+The full-file edit description and stale-content error are also checked. Existing
+browser permission tests still require approval for each call; the sandbox policy
+test explicitly retains blocked local binding.
+
+On macOS 27.0 and Node 26.11.1, `npm ci`, lint, typecheck, `npm test`, build,
+Prettier and the production dependency audit passed: **372 tests passed, six
+platform skips, zero failures; zero audit vulnerabilities**. An initial full-suite
+invocation was intentionally interrupted and restarted with an explicit temporary
+application-state directory; its partial result is not counted as a pass.
+No Linux or Windows execution was performed locally for this revision.
+
+`npm pack`, installation into a fresh temporary prefix and
+`test/package-install.mjs` passed, including clean ACP/auth discovery and real
+sandbox execution outside the checkout. The installed production dependency
+audit also found zero vulnerabilities. Documentation clarity audits passed.
+One repack attempt could not write the IDE-managed npm cache; it was retried with
+the temporary cache. No cache ownership or IDE configuration was changed.
+
+The [live comparison and source evidence](runtime-verification.md) distinguish
+actual execution from source inspection and mocks. Live tests use normal agent
+sign-in, isolated scratch workspaces and fixed prompts. OpenCode was unavailable
+locally. The default macOS sandbox blocks a dev-server listener; the browser
+play-through remains unverified. No permission or reasoning default changed.
+
 ## Compatibility
 
 | Component                            | Scope                                                                                                |
