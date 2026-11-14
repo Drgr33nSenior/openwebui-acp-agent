@@ -69,7 +69,7 @@ try {
     .map((line) => JSON.parse(line));
   const response = messages.find((m) => m.id === 1);
   assert.equal(response.result.protocolVersion, 1);
-  assert.equal(response.result.agentInfo.version, "0.4.0");
+  assert.equal(response.result.agentInfo.version, "0.4.1");
   assert.equal(response.result.authMethods[0].type, "terminal");
   assert.deepEqual(response.result.agentCapabilities.auth.logout, {});
   assert.deepEqual(
@@ -111,10 +111,27 @@ assert.equal(
 );
 assert.match(instructionContext([]), /Untrusted scoped project instructions/);
 assert.equal(normalizeSessionTitle("Fixture session"), "Fixture session");
-const { SERVER_TOOLS_VERSION } = await import(
+const { serverCatalog } = await import(
   pathToFileURL(join(installed, "dist/server-tools.js"))
 );
-assert.equal(SERVER_TOOLS_VERSION, "0.13.3");
+const discovery = new Map([
+  ["api/version", { version: "99.0.0" }],
+  ["api/config", {}],
+  ["api/v1/tools/", []],
+]);
+assert.deepEqual(
+  await serverCatalog(
+    {
+      json: async (path) => {
+        assert(discovery.has(path));
+        return discovery.get(path);
+      },
+    },
+    {},
+    AbortSignal.timeout(3000),
+  ),
+  { version: "99.0.0", features: [], unverifiedFeatures: [], tools: [] },
+);
 const { contextSize, completionContextTokens } = await import(
   pathToFileURL(join(installed, "dist/usage.js"))
 );
@@ -145,5 +162,5 @@ assert.equal(
   fixtureText,
 );
 console.log(
-  "Installed 0.4.0: clean ACP v1 handshake, terminal authentication and logout discovery, context usage module, and real sandbox command passed outside the checkout",
+  "Installed 0.4.1: clean ACP v1 handshake, terminal authentication and logout discovery, context usage module, and real sandbox command passed outside the checkout",
 );

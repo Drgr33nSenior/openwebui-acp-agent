@@ -53,7 +53,9 @@ async function fixture(settings = {}) {
       return send({ detail: "synthetic-api-only" });
     }
     if (route === "api/version")
-      return send({ version: settings.version ?? "0.13.3" });
+      return send(
+        settings.versionResponse ?? { version: settings.version ?? "0.13.3" },
+      );
     if (route === "api/config")
       return send({
         features: settings.publicConfig
@@ -233,7 +235,7 @@ const task = {
   toolIds: ["server:mcp:fixture"],
 };
 
-test("server discovery is version-gated, uses published capabilities and validates tool IDs", async () => {
+test("server discovery uses published capabilities and validates tool IDs", async () => {
   const f = await fixture();
   try {
     const catalog = await serverCatalog(
@@ -241,6 +243,7 @@ test("server discovery is version-gated, uses published capabilities and validat
       model,
       AbortSignal.timeout(3000),
     );
+    assert.equal(catalog.version, "0.13.3");
     assert.deepEqual(catalog.features, [
       "web_search",
       "image_generation",
@@ -263,16 +266,6 @@ test("server discovery is version-gated, uses published capabilities and validat
     assert(f.requests.every((r) => r.method === "GET"));
   } finally {
     await f.close();
-  }
-  const other = await fixture({ version: "0.99.0" });
-  try {
-    await assert.rejects(
-      serverCatalog(other.backend, model, AbortSignal.timeout(3000)),
-      /not verified/,
-    );
-    assert.equal(other.requests.length, 1);
-  } finally {
-    await other.close();
   }
   const denied = await fixture({ deny: "api/v1/tools/" });
   try {
@@ -311,14 +304,106 @@ test("server discovery is version-gated, uses published capabilities and validat
   }
 });
 
+test("server discovery accepts the minimum and newer versions with version-scoped grants", async () => {
+  const grants = new Set();
+  for (const version of [
+    "0.9.0",
+    "v0.9.0+custom.1",
+    "0.9.1",
+    "0.12.5",
+    "0.13.3",
+    "0.99.0",
+    "0.10.0-rc.1",
+    "1.0.0",
+  ]) {
+    const f = await fixture({ version });
+    try {
+      const catalog = await serverCatalog(
+        f.backend,
+        model,
+        AbortSignal.timeout(3000),
+      );
+      assert.equal(catalog.version, version);
+      assert.deepEqual(validateServerTask(task, catalog), task);
+      assert.deepEqual(
+        f.requests.map((r) => [r.method, r.path]),
+        [
+          ["GET", "/prefix/api/version"],
+          ["GET", "/prefix/api/config"],
+          ["GET", "/prefix/api/v1/tools/"],
+        ],
+      );
+      const id = serverTaskGrant(task, catalog, model).id;
+      assert(
+        !grants.has(id),
+        "a backend version change must invalidate the previous grant",
+      );
+      grants.add(id);
+    } finally {
+      await f.close();
+    }
+  }
+});
+
+test("server discovery blocks versions below the endpoint contract before other requests", async () => {
+  for (const version of ["0.8.0", "0.8.12", "0.8.99+custom", "0.9.0-rc.1"]) {
+    const f = await fixture({ version });
+    try {
+      await assert.rejects(
+        serverCatalog(f.backend, model, AbortSignal.timeout(3000)),
+        /require Open WebUI 0\.9\.0 or newer/,
+      );
+      assert.deepEqual(
+        f.requests.map((r) => [r.method, r.path]),
+        [["GET", "/prefix/api/version"]],
+      );
+    } finally {
+      await f.close();
+    }
+  }
+});
+
+test("server discovery still rejects malformed version metadata before task side effects", async () => {
+  for (const versionResponse of [
+    {},
+    { version: 13 },
+    { version: "" },
+    { version: "x".repeat(301) },
+    { version: "custom-build+preview" },
+    { version: "0.9" },
+    { version: "0.09.0" },
+    { version: "0.9.0-01" },
+    { version: "0.9.0+" },
+  ]) {
+    const f = await fixture({ versionResponse });
+    try {
+      await assert.rejects(
+        serverCatalog(f.backend, model, AbortSignal.timeout(3000)),
+        /version/,
+      );
+      assert.deepEqual(
+        f.requests.map((r) => [r.method, r.path]),
+        [["GET", "/prefix/api/version"]],
+      );
+    } finally {
+      await f.close();
+    }
+  }
+});
+
 test("native server task contract keeps caller tools separate and returns citations plus bounded authenticated images", async () => {
-  const f = await fixture();
+  const f = await fixture({ version: "0.9.0" });
   const records = [],
     progress = [];
   try {
+    const catalog = await serverCatalog(
+      f.backend,
+      model,
+      AbortSignal.timeout(3000),
+    );
     const result = await runServerTask(
       f.backend,
-      task,
+      validateServerTask(task, catalog),
       AbortSignal.timeout(3000),
       async (r) => records.push({ ...r }),
       async (s) => progress.push(s),

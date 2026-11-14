@@ -72,9 +72,17 @@ workspace qualifies for automatic diagnostics. See [verification after edits](id
 
 Enable **Open WebUI tools** in the session selector or use `/server-tools on`.
 `/server-tools refresh` discovers features and tool IDs without inference;
-`/server-tools off` disables delegation. This mode requires the Open WebUI
-**0.13.3** native task contract. Other versions are refused until supported.
+`/server-tools off` disables delegation. This mode requires **Open WebUI 0.9.0
+or newer** for its chat task status/stop endpoints and asynchronous response
+format. Older versions are blocked before task creation. Newer versions are
+allowed with response validation; compatibility with every release is not
+guaranteed. Report failures with the Open WebUI version and redacted error.
 Core coding and direct MCP do not require this mode.
+
+The reported version must use `major.minor.patch`, optionally with a `v` prefix,
+prerelease suffix or build metadata. The 0.9.0 prereleases precede the minimum;
+unparseable versions cannot establish compatibility and are refused for this
+mode. See the [endpoint evidence](design.md#server-task-minimum-version).
 
 The model receives `openwebui_task` for web research, image generation, retrieval
 and selected server-managed tools. Features depend on server configuration,
@@ -84,8 +92,9 @@ alone does not prove that a tool executes successfully.
 
 Approval covers the displayed task prompt, model, features, tool IDs, remote
 scope and retained chat. Session or remembered grants cover any prompt with that
-exact scope, including mutations and new chats. A change in scope or catalog
-requires approval again. Development mode does not create remote grants.
+exact scope, including mutations and new chats. A change in scope, backend
+version or catalog requires approval again. Development mode does not create
+remote grants.
 Confirmed YOLO approves tasks without a per-task decision while server tools
 are enabled; it does not bypass Open WebUI’s own approvals or account policy.
 `/permissions revoke-tools` revokes them; Ask each time, approval advice and
@@ -110,10 +119,11 @@ Loading a session or changing models resets server tools to Off. Local round
 limits do not constrain the server's internal tool loop.
 
 If API-key endpoint restrictions are enabled, this integration also needs these
-prefixes, without trailing slashes:
+prefixes. Keep the trailing slash on `/api/v1/tools/`, which matches the
+discovery request:
 
 ```text
-/api/version,/api/config,/api/v1/tools,/api/v1/chats,/api/tasks/chat,/api/v1/files
+/api/version,/api/config,/api/v1/tools/,/api/v1/chats,/api/tasks/chat,/api/v1/files
 ```
 
 Preserve `/api/models` and `/api/chat/completions` and any other required entries.

@@ -27,7 +27,7 @@ public release, first download the `.tgz` and verify it against `SHA256SUMS` fro
 GitHub Releases:
 
 ```sh
-npm install --prefix /path/to/isolated-install --ignore-scripts ./openwebui-acp-agent-0.4.0.tgz
+npm install --prefix /path/to/isolated-install --ignore-scripts ./openwebui-acp-agent-0.4.1.tgz
 npm audit --prefix /path/to/isolated-install --omit=dev --audit-level=high
 node test/package-install.mjs /path/to/isolated-install
 ```
@@ -51,6 +51,23 @@ Server-task tests cover YOLO approval and administrator overrides separately.
 These fixtures use synthetic services and isolated temporary state. Live IDE
 selector rendering and the confirmation flow still require manual acceptance.
 
+## Server-tool version compatibility (0.4.1)
+
+Discovery requires Open WebUI 0.9.0 or newer, records the actual version and
+invalidates scoped task grants when it changes. Tests cover the minimum, newer
+releases, prerelease/build suffixes, rejected older or malformed versions,
+tool validation, discovery HTTP 403 errors and the exact `/api/v1/tools/` path.
+The [source evidence](design.md#server-task-minimum-version) distinguishes the
+0.8.12 and 0.9.0 endpoint and acknowledgement contracts. These checks do not
+establish live compatibility with other Open WebUI releases. The changes are
+not included in the published 0.4.0 artifact.
+
+On macOS 27.0 with Node 26.11.1, lint, typecheck, build and the standard Prettier
+check passed. `node --test test/*.test.mjs` passed 370 tests with six platform
+skips and no failures. `npm pack` and the isolated installed-package check passed,
+including discovery with a synthetic future version. Documentation audits found
+no issues.
+
 ## Compatibility
 
 | Component                            | Scope                                                                                                |
@@ -63,7 +80,7 @@ selector rendering and the confirmation flow still require manual acceptance.
 | Native Windows                       | Unsupported; persistent state fails closed pending ACL/execution support                             |
 | WSL2                                 | Linux route; requires separate environment acceptance                                                |
 | JetBrains AI Assistant / Air in IDEs | ACP integration; product-specific UI and registry acceptance must be checked on the installed client |
-| Open WebUI                           | Core contract based on 0.12.5 and 0.13.3; optional native server tasks gated to 0.13.3               |
+| Open WebUI                           | Core contract based on 0.12.5 and 0.13.3; native server tasks require 0.9.0 or newer, with response validation |
 
 CI checks macOS and Linux suites, Windows rejection behavior and separately
 installed packages. A configured workflow is not a test result. Consult the

@@ -6,9 +6,29 @@ import { Backend, BackendHttpError } from "./backend.js";
 import { endpoint } from "./config.js";
 import { grant } from "./permissions.js";
 
-// Contract verified in Open WebUI v0.13.3 source. A different version requires
-// a deliberate compatibility review; accepting a request does not prove tools ran.
-export const SERVER_TOOLS_VERSION = "0.13.3";
+// v0.9.0 adds the chat-scoped stop route and task_ids/chat_id acknowledgement.
+// Later releases remain eligible, with response and task-evidence validation.
+export const SERVER_TOOLS_MIN_VERSION = "0.9.0";
+function requireServerToolsVersion(version: string): void {
+  const parsed =
+    /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(
+      version,
+    );
+  if (!parsed || parsed[4]?.split(".").some((part) => /^0\d+$/.test(part)))
+    throw new Error(
+      `Cannot determine server-tool compatibility from the Open WebUI version; expected major.minor.patch (minimum ${SERVER_TOOLS_MIN_VERSION}). Core coding and direct MCP remain available.`,
+    );
+  const actual = parsed.slice(1, 4).map(BigInt);
+  const minimum = SERVER_TOOLS_MIN_VERSION.split(".").map(BigInt);
+  const different = actual.findIndex((part, index) => part !== minimum[index]);
+  if (
+    (different !== -1 && actual[different] < minimum[different]) ||
+    (different === -1 && parsed[4])
+  )
+    throw new Error(
+      `Server tools require Open WebUI ${SERVER_TOOLS_MIN_VERSION} or newer for chat task status/stop endpoints and asynchronous task acknowledgements. Upgrade Open WebUI; core coding and direct MCP remain available.`,
+    );
+}
 const feature = z.enum(["web_search", "image_generation", "memory"]);
 export const serverTaskSchema = z
   .object({
@@ -49,11 +69,10 @@ export async function serverCatalog(
       throw error;
     }
   };
-  const version = await discover("api/version");
-  if (version?.version !== SERVER_TOOLS_VERSION)
-    throw new Error(
-      `Server tools require the verified Open WebUI ${SERVER_TOOLS_VERSION} contract; this backend version is not verified`,
-    );
+  const { version } = z
+    .object({ version: z.string().min(1).max(300) })
+    .parse(await discover("api/version"));
+  requireServerToolsVersion(version);
   const config = await discover("api/config");
   const tools = z
     .array(
@@ -83,7 +102,7 @@ export async function serverCatalog(
       meta?.builtinTools?.[f] !== false,
   );
   return {
-    version: SERVER_TOOLS_VERSION,
+    version,
     features,
     unverifiedFeatures: features.filter((f) => globalFlag(f) !== true),
     tools,
