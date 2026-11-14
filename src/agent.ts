@@ -21,6 +21,30 @@ import {
   unavailableVerification,
   type VerificationResult,
 } from "./verification.js";
+import { Jobs } from "./jobs.js";
+import {
+  checkpointsSchema,
+  prepareCheckpoint,
+  recordCheckpoint,
+  checkpointRestore,
+  markCheckpointUndone,
+  checkpointSummaries,
+  CheckpointError,
+  type Checkpoint,
+} from "./checkpoints.js";
+import {
+  collectInstructions,
+  instructionContext,
+  type ProjectInstruction,
+} from "./instructions.js";
+import {
+  listStoredSessions,
+  forkStoredSession,
+  exportStoredSession,
+  normalizeSessionTitle,
+  sessionTitleSchema,
+} from "./session-store.js";
+import { quarantineCreatedFile, UndoRecoveryError } from "./undo-created.js";
 import {
   compactionStateSchema,
   PROJECT_GUIDANCE_PREFIX,
@@ -72,6 +96,7 @@ import {
   logout,
   readJson,
   writeJson,
+  checkJsonWrite,
   type Config,
 } from "./config.js";
 import {
@@ -162,8 +187,26 @@ const schemas = {
     })
     .strict(),
   run_command: commandSchema,
+  list_jobs: z.object({}).strict(),
+  poll_job: z
+    .object({
+      id: z.string().uuid(),
+      offset: z.number().int().min(0).default(0),
+    })
+    .strict(),
+  stop_job: z.object({ id: z.string().uuid() }).strict(),
+  list_checkpoints: z.object({}).strict(),
+  undo_edit: z.object({ id: z.string().default("latest") }).strict(),
 };
-const inspectionTools = new Set(["list_files", "read_file", "search_text"]);
+const inspectionTools = new Set([
+  "list_files",
+  "read_file",
+  "search_text",
+  "list_jobs",
+  "poll_job",
+  "stop_job",
+  "list_checkpoints",
+]);
 const definitions = Object.entries(schemas).map(([name, schema]) => ({
   type: "function",
   function: {
@@ -174,8 +217,17 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
       search_text: "Search literal project text",
       write_file:
         "Propose full text replacement; before must match current text, or null for creation",
+      list_jobs:
+        "List this session's bounded command jobs; jobs are not restarted on restore",
+      poll_job:
+        "Read a page of output/status from this session's job; use nextOffset for subsequent pages",
+      stop_job: "Stop and clean up this session's command job",
+      list_checkpoints:
+        "List metadata for reversible agent text edits; snapshots are private and are not returned",
+      undo_edit:
+        "Propose reverting the latest agent edit or a checkpoint ID; requires explicit approval and unchanged current content",
       run_command:
-        "Run an executable with argv in the session workspace, subject to approval and the selected OS sandbox. Use workspace-relative paths for persistent files and TMPDIR for temporary files within one command. Shell syntax requires an explicit shell executable.",
+        "Run an executable with argv in the session workspace, subject to approval and the selected OS sandbox. Use workspace-relative paths for persistent files and TMPDIR for temporary files within one command. Shell syntax requires an explicit shell executable. background=true starts an explicitly approved bounded job; use poll_job/stop_job.",
     }[name],
     parameters: z.toJSONSchema(schema),
   },
@@ -183,10 +235,17 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
 type ToolResult = {
   text: string;
   failed?: boolean;
+  background?: boolean;
   content?: ToolCallContent[];
 };
 type Session = {
   id: string;
+  title?: string;
+  createdAt: string;
+  jobs: Jobs;
+  checkpoints: Checkpoint[];
+  instructions: ProjectInstruction[];
+  instructionReviewRequired?: boolean;
   root: string;
   recoveryRoot?: string;
   config: Config;
@@ -278,6 +337,7 @@ export function createAgent(
     for (const s of sessions.values()) {
       s.active = false;
       cancelTurn(s);
+      await s.jobs.stopAll();
     }
     try {
       await logout();
@@ -324,6 +384,13 @@ export function createAgent(
         ...(s.accessError
           ? ["status", "doctor"]
           : [
+              "sessions",
+              "title",
+              "fork",
+              "export",
+              "jobs",
+              "checkpoints",
+              "undo",
               "help",
               "compact",
               "autocompact",
@@ -456,8 +523,13 @@ export function createAgent(
             ],
           },
         ];
-  const save = async (s: Session) => {
+  const sessionRecord = (s: Session, checkpoints = s.checkpoints) => {
     const value = {
+      title: s.title,
+      createdAt: s.createdAt,
+      updatedAt: new Date().toISOString(),
+      header: s.config.header,
+      checkpoints: checkpointsSchema.parse(checkpoints),
       root: s.recoveryRoot ?? s.root,
       url: s.config.url,
       model: s.config.model,
@@ -483,9 +555,22 @@ export function createAgent(
       ),
       serverRuns: s.serverRuns,
     };
-    if (JSON.stringify(value).length > 2_000_000)
+    if (Buffer.byteLength(JSON.stringify(value)) > 2_000_000)
       throw new Error("Session storage budget exceeded");
-    await writeJson("session-" + s.id + ".json", value);
+    return value;
+  };
+  const save = async (s: Session) => {
+    await writeJson("session-" + s.id + ".json", sessionRecord(s));
+  };
+  const reserveEditStorage = async (s: Session, checkpoints: Checkpoint[]) => {
+    const record = sessionRecord(s, checkpoints);
+    // Leave room for the operation outcome. File and transcript writes are not
+    // one transaction; reject known quota failures before the workspace write.
+    if (Buffer.byteLength(JSON.stringify(record)) > 1_950_000)
+      throw new CheckpointError(
+        "Session checkpoint budget exceeded; export or start a new session before editing",
+      );
+    await checkJsonWrite("session-" + s.id + ".json", record);
   };
   const permitted = async (s: Session, signal: AbortSignal) => {
     signal.throwIfAborted();
@@ -791,12 +876,138 @@ export function createAgent(
       throw new Error("File exceeds text limits");
     return result;
   };
+  const refreshInstructions = async (
+    client: AgentContext,
+    s: Session,
+    path: string,
+    signal: AbortSignal,
+    directory = false,
+  ) => {
+    await permitted(s, signal);
+    const next = await collectInstructions(
+      s.root,
+      path,
+      (p) => read(client, s, p),
+      signal,
+      { directory },
+    );
+    const sanitized = next.map((i) => ({
+      ...i,
+      content: s.backend.redact(i.content),
+    }));
+    const changed =
+      JSON.stringify(sanitized) !== JSON.stringify(s.instructions);
+    s.instructions = sanitized;
+    if (changed) s.instructionReviewRequired = true;
+    return changed;
+  };
+  const undoEdit = async (
+    client: AgentContext,
+    s: Session,
+    id: string,
+    signal: AbortSignal,
+    toolId: string = randomUUID(),
+  ) => {
+    await permitted(s, signal);
+    if (
+      s.workflow === "plan" ||
+      (await s.permissions.mode()) === "read_only" ||
+      (await sandboxMode(s)) === "read_only"
+    )
+      throw new CheckpointError("Undo is disabled in read-only mode");
+    const candidate = checkpointSummaries(s.checkpoints).findLast(
+      (x) => x.status === "applied" && (id === "latest" || id === x.id),
+    );
+    if (!candidate) throw new CheckpointError("No applied checkpoint found");
+    await refreshInstructions(client, s, candidate.path, signal);
+    const path = await target(s.root, candidate.path, true);
+    const current = await abortable(read(client, s, candidate.path), signal);
+    const restore = checkpointRestore(s.checkpoints, id, current);
+    if (
+      restore.after === null &&
+      (caps.fs?.readTextFile || caps.fs?.writeTextFile)
+    )
+      throw new CheckpointError(
+        "Undo of file creation requires deletion, which this client's ACP filesystem API does not support. Delete the file through the IDE after checking unsaved changes; no local fallback was used.",
+      );
+    if (restore.after === null && process.platform !== "linux")
+      throw new UndoRecoveryError(
+        "Safe removal of created files is unavailable on this platform; delete the file in your IDE after checking its contents",
+      );
+    const restoredCheckpoints = markCheckpointUndone(
+      s.checkpoints,
+      restore.checkpoint.id,
+    );
+    await reserveEditStorage(s, restoredCheckpoints);
+    const check = await approve(
+      client,
+      s,
+      `Undo agent edit: ${path}`,
+      signal,
+      false,
+      [
+        {
+          type: "diff",
+          path,
+          oldText: restore.before,
+          newText: restore.after ?? "",
+        },
+      ],
+      undefined,
+      {
+        id: toolId,
+        input: {
+          path,
+          operation:
+            restore.after === null ? "delete created file" : "restore text",
+        },
+      },
+      true,
+    );
+    await check();
+    if (
+      (await abortable(read(client, s, candidate.path), signal)) !==
+      restore.before
+    )
+      throw new CheckpointError("Stale undo: file changed during approval");
+    await check();
+    let recoveryPath: string | undefined;
+    if (restore.after === null)
+      ({ recoveryPath } = await quarantineCreatedFile(
+        s.root,
+        candidate.path,
+        restore.before,
+        signal,
+      ));
+    else if (caps.fs?.writeTextFile)
+      await client.request("fs/write_text_file", {
+        sessionId: s.id,
+        path,
+        content: restore.after,
+      });
+    else
+      await atomicEdit(s.root, candidate.path, restore.before, restore.after);
+    s.checkpoints = restoredCheckpoints;
+    await save(s);
+    return {
+      text: `Agent edit undone: ${candidate.path}; other edits and external side effects were not reverted${recoveryPath ? `. Created file retained for recovery at ${recoveryPath}` : ""}`,
+      content: [
+        {
+          type: "diff" as const,
+          path,
+          oldText: restore.before,
+          newText: restore.after ?? "",
+        },
+      ],
+    };
+  };
   const execute = async (
     client: AgentContext,
     s: Session,
     c: Call,
     signal: AbortSignal,
     changedFiles?: Set<string>,
+    forceOnce = false,
   ): Promise<string | ToolResult> => {
     await permitted(s, signal);
     const name = c.function.name;
@@ -937,6 +1148,22 @@ export function createAgent(
       throw new SandboxError(
         "File writes are disabled by the read-only sandbox setting",
       );
+    if (name === "list_jobs") return JSON.stringify(s.jobs.list());
+    if (name === "poll_job") return JSON.stringify(s.jobs.poll(a.id, a.offset));
+    if (name === "stop_job") return JSON.stringify(await s.jobs.stop(a.id));
+    if (name === "list_checkpoints")
+      return JSON.stringify(checkpointSummaries(s.checkpoints));
+    if (name === "undo_edit") return undoEdit(client, s, a.id, signal, c.id);
+    if (name === "read_file" || name === "write_file") {
+      await refreshInstructions(client, s, a.path, signal);
+      if (s.instructionReviewRequired && name === "write_file" && !forceOnce)
+        return {
+          failed: true,
+          text:
+            "Project instructions changed or were newly discovered. Read and follow these scoped instructions, then propose the edit again; nothing was written.\n" +
+            instructionContext(s.instructions),
+        };
+    }
     if (inspectionTools.has(name))
       await update(client, s, {
         sessionUpdate: "tool_call_update",
@@ -970,6 +1197,16 @@ export function createAgent(
         throw e;
       });
       if (before !== a.before) throw new Error("Stale edit proposal");
+      if (before === a.after) return "No change needed";
+      const checkpoint = prepareCheckpoint(
+        s.checkpoints,
+        relative(s.root, path).replaceAll("\\", "/"),
+        before,
+        a.after,
+        (value) => s.backend.redact(value),
+      );
+      const nextCheckpoints = recordCheckpoint(s.checkpoints, checkpoint);
+      await reserveEditStorage(s, nextCheckpoints);
       const check = await approve(
         client,
         s,
@@ -983,6 +1220,7 @@ export function createAgent(
           "all text edits within this workspace",
         ),
         { id: c.id, input: { path } },
+        forceOnce,
       );
       await permitted(s, signal);
       if (caps.fs?.writeTextFile) {
@@ -1003,8 +1241,10 @@ export function createAgent(
         await atomicEdit(s.root, a.path, before, a.after);
       }
       changedFiles?.add(path);
+      s.checkpoints = nextCheckpoints;
+      await save(s);
       return {
-        text: "File updated",
+        text: "File updated; checkpoint " + checkpoint.id,
         content: [{ type: "diff", path, oldText: before, newText: a.after }],
       };
     }
@@ -1029,7 +1269,7 @@ export function createAgent(
       const check = await approve(
         client,
         s,
-        `Run ${a.executable} ${JSON.stringify(a.args)}; cwd ${s.root}; timeout ${a.timeout_ms} ms; ${unsandboxed ? "UNSANDBOXED: full user-level filesystem/network access" : `OS sandbox: ${selectedSandbox}; network requires approval; isolated TMPDIR`}; minimal environment${expanded ? `; extra reads ${JSON.stringify(readPaths)}; extra writes ${JSON.stringify(writePaths)}; reason: ${a.justification}` : ""}`,
+        `Run ${a.executable} ${JSON.stringify(a.args)}; cwd ${s.root}; ${a.background ? "background job" : "foreground"}; timeout ${a.timeout_ms} ms; ${unsandboxed ? "UNSANDBOXED: full user-level filesystem/network access" : `OS sandbox: ${selectedSandbox}; network requires approval; isolated TMPDIR`}; minimal environment${expanded ? `; extra reads ${JSON.stringify(readPaths)}; extra writes ${JSON.stringify(writePaths)}; reason: ${a.justification}` : ""}`,
         signal,
         false,
         repeatable
@@ -1048,7 +1288,8 @@ export function createAgent(
                 args: a.args,
                 timeout_ms: a.timeout_ms,
                 sandbox: selectedSandbox,
-                policyVersion: 1,
+                policyVersion: 2,
+                background: a.background,
                 environment: childEnv(),
               },
               "this exact command and arguments (not a prefix)",
@@ -1063,7 +1304,7 @@ export function createAgent(
             timeout_ms: a.timeout_ms,
           },
         },
-        unsandboxed || expanded,
+        unsandboxed || expanded || a.background,
       );
       await check();
       if (
@@ -1075,24 +1316,122 @@ export function createAgent(
         );
       // ACP terminal capability does not promise OS isolation. All commands use
       // the owned runner; a denied/failed sandbox never falls back to the IDE.
-      const output = unsandboxed
-        ? await command(a.executable, a.args, s.root, signal, {
-            timeoutMs: a.timeout_ms,
-            outputBytes: 100000,
-          })
-        : await runSandboxed(
-            a.executable,
-            a.args,
+      const limits = { timeoutMs: a.timeout_ms, outputBytes: 100000 };
+      const stream = async (snapshot: string) => {
+        await update(client, s, {
+          sessionUpdate: "tool_call_update",
+          toolCallId: c.id,
+          status: "in_progress",
+          content: [
             {
-              mode: selectedSandbox,
-              root: s.root,
-              readPaths,
-              writePaths,
-              network: networkApproval(client, s, signal),
+              type: "content",
+              content: {
+                type: "text",
+                text: s.backend.redactSnapshot(snapshot),
+              },
             },
+          ],
+        });
+      };
+      const run = async (
+        requestedSignal: AbortSignal,
+        onOutput: (snapshot: string) => void | Promise<void>,
+      ) => {
+        const runAbort = new AbortController();
+        const runSignal = AbortSignal.any([requestedSignal, runAbort.signal]);
+        await check();
+        let checking = false;
+        const monitor = setInterval(() => {
+          if (checking) return;
+          checking = true;
+          void check()
+            .catch(() => {
+              runAbort.abort();
+              void s.jobs.stopAll();
+            })
+            .finally(() => {
+              checking = false;
+            });
+        }, 250);
+        monitor.unref();
+        try {
+          const raw = unsandboxed
+            ? await command(
+                a.executable,
+                a.args,
+                s.root,
+                runSignal,
+                limits,
+                onOutput,
+              )
+            : await runSandboxed(
+                a.executable,
+                a.args,
+                {
+                  mode: selectedSandbox,
+                  root: s.root,
+                  readPaths,
+                  writePaths,
+                  network: async (host, port) => {
+                    if (a.background && !s.abort) return false;
+                    return networkApproval(client, s, runSignal)(host, port);
+                  },
+                },
+                runSignal,
+                limits,
+                onOutput,
+              );
+          const result = JSON.parse(raw) as {
+            code: number | null;
+            output: string;
+            limitedOrCancelled: boolean;
+          };
+          return JSON.stringify({
+            ...result,
+            output: s.backend.redactSnapshot(result.output),
+          });
+        } finally {
+          clearInterval(monitor);
+        }
+      };
+      if (a.background) {
+        const job = s.jobs.start(
+          (jobSignal, onOutput) =>
+            run(jobSignal, (value) =>
+              onOutput(s.backend.redactSnapshot(value)),
+            ),
+          {
+            timeoutMs: a.timeout_ms,
             signal,
-            { timeoutMs: a.timeout_ms, outputBytes: 100000 },
-          );
+            onOutput: (value) =>
+              update(client, s, {
+                sessionUpdate: "tool_call_update",
+                toolCallId: c.id,
+                status: "in_progress",
+                content: [
+                  {
+                    type: "content",
+                    content: { type: "text", text: JSON.stringify(value) },
+                  },
+                ],
+              }),
+            onComplete: (value) =>
+              update(client, s, {
+                sessionUpdate: "tool_call_update",
+                toolCallId: c.id,
+                status: value.state === "completed" ? "completed" : "failed",
+                content: [
+                  {
+                    type: "content",
+                    content: { type: "text", text: JSON.stringify(value) },
+                  },
+                ],
+              }),
+          },
+        );
+        return { text: JSON.stringify(job), background: true };
+      }
+      const output = await run(signal, stream);
       const outcome = JSON.parse(output) as {
         code: number | null;
         output: string;
@@ -1115,6 +1454,74 @@ export function createAgent(
     }
     throw new Error("Unknown tool");
   };
+  const manualTool = async (
+    client: AgentContext,
+    s: Session,
+    name: string,
+    args: unknown,
+    signal: AbortSignal,
+    requestedControl: string,
+  ) => {
+    if (!s.messages.length)
+      s.messages.push({ role: "system", content: codingInstruction });
+    s.messages.push({
+      role: "user",
+      content: s.backend.redact(requestedControl),
+    });
+    const id = randomUUID();
+    await update(client, s, {
+      sessionUpdate: "tool_call",
+      toolCallId: id,
+      title: name,
+      kind: "edit",
+      status: "pending",
+    });
+    let result;
+    try {
+      result = await execute(
+        client,
+        s,
+        {
+          id,
+          type: "function",
+          function: { name, arguments: JSON.stringify(args) },
+        },
+        signal,
+        undefined,
+        true,
+      );
+    } catch (error) {
+      s.messages.push({
+        role: "assistant",
+        content:
+          "Manual operation failed or was cancelled; inspect current state before retrying. " +
+          (error instanceof Error
+            ? s.backend.redact(error.message).slice(0, 2000)
+            : ""),
+      });
+      await save(s);
+      await update(client, s, {
+        sessionUpdate: "tool_call_update",
+        toolCallId: id,
+        status: "failed",
+      });
+      throw error;
+    }
+    const resultText = typeof result === "string" ? result : result.text;
+    s.messages.push({
+      role: "assistant",
+      content: s.backend.redact(resultText),
+    });
+    await save(s);
+    await update(client, s, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: id,
+      status:
+        typeof result !== "string" && result.failed ? "failed" : "completed",
+      content: typeof result === "string" ? [] : (result.content ?? []),
+    });
+    await text(client, s, resultText);
+  };
   app.onRequest("initialize", ({ params }) => {
     caps = params.clientCapabilities ?? {};
     return {
@@ -1122,11 +1529,12 @@ export function createAgent(
       agentInfo: {
         name: "openwebui-acp-agent",
         title: "Open WebUI Agent (unofficial)",
-        version: "0.3.0",
+        version: "0.4.0",
       },
       agentCapabilities: {
         auth: { logout: {} },
         loadSession: true,
+        sessionCapabilities: { list: {} },
         promptCapabilities: {
           embeddedContext: true,
           image: false,
@@ -1165,6 +1573,32 @@ export function createAgent(
     }
     return {};
   });
+  app.onRequest("session/list", async ({ params, signal }) => {
+    const authEpoch = await readJson("auth-state.json");
+    await checkAuthentication(authEpoch);
+    signal.throwIfAborted();
+    const backend = await authenticatedBackend(caps);
+    enforceDestination(await readPolicy(), "inference", backend.config.url);
+    let result;
+    try {
+      result = await listStoredSessions({
+        url: backend.config.url,
+        header: backend.config.header,
+        ...(params.cwd ? { cwd: await root(params.cwd) } : {}),
+        cursor: params.cursor,
+      });
+    } catch {
+      /* Map only catalog failures after rechecking authentication. */
+    }
+    await checkAuthentication(authEpoch);
+    signal.throwIfAborted();
+    if (!result)
+      throw RequestError.invalidParams(
+        undefined,
+        "Cannot list sessions; check cursor and private session storage. Refresh history if it changed.",
+      );
+    return result;
+  });
   app.onRequest("session/new", async ({ params, client, signal }) => {
     const authEpoch = await readJson("auth-state.json");
     await checkAuthentication(authEpoch);
@@ -1196,6 +1630,10 @@ export function createAgent(
       );
     const s: Session = {
       id: randomUUID(),
+      createdAt: new Date().toISOString(),
+      jobs: new Jobs(),
+      checkpoints: [],
+      instructions: [],
       root: await root(params.cwd),
       config: { ...c },
       backend,
@@ -1248,8 +1686,12 @@ export function createAgent(
       throw new Error("Session already loaded");
     const saved = z
       .object({
+        title: sessionTitleSchema.optional(),
+        createdAt: z.string().optional(),
+        checkpoints: checkpointsSchema.default([]),
         root: z.string(),
         url: z.string(),
+        header: z.string().default("Authorization"),
         model: z.string(),
         reasoning: z.string(),
         contextUsage: contextUsageSchema.optional(),
@@ -1307,7 +1749,7 @@ export function createAgent(
       c = backend.config;
     const administrator = await readPolicy();
     enforceDestination(administrator, "inference", c.url);
-    if (c.url !== saved.url)
+    if (c.url !== saved.url || c.header !== saved.header)
       throw new Error("Saved destination changed; start a new session");
     c.model = saved.model;
     let accessError: string | undefined;
@@ -1355,6 +1797,11 @@ export function createAgent(
           ? "unknown"
           : run.state,
       })),
+      title: saved.title,
+      createdAt: saved.createdAt ?? new Date().toISOString(),
+      jobs: new Jobs(),
+      checkpoints: saved.checkpoints,
+      instructions: [],
       messages: restoreHistory(saved.messages),
       compaction: saved.compaction,
       workflow: saved.workflow,
@@ -1394,6 +1841,11 @@ export function createAgent(
     await checkAuthentication(authEpoch);
     sessions.set(s.id, s);
     await advertiseCommands(client, s);
+    if (s.title)
+      await update(client, s, {
+        sessionUpdate: "session_info_update",
+        title: s.title,
+      });
     if (s.plan.length)
       await update(client, s, { sessionUpdate: "plan", entries: s.plan });
     for (const m of s.messages)
@@ -1427,6 +1879,8 @@ export function createAgent(
     signal.throwIfAborted();
     if (s.accessError)
       throw RequestError.invalidParams(undefined, s.accessError);
+    if (["workflow", "permissions", "sandbox", "model"].includes(id))
+      await s.jobs.stopAll();
     if (id === "prompt_mode") {
       if (value !== "interrupt" && value !== "queue")
         throw RequestError.invalidParams(
@@ -1548,7 +2002,9 @@ export function createAgent(
     });
   });
   app.onNotification("session/cancel", ({ params }) => {
-    cancelTurn(get(params.sessionId));
+    const s = get(params.sessionId);
+    cancelTurn(s);
+    void s.jobs.stopAll();
   });
   type PromptHandler = (context: {
     params: PromptRequest;
@@ -1696,7 +2152,95 @@ export function createAgent(
         const prompt = normalized.text;
         const compactRequested = prompt.trim() === "/compact";
         signal.throwIfAborted();
-        if (prompt.startsWith("/") && !compactRequested) {
+        const [control, ...controlArgs] = prompt.trim().split(/\s+/);
+        const scope = {
+          url: s.config.url,
+          header: s.config.header,
+          cwd: s.root,
+        };
+        if (control === "/sessions") {
+          await text(
+            client,
+            s,
+            JSON.stringify(
+              await listStoredSessions({
+                ...scope,
+                ...(controlArgs[0] ? { cursor: controlArgs[0] } : {}),
+              }),
+            ),
+          );
+          return { stopReason: "end_turn" };
+        }
+        if (control === "/title") {
+          const title = normalizeSessionTitle(controlArgs.join(" ") || null);
+          s.title = title
+            ? normalizeSessionTitle(s.backend.redact(title))
+            : undefined;
+          await save(s);
+          await update(client, s, {
+            sessionUpdate: "session_info_update",
+            title: s.title ?? null,
+          });
+          await text(
+            client,
+            s,
+            s.title ? "Session title updated." : "Session title cleared.",
+          );
+          return { stopReason: "end_turn" };
+        }
+        if (control === "/fork") {
+          if (s.jobs.hasRunning)
+            throw new Error("Stop background jobs before forking this session");
+          await save(s);
+          const fork = await forkStoredSession(s.id, scope, {
+            ...(controlArgs.length ? { title: controlArgs.join(" ") } : {}),
+            redact: (value) => s.backend.redact(value),
+          });
+          await text(
+            client,
+            s,
+            `Fork created: ${fork.sessionId}. Open it from session history; workspace consent is checked on load. This chat remains the original session.`,
+          );
+          return { stopReason: "end_turn" };
+        }
+        if (control === "/jobs") {
+          if (
+            controlArgs.length &&
+            !(
+              (controlArgs[0] === "stop" && controlArgs.length === 2) ||
+              (controlArgs[0] === "poll" && [2, 3].includes(controlArgs.length))
+            )
+          )
+            throw new Error(
+              "Use /jobs, /jobs poll <id> [offset], or /jobs stop <id>",
+            );
+          const result =
+            controlArgs[0] === "stop" && controlArgs[1]
+              ? await s.jobs.stop(controlArgs[1])
+              : controlArgs[0] === "poll" && controlArgs[1]
+                ? s.jobs.poll(controlArgs[1], Number(controlArgs[2] ?? 0))
+                : s.jobs.list();
+          await text(client, s, JSON.stringify(result));
+          return { stopReason: "end_turn" };
+        }
+        if (control === "/checkpoints") {
+          if (controlArgs[0] === "clear" && controlArgs.length === 1) {
+            s.checkpoints = [];
+            await save(s);
+          } else if (controlArgs.length)
+            throw new Error(
+              "Use /checkpoints or /checkpoints clear; clearing removes undo history only",
+            );
+          await text(
+            client,
+            s,
+            JSON.stringify(checkpointSummaries(s.checkpoints)),
+          );
+          return { stopReason: "end_turn" };
+        }
+        const workspaceControl =
+          compactRequested || control === "/undo" || control === "/export";
+        if (prompt.startsWith("/") && !workspaceControl) {
           const [cmd, ...rest] = prompt.trim().split(/\s+/);
           if (
             cmd === "/help" ||
@@ -1719,7 +2263,7 @@ export function createAgent(
               (cmd === "/help"
                 ? ""
                 : "Unknown command or invalid arguments. ") +
-                "Commands: /help, /status, /doctor, /login, /logout, /permissions, /model, /reasoning, /reviewer, /server-tools, /compact, /autocompact on|off, /plan on|off, /queue on|off. Plan mode permits file inspection and plan updates only; Code mode retains your permission policy.",
+                "Commands: /sessions [cursor], /title [text], /fork [title], /export <workspace-file.json|.md>, /jobs [poll|stop <id>], /checkpoints [clear], /undo [id], /help, /status, /doctor, /login, /logout, /permissions, /model, /reasoning, /reviewer, /server-tools, /compact, /autocompact on|off, /plan on|off, /queue on|off. Plan mode permits file inspection and plan updates only; Code mode retains your permission policy.",
             );
             return { stopReason: "end_turn" };
           }
@@ -1767,18 +2311,22 @@ export function createAgent(
             for (const other of sessions.values())
               if (other.root === s.root) {
                 other.active = false;
+                await other.jobs.stopAll();
                 if (other !== s) cancelTurn(other);
                 await other.mcp.close();
               }
           } else if (cmd === "/permissions" && rest[0] === "revoke-tools") {
             s.turns.cancelWaiting();
             await s.permissions.revoke();
+            await s.jobs.stopAll();
             for (const other of sessions.values())
               if (
                 other !== s &&
                 other.permissions.scope === s.permissions.scope
-              )
+              ) {
                 cancelTurn(other);
+                await other.jobs.stopAll();
+              }
           } else if (cmd === "/permissions" && rest[0] === "mode") {
             if (rest.length !== 2)
               throw new Error(
@@ -1844,6 +2392,9 @@ export function createAgent(
                   stopCancelsWaiting: true,
                 },
                 plan: s.plan,
+                jobs: s.jobs.list(),
+                checkpoints: checkpointSummaries(s.checkpoints),
+                title: s.title ?? null,
                 compaction: {
                   automatic: s.compaction.automatic,
                   count: s.compaction.count,
@@ -1941,10 +2492,54 @@ export function createAgent(
             );
         }
         await permitted(s, signal);
+        if (control === "/undo") {
+          if (controlArgs.length > 1)
+            throw new Error("Use /undo or /undo <checkpoint-id>");
+          await manualTool(
+            client,
+            s,
+            "undo_edit",
+            { id: controlArgs[0] ?? "latest" },
+            signal,
+            prompt,
+          );
+          return { stopReason: "end_turn" };
+        }
+        if (control === "/export") {
+          if (!controlArgs.length)
+            throw new Error("Use /export <workspace-file.json|.md>");
+          const path = controlArgs.join(" ");
+          if (!/\.(json|md)$/.test(path))
+            throw new Error("Export path must end in .json or .md");
+          await save(s);
+          const output = await exportStoredSession(s.id, scope, {
+            format: path.endsWith(".json") ? "json" : "markdown",
+            redact: (v) => s.backend.redact(v),
+          });
+          if (output.length > 100000)
+            throw new Error(
+              "Export exceeds the text-file tool limit; choose a smaller session",
+            );
+          await refreshInstructions(client, s, path, signal);
+          const before = await read(client, s, path).catch((e) => {
+            if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+            throw e;
+          });
+          await manualTool(
+            client,
+            s,
+            "write_file",
+            { path, before, after: output },
+            signal,
+            prompt,
+          );
+          return { stopReason: "end_turn" };
+        }
         if (compactRequested) {
           await compactSession(client, s, signal);
           return { stopReason: "end_turn" };
         }
+        await refreshInstructions(client, s, s.root, signal, true);
         // Supplied editor text may be newer than disk. Validate its path without
         // replacing it with a disk read; a missing unsaved file is acceptable.
         // Reading it as context is not a write.
@@ -2010,17 +2605,6 @@ export function createAgent(
             role: "system",
             content: codingInstruction,
           });
-          try {
-            const instructions = await read(client, s, "AGENTS.md");
-            // Repository text is data: as a user message it cannot outrank the
-            // system message above, which says it grants no permissions.
-            s.messages.push({
-              role: "user",
-              content: PROJECT_GUIDANCE_PREFIX + instructions,
-            });
-          } catch {
-            /* Optional instructions. */
-          }
         }
         s.messages.push({
           role: "user",
@@ -2234,14 +2818,31 @@ export function createAgent(
               );
             }
           }
-          const modelContext = contextMessages(s.messages, s.compaction);
+          const historicalGuidance = s.messages.find((m) => m.role === "user");
+          const modelContext = contextMessages(s.messages, s.compaction).filter(
+            (m) =>
+              !(
+                m === historicalGuidance &&
+                m.content?.startsWith(PROJECT_GUIDANCE_PREFIX)
+              ),
+          );
+          modelContext.splice(
+            modelContext.findIndex((m) => m.role !== "system"),
+            0,
+            { role: "user", content: instructionContext(s.instructions) },
+          );
           const firstConversation = modelContext.findIndex(
             (m) => m.role !== "system",
           );
           modelContext.splice(
             firstConversation < 0 ? modelContext.length : firstConversation,
             0,
-            { role: "system", content: planningInstruction(s.workflow) },
+            {
+              role: "system",
+              content:
+                planningInstruction(s.workflow) +
+                " Current scoped project instructions are refreshed from files. Use the current snapshot, including an empty snapshot if instructions were removed, rather than historical instruction excerpts in conversation or tool output.",
+            },
             ...(s.plan.length
               ? [
                   {
@@ -2253,6 +2854,7 @@ export function createAgent(
                 ]
               : []),
           );
+          s.instructionReviewRequired = false;
           const tools = [
             ...definitions.filter(
               (d) =>
@@ -2453,26 +3055,27 @@ export function createAgent(
                   ? completed
                   : failed;
               tally.set(c.function.name, (tally.get(c.function.name) ?? 0) + 1);
-              await update(client, s, {
-                sessionUpdate: "tool_call_update",
-                toolCallId: c.id,
-                status:
-                  typeof outcome === "string" || !outcome.failed
-                    ? "completed"
-                    : "failed",
-                content: [
-                  ...(typeof outcome === "string"
-                    ? []
-                    : (outcome.content ?? [])),
-                  {
-                    type: "content",
-                    content: {
-                      type: "text",
-                      text: s.backend.redact(result).slice(0, 100000),
+              if (typeof outcome === "string" || !outcome.background)
+                await update(client, s, {
+                  sessionUpdate: "tool_call_update",
+                  toolCallId: c.id,
+                  status:
+                    typeof outcome === "string" || !outcome.failed
+                      ? "completed"
+                      : "failed",
+                  content: [
+                    ...(typeof outcome === "string"
+                      ? []
+                      : (outcome.content ?? [])),
+                    {
+                      type: "content",
+                      content: {
+                        type: "text",
+                        text: s.backend.redact(result).slice(0, 100000),
+                      },
                     },
-                  },
-                ],
-              });
+                  ],
+                });
             } catch (error) {
               failed.set(
                 c.function.name,
@@ -2566,7 +3169,7 @@ export function createAgent(
               role: "assistant",
               content: s.backend.redact(partialText),
             });
-          await save(s);
+          if (authCommand !== "/sessions") await save(s);
         }
       }
     }),
@@ -2577,6 +3180,7 @@ export function createAgent(
     close: async () => {
       for (const s of sessions.values()) {
         cancelTurn(s);
+        await s.jobs.stopAll();
         await s.mcp.close();
       }
     },

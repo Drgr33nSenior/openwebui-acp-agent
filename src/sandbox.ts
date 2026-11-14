@@ -11,6 +11,8 @@ import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { directory } from "./config.js";
 import {
   childEnv,
+  CommandOutput,
+  type OutputCallback,
   DEFAULT_COMMAND_TIMEOUT_MS,
   MAX_COMMAND_TIMEOUT_MS,
   validateCommandTimeout,
@@ -77,6 +79,7 @@ export const commandSchema = z
     justification: z.string().min(1).max(1000).optional(),
     additional_read_paths: z.array(z.string().max(4096)).max(8).default([]),
     additional_write_paths: z.array(z.string().max(4096)).max(8).default([]),
+    background: z.boolean().default(false),
   })
   .strict()
   .refine(
@@ -383,6 +386,10 @@ export async function startSandbox(
     setTimeout(() => kill("SIGKILL"), 500).unref();
   };
   signal.addEventListener("abort", stop, { once: true });
+  child.once("exit", () => {
+    lifetime.abort();
+    kill("SIGKILL");
+  });
   const done = new Promise<{ code: number | null; error?: string }>(
     (resolve) => {
       child.once("error", () => {
@@ -472,35 +479,35 @@ export async function sandboxCommand(
   run: SandboxRun,
   signal: AbortSignal,
   limits = { timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS, outputBytes: 100000 },
+  onOutput?: OutputCallback,
 ): Promise<string> {
   validateCommandTimeout(limits.timeoutMs);
   const process = await startSandbox(executable, args, run, signal);
   process.child.stdin!.end();
-  let output = Buffer.alloc(0),
-    limitedOrCancelled = false;
+  let limitedOrCancelled = false;
   const stop = () => {
     limitedOrCancelled = true;
     process.stop();
   };
+  const output = new CommandOutput(limits.outputBytes, onOutput, stop);
   const timer = setTimeout(stop, limits.timeoutMs);
   signal.addEventListener("abort", stop, { once: true });
-  const collect = (bytes: Buffer) => {
-    const room = limits.outputBytes - output.length;
-    output = Buffer.concat([output, bytes.subarray(0, Math.max(0, room))]);
-    if (bytes.length > room) stop();
+  const collect = (bytes: Buffer, channel: "stdout" | "stderr") => {
+    if (output.write(bytes, channel)) stop();
   };
-  process.child.stdout!.on("data", collect);
-  process.child.stderr!.on("data", collect);
+  process.child.stdout!.on("data", (bytes) => collect(bytes, "stdout"));
+  process.child.stderr!.on("data", (bytes) => collect(bytes, "stderr"));
   try {
     const result = await process.done;
     if (result.error) throw new SandboxError(result.error);
     return JSON.stringify({
       code: result.code,
-      output: output.toString("utf8"),
+      output: await output.finish(),
       limitedOrCancelled: limitedOrCancelled || signal.aborted,
     });
   } finally {
     clearTimeout(timer);
     signal.removeEventListener("abort", stop);
+    await output.finish();
   }
 }

@@ -511,6 +511,10 @@ test("chat and ACP logout remove the key, invalidate all sessions and require se
       }
       await runSetup(ui([url, "fixture-key"]), AbortSignal.timeout(5000));
       await assert.rejects(
+        c.connection.agent.request("session/list", { cwd: workspace }),
+        (e) => e.code === -32000,
+      );
+      await assert.rejects(
         c.connection.agent.request("session/new", {
           cwd: workspace,
           mcpServers: [],
@@ -519,6 +523,13 @@ test("chat and ACP logout remove the key, invalidate all sessions and require se
       );
       const recovered = await connect(modern);
       try {
+        assert(
+          (
+            await recovered.connection.agent.request("session/list", {
+              cwd: workspace,
+            })
+          ).sessions.some((s) => s.sessionId === ids[0]),
+        );
         await recovered.connection.agent.request("session/load", {
           sessionId: ids[0],
           cwd: workspace,

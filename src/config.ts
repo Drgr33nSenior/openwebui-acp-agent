@@ -100,7 +100,8 @@ export async function readJson(name: string): Promise<unknown> {
     throw e;
   }
 }
-export async function writeJson(name: string, value: unknown) {
+export async function checkJsonWrite(name: string, value: unknown) {
+  const encoded = JSON.stringify(value);
   await privateDir();
   await readJson(name);
   if (name.startsWith("session-")) {
@@ -113,16 +114,20 @@ export async function writeJson(name: string, value: unknown) {
       );
     let total = 0;
     for (const n of names) total += (await lstat(join(directory, n))).size;
-    if (total + Buffer.byteLength(JSON.stringify(value)) > 64_000_000)
+    if (total + Buffer.byteLength(encoded) > 64_000_000)
       throw new Error(
         "Transcript storage quota reached; delete old sessions explicitly",
       );
   }
+  return encoded;
+}
+export async function writeJson(name: string, value: unknown) {
+  const encoded = await checkJsonWrite(name, value);
   const p = join(directory, name),
     tmp = p + "." + randomUUID();
   const f = await open(tmp, "wx", 0o600);
   try {
-    await f.writeFile(JSON.stringify(value));
+    await f.writeFile(encoded);
     await f.sync();
   } finally {
     await f.close();

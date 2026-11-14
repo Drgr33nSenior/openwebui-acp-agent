@@ -22,7 +22,7 @@ configuration directory. Its own package and lockfile pin:
 | Official MCP SDK                   | `1.32.2`                                                 |
 | Docker base                        | Node `24.22.3` on Debian bookworm-slim, pinned by digest |
 
-The separate SDK dependency provides the bounded HTTP transport. The wrapper
+The SDK provides the bounded HTTP transport. The wrapper
 uses Microsoft's public `createConnection` API with fixed settings equivalent to
 `--headless --isolated --no-webmcp --block-service-workers --image-responses omit
 --snapshot-mode none --timeout-navigation 20000 --timeout-action 5000
@@ -36,12 +36,6 @@ the first tool call, not during initialization or tool discovery. MCP session
 termination waits for the owned browser to close; cancellation during launch
 also closes a late browser. Ten minutes without MCP activity closes the session.
 No persistent browser profile is used.
-
-This ownership is necessary with the pinned MCP API: its default browser factory
-does not pass its browser disposer to the API backend. In the container test,
-successive deleted sessions left Chromium processes alive and the fourth launch
-reached the unchanged 256-PID limit. The wrapper explicitly closes its own browser
-instead of increasing that limit.
 
 From a reviewed source checkout with Node and Docker Desktop installed:
 
@@ -59,7 +53,7 @@ Playwright CLI with `PLAYWRIGHT_BROWSERS_PATH=0` and
 `install --with-deps --only-shell chromium` inside the image. Chromium and FFmpeg
 stay in image-local `node_modules`. No host browser is downloaded by this setup.
 The base image and JavaScript dependencies are pinned; Debian runtime packages
-are resolved during the image build. No prebuilt image is published by this PR.
+are resolved during the image build. Build the image locally; no prebuilt image is provided.
 
 `npm run smoke` serves a fixture on host loopback and uses Docker Desktop's
 `host.docker.internal` routing. It verifies navigation, finding controls, typing,
@@ -185,68 +179,8 @@ remains the same explicit allowlist; new tools do not become available merely
 because the dependency changed. Refresh does not automatically update the Node
 base digest or weaken container controls.
 
-## Qwen Code: documentation only
+## References
 
-No Qwen configuration is read or changed by this integration. If separately
-choosing to use the wrapper as a local Qwen Code stdio server, install its browser
-in that package directory first:
-
-```sh
-npm ci --ignore-scripts
-PLAYWRIGHT_BROWSERS_PATH=0 node node_modules/playwright/cli.js install --only-shell chromium
-node config.mjs --qwen-code
-```
-
-The generated settings entry uses an absolute Node/wrapper path, the same
-`includeTools` list, `trust: false` and `timeout: 60000` (milliseconds). Review it
-before merging it into Qwen Code's user settings. This path is **unsandboxed** in
-Qwen Code: the browser has the host user's filesystem privileges and full network
-and LAN access. The isolated profile is not an OS sandbox. This ACP agent's
-per-call enforcement, argument filtering and output limits do not apply there.
-Qwen Code live acceptance is unverified; this is not the selected Mac installation
-route.
-
-## macOS sandbox spike and evidence
-
-Before selecting the container route, the 2026-11-13 spike used agent `c095051`,
-macOS 27.0 (26A428), arm64, Node 26.11.1 and npm 11.20.0. Exact pinned packages
-were installed in a disposable directory with `npm ci --ignore-scripts`, and the
-headless shell was downloaded with `PLAYWRIGHT_BROWSERS_PATH=0`.
-
-The agent's unchanged `sandboxCommand` ran in workspace mode, with an empty
-fixture workspace and an explicit package read exception. Playwright used its
-sandbox proxy and generated `--proxy-bypass-list=<-loopback>`. Chromium exited
-with `SIGTRAP` before a page or isolated context could be created:
-
-```text
-FATAL:base/apple/mach_port_rendezvous_mac.cc:159
-Check failed: kr == KERN_SUCCESS.
-bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.<pid>:
-Permission denied (1100)
-WARNING:net/dns/dns_config_service_posix.cc:198
-Failed to read DnsConfig.
-```
-
-Playwright reported `browserType.launch: Target page, context or browser has
-been closed`. The command returned 1 without a timeout. No network approval or
-fixture request occurred, so that spike did not verify navigation or proxy
-routing. The owner then selected the container route with per-call approval.
-No macOS sandbox or host security policy was weakened.
-
-Primary evidence:
-
-- [Microsoft MCP v0.0.85 package](https://github.com/microsoft/playwright-mcp/blob/v0.0.85/package.json)
-  and [configuration API](https://github.com/microsoft/playwright-mcp/blob/v0.0.85/config.d.ts).
-- [Microsoft MCP v0.0.85 documentation](https://github.com/microsoft/playwright-mcp/blob/v0.0.85/README.md)
-  for fixed settings, persistent/isolated profiles and additive capabilities.
-- [Playwright browser installation](https://playwright.dev/docs/browsers#hermetic-install)
-  for package-local browser files. The pinned package's `browsers.json` and actual
-  download identified revision `1254`.
-- [Official Node image](https://hub.docker.com/_/node) and
-  [Node LTS download catalog](https://nodejs.org/en/download) for the base. Its
-  immutable index digest was verified with `docker buildx imagetools inspect`.
-- [Qwen Code MCP settings](https://qwenlm.github.io/qwen-code-docs/en/users/features/mcp/)
-  for `includeTools`, `trust` and millisecond tool timeouts.
-
-See [the verification record](verification.md) for observed automated/container
-results and the remaining interactive IDE acceptance.
+- [Microsoft MCP pinned source](https://github.com/microsoft/playwright-mcp/tree/v0.0.85).
+- [Playwright browser installation](https://playwright.dev/docs/browsers#hermetic-install).
+- [Testing and compatibility](verification.md).

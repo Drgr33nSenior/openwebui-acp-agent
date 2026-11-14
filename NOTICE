@@ -10,8 +10,7 @@ The bundle also includes @pondwader/socks5-server 1.0.10 (MIT), commander 12.1.0
 (MIT), node-forge 1.4.3 (BSD-3-Clause option), and zod 4.6.7 (MIT). Their original
 licence and copyright texts remain in each package's LICENSE file.
 
-The agent uses the runtime as a library. No Codex executable or Open WebUI source
-is included. The lockfile records the exact dependency artifacts and integrity.
+The agent uses the runtime as a library. No Open WebUI source is included. The lockfile records the exact dependency artifacts and integrity.
 
 The optional browser wrapper installs Microsoft @playwright/mcp 0.0.85 and
 Playwright 1.66.0-alpha-2026-11-09, licensed under Apache License 2.0, with their

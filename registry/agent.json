@@ -2,8 +2,8 @@
   "$schema": "https://cdn.agentclientprotocol.com/registry/v1/latest/agent.schema.json",
   "id": "openwebui-acp-agent",
   "name": "Open WebUI Agent (unofficial)",
-  "version": "0.3.0",
-  "description": "Community local coding agent using a user-configured Open WebUI installation. Preview; see release gates.",
+  "version": "0.4.0",
+  "description": "Unofficial coding agent for JetBrains and compatible ACP clients, using your Open WebUI installation.",
   "license": "MIT",
   "license_url": "https://github.com/Drgr33nSenior/openwebui-acp-agent/blob/main/LICENSE",
   "repository": "https://github.com/Drgr33nSenior/openwebui-acp-agent",
@@ -11,7 +11,7 @@
   "authors": ["Drgr33nSenior"],
   "distribution": {
     "npx": {
-      "package": "openwebui-acp-agent@0.3.0",
+      "package": "openwebui-acp-agent@0.4.0",
       "args": ["acp"],
       "env": {}
     }

@@ -19,13 +19,13 @@ function redactedOutput(secrets: string[]) {
     for (const secret of secrets)
       pending = pending.replaceAll(secret, "[REDACTED]");
     let held = 0;
-    if (!final)
-      for (const secret of secrets)
-        for (let n = 1; n < secret.length && n <= pending.length; n++)
-          if (pending.endsWith(secret.slice(0, n))) held = Math.max(held, n);
+    for (const secret of secrets)
+      for (let n = 1; n < secret.length && n <= pending.length; n++)
+        if (pending.endsWith(secret.slice(0, n))) held = Math.max(held, n);
     const end = pending.length - held;
-    const text = pending.slice(0, end);
-    pending = pending.slice(end);
+    // EOF/cancellation is not permission to release a held credential prefix.
+    const text = pending.slice(0, end) + (final && held ? "[REDACTED]" : "");
+    pending = final ? "" : pending.slice(end);
     return text;
   }
   return new Transform({

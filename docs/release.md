@@ -1,77 +1,73 @@
-# Release and registry checklist
+# Release checklist
 
-The MIT license is selected for this original implementation. The SVG is original
-and uses `currentColor`; no Open WebUI artwork or source is distributed. The
-source-preview target is the existing public
-[Drgr33nSenior/openwebui-acp-agent repository](https://github.com/Drgr33nSenior/openwebui-acp-agent).
-The user requested publication on 13 November 2026. The authenticated GitHub
-account and repository owner were both verified as `Drgr33nSenior`. The npm name
-still returned 404, which is not a reservation. No npm package or registry entry
-has been published; complete the acceptance gates below before package release.
+## Publish on GitHub
 
-Before distribution:
+Merge the reviewed source PR first. In the repository's **Actions** tab, select
+**Publish GitHub release**, choose **Run workflow** on `main`, and enter the
+exact version from `package.json`. The workflow reruns platform and browser
+checks, builds and tests the package, then publishes the `.tgz` and `SHA256SUMS`.
+It downloads the public asset, verifies its checksum and tests installation again.
+No npm account or npm token is needed.
 
-- Resolve engineering limits in design.md and complete the missing test cases in verification.md.
-- Verify OS credential-store login/cancellation/logout and Windows ACL behavior, or restrict the published platform support explicitly.
-- Review dependency advisories for both the checkout and an independently installed tarball. Preserve the tested Zod compatibility pin and runtime bundle; do not suppress findings.
-- Maintainer, repository, documentation and license URLs are populated from the
-  verified GitHub repository. Check the public links after the initial push.
-- Keep source-preview publication separate from package release. Verify the
-  active `gh` account is Drgr33nSenior before GitHub operations.
-- Recheck package-name availability, publish an immutable version, then validate its downloadable artifact.
-- Run upstream registry schema, icon, packaging and authentication checks without weakening them. A local schema pass does not validate the existence of the package URL.
-- Preserve the hosted Ubuntu namespace prerequisites and full boundary tests.
-  Ubuntu 24.04 and 26.04 now pass with the explicitly approved CI-only AppArmor
-  profile replacement. Other hosts need separate administrator review; a CI
-  pass does not authorize host security-policy changes. See verification.md.
+Publication is manual and restricted to `main`. Only the publishing job receives
+repository contents-write permission. Existing tags are rejected, and assets are
+never replaced automatically. If publication fails after tag creation, inspect
+the retained tag, workflow artifact and any release before proceeding; a rerun
+will not overwrite them. This workflow must be merged before GitHub can expose
+its manual trigger. Review its first run; source validation alone does not prove
+that publication succeeded.
 
-Runtime 0.0.83 still declares Zod `^3.25.0`; the reviewed compatibility override
-and bundled runtime tree resolve it to patched 4.6.7. Checkout and installed
-package audits pass locally. See [the evidence](sandbox.md#dependency-advisory-and-release-gate).
-The first unbundled installation failed audit, so both installation and audit
-checks are required before release. npm publication authentication is absent on
-this workstation; complete npm authentication locally when a cleared release is
-ready. Do not
-send tokens through chat or commit them.
+## Source and package
 
-The current registry JSON Schema and upstream manifest/version/icon functions
-pass. The unmodified distribution-URL check correctly fails because the npm
-package does not exist. Public-package authentication/installation checks remain
-blocked by that absence. The upstream verification script was inspected but not
-run against a nonexistent package; local installed-package authentication is
-tested separately. No check was disabled to report a registry pass.
+- Review the complete diff and preserve unrelated working trees and installations.
+- Use the existing MIT license, original SVG and accurate unofficial branding.
+  Keep dependency licenses and NOTICE. Do not include deployment addresses,
+  credentials, private model IDs, transcripts, test logs or local setup files.
+- Update package/lockfile, protocol metadata and pinned registry distribution
+  references to the same immutable version.
+- Run [required checks](verification.md), dependency audits and installation from
+  a tarball outside the checkout. Inspect `npm pack --dry-run` contents.
+- Verify the active GitHub owner account before creating the source PR. The owner
+  reviews and merges it. Do not rewrite shared history or merge automatically.
+- Create a GitHub Release for the exact tested source revision. Upload the
+  packed `.tgz` and `SHA256SUMS`, then download and install the public asset in a
+  fresh prefix. Verify the checksum and repeat the installed-package check.
+  Do not replace an existing version or asset silently.
+- npm registry publication is optional and separate. If chosen, verify account
+  ownership and authenticate locally; never paste tokens into chat or files.
+  Publish the reviewed tarball and verify the public package's integrity.
 
-## Isolated JetBrains registry acceptance
+Native Windows must remain excluded from support until state ACLs and execution
+are implemented and tested. Mock tests cannot replace live IDE/backend acceptance.
+No dependency audit or security control should be weakened to obtain a release.
 
-Create an isolated development profile for each client. Record exact IDE, AI Assistant/Air client/plugin, agent, Node and backend versions. Disable the companion plugin in that profile only. Record the existing registry override before any change.
+## ACP registry
 
-Investigate `llm.chat.agent.acp.external.registry.url` independently in the actual AI Assistant and Air client builds. A bounded local JAR search did not establish this setting in either inspected installation; do not assume the earlier workstation finding still applies. Air standalone and Air in IDEs are different client distributions. No normal profile was modified.
+The manifest and icon are in `registry/`. Registry inclusion is separate from
+GitHub release publication. The current npm-based manifest remains a proposal
+until its package is published. Use version-pinned distribution references and empty environment
+objects. Run upstream schema, icon, packaging and authentication checks without
+altering their requirements. A structural pass does not prove a public package
+exists or installs successfully.
 
-If the client supports an external catalog override, serve an isolated test registry with the real built package artifact. An override replaces the catalog; it is not additive. Record and restore its previous value. Do not use internal `agentsCatalogProvider` extension points. Follow the client's supported mechanism rather than inventing a registry format or setting.
+Test installation in isolated client profiles. If the installed client supports
+`llm.chat.agent.acp.external.registry.url`, record its value before changing it
+and restore it afterwards. An external catalog override replaces the catalog;
+it is not additive. Check support separately for AI Assistant and Air in IDEs.
+Do not modify a normal profile or depend on internal extension points.
 
-Test registry installation separately from a manual `agent_servers` launch. Verify terminal auth under the actual client invocation. Do not claim registry acceptance while the artifact is unpublished or client interaction is unavailable.
+## Interactive acceptance
 
-## Manual acceptance record
+Record exact IDE/ACP client, Node, package and Open WebUI versions. Check:
 
-For both AI Assistant and Air, record pass/fail, versions and evidence for: launch without the helper; masked first setup; real model selection/inference; unfamiliar-workspace approval; decline with no side effects; session-only and exact remembered scopes; approved diff/edit; approved command; cancellation; direct MCP search/retrieval/memory where available; independent Air worktree consent; useful diagnostics; history restore without replay; isolated registry installation. Verify reasoning controls against observed provider behavior, not HTTP status alone.
+1. Launch and IDE-driven masked setup without a companion plugin.
+2. Model selection and real function calling; reasoning effects where supported.
+3. Exact workspace/worktree consent, decline, session-only trust and revocation.
+4. Diffs and stale-edit protection, command output, cancellation and background cleanup.
+5. Direct MCP, automatic diagnostics and configured project checks.
+6. Saved sessions, forks, exports and undo without replaying operations.
+7. Server tasks and browser calls only when explicitly configured and approved.
+8. Registry installation separately from manual registration.
 
-The user reports successful PyCharm authentication and messaging. The full checklist above, including rendering and enforcement of both remembered tool-approval choices, still requires recorded interactive acceptance. Do not retire the original solution until successful replacement acceptance and separate user authorization.
-
-## Sandbox acceptance before broader testing
-
-- Resolve or explicitly review the upstream runtime/Zod advisory; keep the normal
-  audit job enabled. Do not present the current local package as a cleared release.
-- Run the real boundary tests on macOS and Linux/WSL targets. Record OS, kernel,
-  Node, runtime, bubblewrap and seccomp-helper versions. A compile pass is not
-  platform acceptance. Do not disable namespace/security controls to pass tests.
-- Keep native Windows disabled until storage ACLs, privileged sandbox setup and
-  process cleanup have an implemented, independently tested lifecycle.
-- Verify the Sandbox selector in AI Assistant and Air, network host/port choices,
-  cancelled approvals, path exceptions, unsandboxed warnings and restore/revoke.
-- Test an actual worktree, project build, authenticated GitHub read and direct MCP
-  tool under the selected policy. Keep remote mutation approval separate.
-- Review the pinned macOS profile adapter on every runtime update. Confirm the
-  credential-service lookup is denied and normal HTTPS remains verified.
-- Review the full Codex difference table. Advisory review and local administrator
-  rules are implemented. Automatic model approvals, central enterprise management
-  and native Windows remain deferred; do not advertise comprehensive parity.
+Document unavailable or incomplete checks as such. Do not infer support for
+all JetBrains products from one client build.

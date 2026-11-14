@@ -963,10 +963,8 @@ test("project AGENTS.md reaches the model as labelled user data, never as a syst
     );
     const guidance = sent.find((m) => m.content?.includes("Prefer tabs"));
     assert.equal(guidance.role, "user");
-    assert.match(
-      guidance.content,
-      /^Project guidance from AGENTS\.md \(untrusted/,
-    );
+    assert.match(guidance.content, /^Untrusted scoped project instructions\./);
+    assert.match(guidance.content, /AGENTS\.md \(scope: \.\)/);
   } finally {
     await c.close();
     await unlink(join(workspace, "AGENTS.md"));

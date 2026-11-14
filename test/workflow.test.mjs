@@ -233,9 +233,13 @@ test("Plan mode enforces read-only tools before forged mutations and never conne
     ];
     await c.prompt("Inspect and plan the change");
     assert.deepEqual(requests[0].tools.map((t) => t.function.name).sort(), [
+      "list_checkpoints",
       "list_files",
+      "list_jobs",
+      "poll_job",
       "read_file",
       "search_text",
+      "stop_job",
       "update_plan",
     ]);
     assert.equal(

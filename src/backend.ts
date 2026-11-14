@@ -88,6 +88,26 @@ export class Backend {
       value = value.split(secret).join("[REDACTED]");
     return value;
   }
+  redactSnapshot(value: string) {
+    value = this.redact(value);
+    // A cumulative snapshot can end midway through a secret. Withhold that
+    // suffix until later bytes disambiguate it; never publish a token prefix.
+    let withheld = 0;
+    for (const secret of this.secrets) {
+      if (secret.length < 2) continue;
+      const tail = value.slice(-Math.max(0, secret.length - 1));
+      for (
+        let i = tail.indexOf(secret[0]!);
+        i >= 0;
+        i = tail.indexOf(secret[0]!, i + 1)
+      )
+        if (secret.startsWith(tail.slice(i))) {
+          withheld = Math.max(withheld, tail.length - i);
+          break;
+        }
+    }
+    return withheld ? value.slice(0, -withheld) : value;
+  }
   async request(path: string, signal: AbortSignal, body?: unknown) {
     enforceDestination(await this.policy(), "inference", this.config.url);
     signal.throwIfAborted();
