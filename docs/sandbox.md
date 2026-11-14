@@ -7,12 +7,19 @@ Neither grants workspace activation or overrides administrator restrictions.
 | --------------------- | -------------------------------------------------------------------------------------------- |
 | Workspace write       | Writes in the exact project and a private temporary directory; approved network destinations |
 | Read-only filesystem  | No workspace writes; private scratch files and required runtime device access                |
-| Unsandboxed (session) | Ordinary user-account filesystem/network access; explicit approval for each launch           |
+| Unsandboxed (session) | Ordinary user-account filesystem/network access; approval for each launch unless YOLO is confirmed           |
 
 Unsandboxed mode resets on restore or revocation. Permissions **Read only** is
 stricter than a read-only sandbox: it disables commands and MCP entirely.
 Commands always use agent-owned runners; an IDE terminal capability does not
 establish isolation. A sandbox failure never causes an unrestricted retry.
+
+Confirmed **YOLO** selects unsandboxed execution for this session. Commands and
+local MCP then have ordinary user-account filesystem/network access, without
+the proxy or sandbox credential/metadata protections below. Routine operation
+approvals are skipped, including background launches. Administrator rules still
+apply; policies that forbid full access also forbid YOLO. Changing the Sandbox
+selector exits YOLO. See [permissions](../README.md#permissions).
 
 ## Files and temporary directories
 
@@ -36,7 +43,8 @@ A worktree's external Git metadata is not an implicit filesystem grant.
 Credential-name lists cannot identify every sensitive file.
 
 A command can request additional existing absolute read/write paths with a
-reason. Scope expansion always requires a fresh decision. Home, filesystem roots,
+reason. Scope expansion requires a fresh decision outside confirmed YOLO.
+Home, filesystem roots,
 agent state and known credential stores are not valid exceptions. Explicit
 `sandbox_permissions: require_escalated` requests an unsandboxed invocation;
 there is no automatic escalation after a failure. An earlier command may already
@@ -63,8 +71,8 @@ parent agent. Work performed by those servers is outside the command sandbox.
 
 Local stdio MCP uses the same owned-process boundary, bounded frames and explicit
 installation read scope. IDE bridge tools and the optional browser container
-execute outside it and retain their own approvals. Closing an HTTP request
-does not prove a remote operation stopped.
+execute outside it and retain their own approvals outside confirmed YOLO.
+Closing an HTTP request does not prove a remote operation stopped.
 
 ## Platforms and cleanup
 

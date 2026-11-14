@@ -84,7 +84,9 @@ Add `verify` to private `config.json`, preserving the existing fields:
 
 Commands are opt-in per exact root, with normal approval, network restrictions
 and sandbox enforcement. A sibling worktree needs its own entry. Automatic
-checks never run in unsandboxed mode. AGENTS.md commands remain guidance, not
+checks require an OS sandbox unless YOLO has been explicitly confirmed for
+the session. In YOLO they run unsandboxed with the same limits and admin rules.
+AGENTS.md commands remain guidance, not
 executable configuration. Configure repeatable tests or linters: checks can run
 again after a repair edit or command. Unchanged repair replies reuse the previous
 project-check result; denied/unavailable checks are not retried in that turn.

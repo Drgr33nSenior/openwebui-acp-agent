@@ -31,7 +31,11 @@ command/destination and environment names. A connection grant does not approve
 its tools. Local stdio runs in the selected command sandbox with a bounded,
 explicit program read scope. HTTP/SSE tools execute outside that sandbox.
 Local HTTP servers, including the IDE and browser, require approval for each
-call except the narrowly matched IDE file-problems diagnostic.
+call except the narrowly matched IDE file-problems diagnostic. Confirmed YOLO
+supplies startup/call approval automatically, including per-server
+`alwaysApproveTools` decisions, unless administrator rules require approval.
+It also removes the local stdio process sandbox; catalog filters and validation
+remain enforced.
 
 Catalog discovery uses the official MCP SDK. Names are namespaced, arguments are
 validated against supported JSON Schema dialects, and output/cancellation are
@@ -60,9 +64,9 @@ the effective destination and project. Supplied authentication/project headers
 are preserved without exposing their values.
 
 This does not sandbox IDE tools. Terminal, build, run-configuration and
-refactoring tools keep per-call approval. Only `get_file_problems` from the
-recognized client-supplied bridge for the exact workspace qualifies for automatic
-diagnostics. See [verification after edits](ide-diagnostics.md).
+refactoring tools keep per-call approval outside confirmed YOLO. Only
+`get_file_problems` from the recognized client-supplied bridge for the exact
+workspace qualifies for automatic diagnostics. See [verification after edits](ide-diagnostics.md).
 
 ## Open WebUI-managed tasks
 
@@ -82,6 +86,8 @@ Approval covers the displayed task prompt, model, features, tool IDs, remote
 scope and retained chat. Session or remembered grants cover any prompt with that
 exact scope, including mutations and new chats. A change in scope or catalog
 requires approval again. Development mode does not create remote grants.
+Confirmed YOLO approves tasks without a per-task decision while server tools
+are enabled; it does not bypass Open WebUI’s own approvals or account policy.
 `/permissions revoke-tools` revokes them; Ask each time, approval advice and
 administrator rules still apply.
 

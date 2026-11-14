@@ -106,8 +106,9 @@ project instructions, retrieved data and tool output are untrusted model input.
 They cannot restore grants or alter destinations.
 
 Automatic verification collects bounded IDE file problems after agent edits and
-runs explicitly configured project checks in the existing sandbox. Errors return
-to the model within a finite repair budget. Incomplete/denied checks never count
+runs explicitly configured project checks in the selected sandbox, or with
+explicitly confirmed session-only YOLO access. Errors return to the model within
+a finite repair budget. Incomplete/denied checks never count
 as passing. See [the diagnostic contract](ide-diagnostics.md).
 
 ## Permissions, files and state
@@ -117,6 +118,12 @@ Trust covers an exact canonical root and disclosed destination. Session grants,
 persisted operation grants, administrator restrictions and OS isolation are
 independent. Root/home activation is rejected. Revocation prevents subsequent
 protected operations, including already-waiting approvals.
+
+YOLO confirmation is in-memory and bound to the permission epoch. Selection
+alone grants nothing: a cancellable ACP decision follows workspace activation
+and precedes context loading, inference and MCP startup. Confirmation selects
+full-access execution and skips routine approvals; administrator rules take
+precedence. Restore/fork cannot restore it, and revocation invalidates it.
 
 Diff approvals show actual paths/content. Re-reads detect stale proposals;
 local writes are atomic. Exact checkpoints support bounded safe undo. Nested

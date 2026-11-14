@@ -714,7 +714,18 @@ test("server task grant covers prompts but binds exact selected model, features,
 });
 
 test("remote task session/remembered grants reuse only their scope and support revocation; ask policies stay once-only", async () => {
-  for (const choice of ["once", "session", "remember", "ask", "managed"]) {
+  for (const choice of [
+    "once",
+    "session",
+    "remember",
+    "ask",
+    "managed",
+    "yolo",
+    "yolo-managed",
+  ]) {
+    const managed = choice === "managed" || choice === "yolo-managed";
+    const alwaysAsk = choice === "ask" || managed;
+    const yolo = choice.startsWith("yolo");
     const settings = {
       repeatTasks: true,
       noImages: true,
@@ -728,7 +739,7 @@ test("remote task session/remembered grants reuse only their scope and support r
     const connected = [];
     async function connect() {
       const agent = createAgent(
-        choice === "managed"
+        managed
           ? {
               loadPolicy: async () =>
                 snapshotPolicy({ version: 1, alwaysAsk: ["mcp-tool"] }),
@@ -738,20 +749,22 @@ test("remote task session/remembered grants reuse only their scope and support r
       const app = new ClientApp();
       app.onNotification("session/update", () => {});
       app.onRequest("session/request_permission", ({ params }) => {
+        if (params.toolCall.title.startsWith("Enable YOLO"))
+          return { outcome: { outcome: "selected", optionId: "enable-yolo" } };
         if (!params.toolCall.title.startsWith("Delegate to Open WebUI"))
           return { outcome: { outcome: "selected", optionId: "once" } };
         remoteApprovals++;
         assert.match(params.toolCall.title, /authorize ANY prompt/);
         assert.deepEqual(
           params.options.map((o) => o.optionId),
-          ["ask", "managed"].includes(choice)
+          alwaysAsk
             ? ["once", "deny"]
             : ["once", "session", "remember", "deny"],
         );
         return {
           outcome: {
             outcome: "selected",
-            optionId: ["ask", "managed"].includes(choice) ? "once" : choice,
+            optionId: alwaysAsk || yolo ? "once" : choice,
           },
         };
       });
@@ -771,11 +784,11 @@ test("remote task session/remembered grants reuse only their scope and support r
         configId: "server_tools",
         value: "on",
       });
-      if (choice === "ask")
+      if (choice === "ask" || yolo)
         await c.agent.request("session/set_config_option", {
           sessionId: s.sessionId,
           configId: "permissions",
-          value: "ask",
+          value: yolo ? "yolo" : "ask",
         });
       return {
         ...item,
@@ -794,16 +807,23 @@ test("remote task session/remembered grants reuse only their scope and support r
       await first.prompt("second");
       assert.equal(
         remoteApprovals,
-        ["session", "remember"].includes(choice) ? 1 : 2,
+        choice === "yolo"
+          ? 0
+          : ["session", "remember"].includes(choice)
+            ? 1
+            : 2,
       );
       const before = remoteApprovals;
       const second = await connect();
       await second.prompt("third");
-      assert.equal(remoteApprovals, before + (choice === "remember" ? 0 : 1));
+      assert.equal(
+        remoteApprovals,
+        before + (["remember", "yolo"].includes(choice) ? 0 : 1),
+      );
       settings.task.features = ["memory"];
       const changed = remoteApprovals;
       await second.prompt("different feature scope");
-      assert.equal(remoteApprovals, changed + 1);
+      assert.equal(remoteApprovals, changed + (choice === "yolo" ? 0 : 1));
       await second.prompt("/permissions revoke-tools");
       const revoked = remoteApprovals;
       await second.prompt("after revocation");

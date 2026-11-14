@@ -267,6 +267,8 @@ type Session = {
   abort?: AbortController;
   turns: Turns;
   promptMode: PromptMode;
+  // In-memory confirmation bound to the permission epoch; never persisted.
+  yoloEpoch?: string;
   mcp: Mcp;
   servers: McpServer[];
   ideServers: McpServer[];
@@ -338,6 +340,7 @@ export function createAgent(
       s.active = false;
       cancelTurn(s);
       await s.jobs.stopAll();
+      await leaveYolo(s);
     }
     try {
       await logout();
@@ -437,12 +440,14 @@ export function createAgent(
             type: "select",
             currentValue: s.permissions.currentMode,
             description:
-              "Approval policy for this session; the separate Sandbox selector controls command isolation.",
+              "Approval policy for this session. YOLO requires confirmation at the next workspace prompt and switches to unsandboxed execution.",
             options: permissionModes
               .filter(
                 (m) =>
-                  !s.administrator.rules.permissionModes ||
-                  s.administrator.rules.permissionModes.includes(m.value),
+                  (!s.administrator.rules.permissionModes ||
+                    s.administrator.rules.permissionModes.includes(m.value)) &&
+                  (m.value !== "yolo" ||
+                    allowedSandbox(s.administrator, "full_access")),
               )
               .map((m) => ({ ...m })),
           },
@@ -652,14 +657,19 @@ export function createAgent(
     workspace = false,
     content: any[] = [],
     toolGrant?: Grant,
-    operation?: { id: string; input: Record<string, unknown> },
+    operation?: {
+      id: string;
+      input: Record<string, unknown>;
+      kind?: Grant["kind"];
+    },
     forceOnce = false,
   ) => {
     signal.throwIfAborted();
     await checkPolicy(s);
-    const actionKind = toolGrant?.kind ?? "command";
-    if (!workspace && s.administrator.rules.alwaysAsk?.includes(actionKind))
-      forceOnce = true;
+    const actionKind = toolGrant?.kind ?? operation?.kind ?? "command";
+    const administratorAsks =
+      s.administrator.rules.alwaysAsk?.includes(actionKind);
+    if (!workspace && administratorAsks) forceOnce = true;
     // Advisory mode ignores grants so a human sees the advice and decides.
     if (!workspace && s.reviewer !== "off") forceOnce = true;
     let mode = await s.permissions.mode();
@@ -685,6 +695,13 @@ export function createAgent(
     });
     const policy = workspace ? undefined : await s.permissions.prepare();
     mode = await s.permissions.mode();
+    const yolo =
+      !workspace &&
+      mode === "yolo" &&
+      policy &&
+      s.yoloEpoch === policy.epoch &&
+      !administratorAsks &&
+      s.reviewer === "off";
     const reusableGrant = mode === "ask" || forceOnce ? undefined : toolGrant;
     const reused =
       reusableGrant &&
@@ -722,64 +739,67 @@ export function createAgent(
         content,
       });
     }
-    const response = reused
-      ? { outcome: { outcome: "selected", optionId: "once" } }
-      : await abortable(
-          client.request<RequestPermissionResponse>(
-            "session/request_permission",
-            {
-              sessionId: s.id,
-              toolCall: {
-                toolCallId: id,
-                title: s.backend.redact(title),
-                kind,
-                ...(operation
-                  ? {
-                      rawInput: JSON.parse(
-                        s.backend.redact(JSON.stringify(operation.input)),
-                      ),
-                    }
-                  : {}),
-                status: "pending",
-                content: JSON.parse(s.backend.redact(JSON.stringify(content))),
-              },
-              options: [
-                {
-                  optionId: "once",
-                  name: workspace
-                    ? "Allow workspace access for this session"
-                    : "Allow this operation once",
-                  kind: "allow_once",
+    const response =
+      yolo || reused
+        ? { outcome: { outcome: "selected", optionId: "once" } }
+        : await abortable(
+            client.request<RequestPermissionResponse>(
+              "session/request_permission",
+              {
+                sessionId: s.id,
+                toolCall: {
+                  toolCallId: id,
+                  title: s.backend.redact(title),
+                  kind,
+                  ...(operation
+                    ? {
+                        rawInput: JSON.parse(
+                          s.backend.redact(JSON.stringify(operation.input)),
+                        ),
+                      }
+                    : {}),
+                  status: "pending",
+                  content: JSON.parse(
+                    s.backend.redact(JSON.stringify(content)),
+                  ),
                 },
-                ...(workspace
-                  ? [
-                      {
-                        optionId: "remember",
-                        name: "Remember this exact workspace and backend",
-                        kind: "allow_always" as const,
-                      },
-                    ]
-                  : reusableGrant
+                options: [
+                  {
+                    optionId: "once",
+                    name: workspace
+                      ? "Allow workspace access for this session"
+                      : "Allow this operation once",
+                    kind: "allow_once",
+                  },
+                  ...(workspace
                     ? [
                         {
-                          optionId: "session",
-                          name: `Allow for this session: ${reusableGrant.label}`,
-                          kind: "allow_always" as const,
-                        },
-                        {
                           optionId: "remember",
-                          name: `Remember for this workspace and backend: ${reusableGrant.label}`,
+                          name: "Remember this exact workspace and backend",
                           kind: "allow_always" as const,
                         },
                       ]
-                    : []),
-                { optionId: "deny", name: "Decline", kind: "reject_once" },
-              ],
-            },
-            { cancellationSignal: signal, stopWaitingOnCancel: true },
-          ),
-          signal,
-        );
+                    : reusableGrant
+                      ? [
+                          {
+                            optionId: "session",
+                            name: `Allow for this session: ${reusableGrant.label}`,
+                            kind: "allow_always" as const,
+                          },
+                          {
+                            optionId: "remember",
+                            name: `Remember for this workspace and backend: ${reusableGrant.label}`,
+                            kind: "allow_always" as const,
+                          },
+                        ]
+                      : []),
+                  { optionId: "deny", name: "Decline", kind: "reject_once" },
+                ],
+              },
+              { cancellationSignal: signal, stopWaitingOnCancel: true },
+            ),
+            signal,
+          );
     signal.throwIfAborted();
     await checkPolicy(s);
     const chosen =
@@ -833,8 +853,103 @@ export function createAgent(
     ) {
       s.sandbox = initialSandbox(s.administrator);
       s.sandboxEpoch = undefined;
+      s.yoloEpoch = undefined;
     }
     return s.sandbox;
+  };
+  const leaveYolo = async (s: Session) => {
+    if (s.yoloEpoch === undefined && s.permissions.currentMode !== "yolo")
+      return;
+    s.yoloEpoch = undefined;
+    s.sandboxEpoch = undefined;
+    s.sandbox = initialSandbox(s.administrator);
+    await s.permissions.selectMode(initialPermissions(s.administrator));
+  };
+  const confirmYolo = async (
+    client: AgentContext,
+    s: Session,
+    signal: AbortSignal,
+  ) => {
+    if ((await s.permissions.mode()) !== "yolo" || s.workflow === "plan")
+      return;
+    const policy = await s.permissions.prepare();
+    if (s.yoloEpoch === policy.epoch) return;
+    const id = randomUUID();
+    const title = `Enable YOLO for this session in ${s.root}? Commands and local MCP will run UNSANDBOXED with your user account's filesystem and network access. Edits, arbitrary commands, configured MCP calls and enabled Open WebUI tasks can run without further approval, including destructive actions, remote mutations and data disclosure to ${s.config.url} or configured services. Approval advice is disabled. Administrator rules, workspace-scoped file tools and resource limits remain enforced. This choice is not remembered.`;
+    try {
+      await permitted(s, signal);
+      enforceSandbox(s.administrator, "full_access");
+      await update(client, s, {
+        sessionUpdate: "tool_call",
+        toolCallId: id,
+        title,
+        kind: "other",
+        status: "pending",
+      });
+      const response = await abortable(
+        client.request<RequestPermissionResponse>(
+          "session/request_permission",
+          {
+            sessionId: s.id,
+            toolCall: {
+              toolCallId: id,
+              title: s.backend.redact(title),
+              kind: "other",
+              status: "pending",
+            },
+            options: [
+              {
+                optionId: "enable-yolo",
+                name: "Enable unsandboxed YOLO for this session",
+                kind: "allow_once",
+              },
+              {
+                optionId: "deny",
+                name: "Decline; keep scoped approvals",
+                kind: "reject_once",
+              },
+            ],
+          },
+          { cancellationSignal: signal, stopWaitingOnCancel: true },
+        ),
+        signal,
+      );
+      signal.throwIfAborted();
+      await permitted(s, signal);
+      await s.permissions.check(policy.epoch, signal);
+      if (
+        response.outcome.outcome !== "selected" ||
+        response.outcome.optionId !== "enable-yolo"
+      )
+        throw new PermissionDeclinedError();
+      enforcePermissionMode(s.administrator, "yolo");
+      enforceSandbox(s.administrator, "full_access");
+      s.yoloEpoch = policy.epoch;
+      s.sandboxEpoch = policy.epoch;
+      s.sandbox = "full_access";
+      s.reviewer = "off";
+      await update(client, s, {
+        sessionUpdate: "tool_call_update",
+        toolCallId: id,
+        status: "completed",
+      });
+      await update(client, s, {
+        sessionUpdate: "config_option_update",
+        configOptions: options(s),
+      });
+    } catch (error) {
+      await leaveYolo(s);
+      await update(client, s, {
+        sessionUpdate: "tool_call_update",
+        toolCallId: id,
+        status: "failed",
+      });
+      await update(client, s, {
+        sessionUpdate: "config_option_update",
+        configOptions: options(s),
+      });
+      throw error;
+    }
   };
   const networkApproval =
     (client: AgentContext, s: Session, turnSignal: AbortSignal) =>
@@ -956,6 +1071,7 @@ export function createAgent(
       undefined,
       {
         id: toolId,
+        kind: "edit",
         input: {
           path,
           operation:
@@ -1829,7 +1945,9 @@ export function createAgent(
     };
     s.backend.addSecrets(mcpSecrets(s.servers));
     contextMessages(s.messages, s.compaction); // Validate persisted context boundaries before use.
-    const restoredMode = ["edits", "development"].includes(saved.permissionMode)
+    const restoredMode = ["edits", "development", "yolo"].includes(
+      saved.permissionMode,
+    )
       ? "scoped"
       : saved.permissionMode;
     await s.permissions.selectMode(
@@ -1922,10 +2040,14 @@ export function createAgent(
       s.serverCatalog = undefined;
     } else if (id === "permissions") {
       enforcePermissionMode(s.administrator, value);
+      parsePermissionMode(value);
+      if (value === "yolo") enforceSandbox(s.administrator, "full_access");
+      else await leaveYolo(s);
       await s.permissions.selectMode(value, signal);
     } else if (id === "sandbox") {
       const mode = parseSandboxMode(value);
       enforceSandbox(s.administrator, mode);
+      await leaveYolo(s);
       const epoch =
         mode === "full_access"
           ? (await s.permissions.prepare()).epoch
@@ -1944,6 +2066,7 @@ export function createAgent(
           "Reviewer model unavailable or denied by administrator policy",
         );
       s.reviewer = value;
+      if (value !== "off") await leaveYolo(s);
     } else if (id === "server_tools") {
       if (!["off", "on", "refresh"].includes(value))
         throw new Error("Use /server-tools on|off|refresh");
@@ -2413,6 +2536,13 @@ export function createAgent(
                 active: s.active,
                 trust: (await trust())[s.root] ?? null,
                 permissionMode: await s.permissions.mode(),
+                yolo: {
+                  confirmed:
+                    (await s.permissions.mode()) === "yolo" &&
+                    s.yoloEpoch === (await s.permissions.snapshot()).epoch,
+                  sessionOnly: true,
+                  administratorRulesApply: true,
+                },
                 permissionModes,
                 commandSandbox: s.sandbox,
                 sandboxModes,
@@ -2492,6 +2622,7 @@ export function createAgent(
             );
         }
         await permitted(s, signal);
+        await confirmYolo(client, s, signal);
         if (control === "/undo") {
           if (controlArgs.length > 1)
             throw new Error("Use /undo or /undo <checkpoint-id>");
@@ -2564,7 +2695,7 @@ export function createAgent(
                 s,
                 label +
                   ("command" in server
-                    ? `; local process sandbox: ${await sandboxMode(s)}; network requests need separate permission`
+                    ? `; local process sandbox: ${await sandboxMode(s)}; sandboxed network requests need separate permission outside YOLO`
                     : "; remote execution is outside the local OS sandbox"),
                 signal,
                 false,
@@ -2691,11 +2822,15 @@ export function createAgent(
                 kind: name === "run_command" ? "execute" : "read",
                 status: "pending",
               });
-              // Automatic checks never use full_access, even if the session's
-              // ordinary command tools have an explicitly approved exception.
+              // Full access alone is not consent for unattended checks. YOLO
+              // adds explicit session-wide approval for these commands too.
               if (
                 name === "run_command" &&
-                (await sandboxMode(s)) === "full_access"
+                (await sandboxMode(s)) === "full_access" &&
+                !(
+                  (await s.permissions.mode()) === "yolo" &&
+                  s.yoloEpoch === (await s.permissions.snapshot()).epoch
+                )
               )
                 throw new SandboxError(
                   "Select an OS sandbox to run automatic project checks",
@@ -3182,6 +3317,7 @@ export function createAgent(
         cancelTurn(s);
         await s.jobs.stopAll();
         await s.mcp.close();
+        await leaveYolo(s);
       }
     },
   };

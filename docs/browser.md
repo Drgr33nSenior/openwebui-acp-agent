@@ -1,8 +1,9 @@
 # Browser tools through Playwright MCP
 
 This optional package gives the agent a headless browser through a local
-container. Every browser tool call requires ACP approval, including reads,
-clicks and navigation. The model uses accessibility snapshots and `browser_find`;
+container. Outside confirmed YOLO mode, every browser tool call requires ACP
+approval, including reads, clicks and navigation. The model uses accessibility
+snapshots and `browser_find`;
 image responses, screenshots and arbitrary-code tools are excluded.
 
 The browser integration is separate from Open WebUI inference. It does not use
@@ -90,9 +91,11 @@ The entry connects to `http://127.0.0.1:8931/mcp`. The strict `options` include:
   excluded. Code execution, evaluation, upload, browser installation, screenshots
   and PDF tools are absent.
 - `alwaysApproveTools: ["browser_navigate"]`: the normal per-navigation default.
-  A loopback HTTP server requires approval on **every** call regardless of this
-  list or remembered tool grants. The approval includes the complete arguments,
-  with secrets redacted, so the requested navigation URL is visible.
+  Outside explicitly confirmed YOLO, a loopback HTTP server requires approval
+  on **every** call regardless of this list or remembered tool grants. YOLO skips
+  those decisions, including navigation, unless administrator policy requires
+  them. Approvals include the complete arguments, with secrets redacted, so the
+  requested navigation URL is visible.
 - `callTimeoutMs: 60000`: a timed-out configured HTTP call is not retried. A
   bounded ping preserves a responsive connection; an unresponsive connection
   closes. Cancellation sends MCP cancellation and closes the owned session.
