@@ -38,9 +38,18 @@ compatibility must also hold in the installed bundled runtime tree.
 
 The suite covers protocol/authentication, stream parsing, tool validation,
 permissions, workspace boundaries, redaction, MCP, commands, queue/interruption,
-verification repair limits, compaction, jobs, checkpoints, scoped instructions
-and session listing/fork/export. Browser wrapper tests and the optional container
-fixture smoke are described in [browser setup](browser.md).
+verification repair limits, context masking, compaction, jobs, checkpoints,
+scoped instructions and session listing/fork/export. Browser wrapper tests and
+the optional container fixture smoke are described in [browser setup](browser.md).
+
+`test/manual-context-benchmark.mjs` is an offline comparison, excluded from
+ordinary tests. A scripted fake model replays one 60-round session against a
+built checkout and reports summed and peak prompt size, compactions, mask
+batches and how much of each request a prefix cache would have to evaluate
+again. Sizes are serialized characters divided by 3.75, not tokenizer counts.
+It needs no model and writes only to a temporary directory. Run it with the
+pinned Node release, once per build to compare:
+`node test/manual-context-benchmark.mjs CHECKOUT`.
 
 ## YOLO permissions
 

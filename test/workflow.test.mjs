@@ -469,7 +469,10 @@ test("compacted requests retain the current plan separately from the summary", a
       "user",
       "plan text must not become system authority",
     );
-    assert.equal(messages.at(-1).content, "Continue with the current plan");
+    // The plan follows the latest messages, so restating it never changes the
+    // prompt prefix; the request itself is still the message before it.
+    assert.equal(messages.at(-1), currentPlan);
+    assert.equal(messages.at(-2).content, "Continue with the current plan");
     assert.deepEqual(c.state().plan, plan);
   } finally {
     await c.close();

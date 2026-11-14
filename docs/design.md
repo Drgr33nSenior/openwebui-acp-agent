@@ -110,9 +110,12 @@ single re-ask requests smaller `edit_file` calls only when that tool is offered.
 Runtime guidance uses a positive integer `max_output_tokens` from model metadata
 (top level, then `openai`), or the private `outputTokenBudget` fallback of 12,288.
 This is a planning allowance, not a measured output count or a request override.
-No `max_tokens` or equivalent parameter is added to coding requests. Compaction
-summary requests are the exception: they send a fixed low reasoning setting and
-`max_tokens` (see [sessions](sessions.md#compaction-summary-requests)).
+No `max_tokens` or equivalent parameter is added to coding requests, with two
+exceptions. Compaction summary requests send a fixed low reasoning setting and
+`max_tokens` (see [sessions](sessions.md#compaction-summary-requests)). Coding
+requests at the declared `xhigh` reasoning effort send an explicit `max_tokens`
+within the advertised `context_window` (see
+[sessions](sessions.md#models-and-context)).
 
 The default remains 40 model rounds, maximum 100, with 64 attempted tool calls
 per turn. Schema failures still consume a round and tool-call allowance. No free
@@ -202,12 +205,17 @@ Shapes that exist only there are deferred.
 
 ## Context and verification
 
-Stable v1 `usage_update` reports validated latest-call counts against advertised
+Stable v1 `usage_update` reports validated latest-call counts (prompt plus
+visible completion; reasoning excluded) against advertised
 `context_window`, falling back to `max_input_tokens`. Missing data produces no
 invented percentage. `PromptResponse.usage` is not sent: it is unstable in ACP v1
 and its per-turn or cumulative meaning is unsettled upstream
 (agentclientprotocol/agent-client-protocol issue 1860).
 
+Older tool results are first cleared from the model's view in batches, with the
+boundary saved in the session so the prompt prefix is stable between batches;
+see [sessions](sessions.md#clearing-older-tool-results). The plan is never
+placed ahead of the conversation.
 Compaction is separate: it retains the full local transcript and a validated
 summary checkpoint over complete older tool groups. Before each model request
 the loop estimates the request against the usable input and compacts first when

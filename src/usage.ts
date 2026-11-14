@@ -40,24 +40,68 @@ export function contextSize(model: unknown): number | undefined {
 // is that limit. Otherwise the full context_window is shared with the reply, so
 // the output allowance is reserved: the catalog's explicit value or the
 // configured outputTokenBudget, never a guess from the model name.
+// replyCap is the max_tokens the request itself carries (see replyTokenCap):
+// that much of the window is reserved for the reply whatever else is advertised.
 export function contextLimits(
   model: unknown,
   outputBudget: number,
+  replyCap?: number,
 ): { size: number; usable: number } | undefined {
   const size = contextSize(model);
   if (size === undefined) return undefined;
+  const capped = (usable: number) => ({
+    size,
+    usable:
+      replyCap !== undefined && replyCap < size
+        ? Math.min(usable, size - replyCap)
+        : usable,
+  });
   const m = model as any;
   const input = tokens
     .positive()
     .safeParse(m?.max_input_tokens ?? m?.openai?.max_input_tokens);
-  if (input.success) return { size, usable: Math.min(size, input.data) };
+  if (input.success) return capped(Math.min(size, input.data));
   const reserve = outputAllowance(model) ?? outputBudget;
   // An allowance at or above the window describes no usable split; reserving
   // half keeps both sides possible rather than refusing every request.
-  return {
-    size,
-    usable: reserve < size ? size - reserve : Math.ceil(size / 2),
-  };
+  return capped(reserve < size ? size - reserve : Math.ceil(size / 2));
+}
+
+// Output cap the agent sends itself at the "xhigh" reasoning_effort level.
+// Other levels send none and keep the server's own cap (the advertised
+// max_output_tokens). A server that leaves xhigh uncapped lets one reply think
+// until the context window is full, holding the model for many minutes and
+// leaving no room the input was sized against.
+//
+// 32,768 tokens is 2.67 times the default allowance, so long thinking is not
+// routinely cut short, and bounds one reply to about a third of a 100k window.
+// It is a fixed figure, not a measured percentile: no distribution of xhigh
+// reply sizes has been recorded yet.
+export const XHIGH_OUTPUT_TOKENS = 32768;
+const CAPPED_EFFORT = "xhigh";
+
+// The cap for one coding request, or undefined to send none. It needs the
+// declared reasoning_effort level and an explicit context_window: a cap is
+// never guessed from a model name, and never set where the window it must fit
+// is unknown. It is at least the advertised allowance and at most half the
+// window, so input and reply both remain possible.
+export function replyTokenCap(
+  effort: string | undefined,
+  model: unknown,
+): number | undefined {
+  if (effort !== CAPPED_EFFORT) return undefined;
+  const m = model as any;
+  const window = tokens
+    .positive()
+    .safeParse(m?.context_window ?? m?.openai?.context_window);
+  if (!window.success) return undefined;
+  return Math.max(
+    1,
+    Math.min(
+      Math.max(XHIGH_OUTPUT_TOKENS, outputAllowance(model) ?? 0),
+      Math.floor(window.data / 2),
+    ),
+  );
 }
 
 // Serialized request characters per reported prompt token, from the server's
@@ -79,7 +123,17 @@ export function promptContextTokens(usage: unknown): number | undefined {
   return prompt.success ? prompt.data : undefined;
 }
 
-export function completionContextTokens(usage: unknown): number | undefined {
+// Context the conversation occupies after this call: its prompt plus the
+// visible reply. Reasoning is generated once and never sent back, so it is not
+// part of the next request and must not fill the meter or trigger compaction.
+// The server's own reasoning_tokens count is used when reported. Otherwise the
+// completion is split by the characters received as reasoning and as visible
+// output (text and tool calls); with neither, the whole completion counts.
+export function completionContextTokens(
+  usage: unknown,
+  visibleChars = 0,
+  reasoningChars = 0,
+): number | undefined {
   if (!usage || typeof usage !== "object") return undefined;
   const u = usage as Record<string, unknown>;
   // input_tokens/output_tokens/total_tokens may aggregate multiple server calls.
@@ -87,6 +141,19 @@ export function completionContextTokens(usage: unknown): number | undefined {
   const prompt = tokens.safeParse(u.prompt_tokens ?? u.prompt_eval_count);
   const completion = tokens.safeParse(u.completion_tokens ?? u.eval_count ?? 0);
   if (!prompt.success || !completion.success) return undefined;
-  const used = prompt.data + completion.data;
+  const reported = tokens.safeParse(
+    (u.completion_tokens_details as Record<string, unknown> | null | undefined)
+      ?.reasoning_tokens,
+  );
+  const reasoning =
+    reported.success && reported.data <= completion.data
+      ? reported.data
+      : reasoningChars > 0
+        ? Math.floor(
+            (completion.data * reasoningChars) /
+              (reasoningChars + Math.max(0, visibleChars)),
+          )
+        : 0;
+  const used = prompt.data + completion.data - reasoning;
   return Number.isSafeInteger(used) ? used : undefined;
 }
