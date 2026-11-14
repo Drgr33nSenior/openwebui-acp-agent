@@ -76,10 +76,39 @@ calls keep their IDs and paired results across rounds. A malformed/truncated
 reply gets one corrective re-ask before tools execute; HTTP failures and possibly
 completed effects are not automatically retried.
 
-The optional Open WebUI 0.13.3 task path uses native retained chats and task IDs.
+The optional Open WebUI task path uses native retained chats and task IDs.
+It requires Open WebUI 0.9.0 or newer, with no upper version limit.
+Discovery records the reported version for diagnostics and approval scopes;
+response validation and task evidence determine success. An accepted version
+does not establish compatibility.
 Remote IDs are journaled before inference, server approvals remain authoritative,
 and cancellation is best effort. This path does not promise per-tool ACP control.
 See [server tasks](tools.md#open-webui-managed-tasks).
+
+### Server-task minimum version
+
+Open WebUI **0.9.0** is the source-verified minimum for this task workflow.
+The preceding **0.8.12** release returns a singular `task_id` acknowledgement
+and has no chat-scoped stop route. In 0.9.0, completion returns `status`,
+`task_ids` and `chat_id`, and the chat-scoped stop route is present.
+Sources: [0.8.12 main.py](https://github.com/open-webui/open-webui/blob/v0.8.12/backend/open_webui/main.py)
+and [0.9.0 main.py](https://github.com/open-webui/open-webui/blob/v0.9.0/backend/open_webui/main.py).
+
+| Required routes | Source at 0.9.0 |
+| --- | --- |
+| `GET /api/version`, `GET /api/config`, `GET /api/models`, `POST /api/chat/completions` | [main.py](https://github.com/open-webui/open-webui/blob/v0.9.0/backend/open_webui/main.py) |
+| `GET /api/tasks/chat/{chat_id}`, `POST /api/tasks/chat/{chat_id}/stop` | [main.py](https://github.com/open-webui/open-webui/blob/v0.9.0/backend/open_webui/main.py) |
+| `GET /api/v1/tools/` | [tools router](https://github.com/open-webui/open-webui/blob/v0.9.0/backend/open_webui/routers/tools.py) |
+| `POST /api/v1/chats/new`, `GET /api/v1/chats/{id}` | [chats router](https://github.com/open-webui/open-webui/blob/v0.9.0/backend/open_webui/routers/chats.py) |
+| `GET /api/v1/files/{id}/content` for generated images | [files router](https://github.com/open-webui/open-webui/blob/v0.9.0/backend/open_webui/routers/files.py) |
+
+The [0.9.0 middleware](https://github.com/open-webui/open-webui/blob/v0.9.0/backend/open_webui/utils/middleware.py)
+also resolves native tools and saves structured output and completion state to
+the chat. Source inspection establishes the API baseline, not live acceptance
+of every feature or deployment. Endpoint restrictions and account permissions
+still apply. Future releases must pass response validation; incompatible
+responses do not trigger an automatic retry or a switch to another API mode.
+This minimum applies to optional server tasks, not core coding or direct MCP.
 
 ## Reasoning
 
