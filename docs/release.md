@@ -1,5 +1,22 @@
 # Release checklist
 
+## Publish on GitHub
+
+Merge the reviewed source PR first. In the repository's **Actions** tab, select
+**Publish GitHub release**, choose **Run workflow** on `main`, and enter the
+exact version from `package.json`. The workflow reruns platform and browser
+checks, builds and tests the package, then publishes the `.tgz` and `SHA256SUMS`.
+It downloads the public asset, verifies its checksum and tests installation again.
+No npm account or npm token is needed.
+
+Publication is manual and restricted to `main`. Only the publishing job receives
+repository contents-write permission. Existing tags are rejected, and assets are
+never replaced automatically. If publication fails after tag creation, inspect
+the retained tag, workflow artifact and any release before proceeding; a rerun
+will not overwrite them. This workflow must be merged before GitHub can expose
+its manual trigger. Review its first run; source validation alone does not prove
+that publication succeeded.
+
 ## Source and package
 
 - Review the complete diff and preserve unrelated working trees and installations.

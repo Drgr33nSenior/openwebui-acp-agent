@@ -1,0 +1,123 @@
+name: Publish GitHub release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish (must match package.json on main)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: github-release
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Require main and an exact version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          test "$GITHUB_REPOSITORY" = Drgr33nSenior/openwebui-acp-agent
+          test "$GITHUB_REF" = refs/heads/main
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          const agent = JSON.parse(readFileSync('registry/agent.json', 'utf8'));
+          const version = process.env.RELEASE_VERSION;
+          if (!/^\d+\.\d+\.\d+$/.test(version) ||
+              [pkg.version, lock.version, lock.packages[''].version, agent.version].some(v => v !== version)) {
+            throw new Error('Requested version must match package, lockfile and registry metadata');
+          }
+          JS
+  verify:
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+  browser:
+    needs: prepare
+    uses: ./.github/workflows/browser.yml
+  publish:
+    needs: [verify, browser]
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Pack and verify the release artifact
+        id: package
+        env:
+          OPENWEBUI_ACP_HOME: ${{ runner.temp }}/release-test-state
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          package_file=$(node -p "require('./package.json').name + '-' + require('./package.json').version + '.tgz'")
+          npm install --prefix "$RUNNER_TEMP/release-install" --ignore-scripts "$RUNNER_TEMP/$package_file"
+          npm audit --prefix "$RUNNER_TEMP/release-install" --omit=dev --audit-level=high
+          node test/package-install.mjs "$RUNNER_TEMP/release-install"
+          (cd "$RUNNER_TEMP" && shasum -a 256 "$package_file" > SHA256SUMS)
+          echo "filename=$package_file" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: github-release-package
+          path: |
+            ${{ runner.temp }}/${{ steps.package.outputs.filename }}
+            ${{ runner.temp }}/SHA256SUMS
+          if-no-files-found: error
+      - name: Publish versioned package and checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          PACKAGE_FILE: ${{ steps.package.outputs.filename }}
+        run: |
+          # Creating the ref is atomic and rejects an existing tag. Never move
+          # a tag or replace release assets, even after a partial release.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/v$RELEASE_VERSION" -f "sha=$GITHUB_SHA"
+          node --input-type=module <<'JS' > "$RUNNER_TEMP/release-notes.md"
+          const { RELEASE_VERSION: version, GITHUB_REPOSITORY: repo, GITHUB_SHA: sha,
+            GITHUB_RUN_ID: run, PACKAGE_FILE: file } = process.env;
+          const url = `https://github.com/${repo}/releases/download/v${version}/${file}`;
+          console.log(`Unofficial Open WebUI coding agent for JetBrains and compatible ACP clients.\n
+          Install with Node.js 26 LTS and npm; no npm account is needed:\n
+          \`\`\`sh\nnpm install --global ${url}\n\`\`\`\n
+          Use the attached package rather than the source archive. SHA256SUMS covers the package.
+          Native Windows is unsupported. ACP registry inclusion is separate.\n
+          [Setup and usage](https://github.com/${repo}/blob/v${version}/README.md) ·
+          [Release checks](https://github.com/${repo}/actions/runs/${run})\n
+          Source revision: ${sha}`);
+          JS
+          gh release create "v$RELEASE_VERSION" \
+            "$RUNNER_TEMP/$PACKAGE_FILE" "$RUNNER_TEMP/SHA256SUMS" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Open WebUI ACP Agent $RELEASE_VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
+      - name: Verify public download and installation
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          PACKAGE_FILE: ${{ steps.package.outputs.filename }}
+          OPENWEBUI_ACP_HOME: ${{ runner.temp }}/public-release-test-state
+        run: |
+          mkdir "$RUNNER_TEMP/public-download"
+          cd "$RUNNER_TEMP/public-download"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/v$RELEASE_VERSION"
+          curl --fail --location --retry 3 --output "$PACKAGE_FILE" "$base/$PACKAGE_FILE"
+          curl --fail --location --retry 3 --output SHA256SUMS "$base/SHA256SUMS"
+          cmp SHA256SUMS "$RUNNER_TEMP/SHA256SUMS"
+          shasum -a 256 --check SHA256SUMS
+          npm install --prefix "$RUNNER_TEMP/public-install" --ignore-scripts "./$PACKAGE_FILE"
+          npm audit --prefix "$RUNNER_TEMP/public-install" --omit=dev --audit-level=high
+          node "$GITHUB_WORKSPACE/test/package-install.mjs" "$RUNNER_TEMP/public-install"
