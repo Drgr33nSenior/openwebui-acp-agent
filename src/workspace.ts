@@ -178,7 +178,9 @@ async function proven(
     sameChain(start, end)
   );
 }
-export async function readText(r: string, p: string) {
+export async function readBytes(r: string, p: string, maxBytes = 100000) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 1_000_000)
+    throw new Error("Invalid file read limit");
   const before = await chain(r, dirname(p));
   let f;
   try {
@@ -195,18 +197,41 @@ export async function readText(r: string, p: string) {
   }
   try {
     const s = await f.stat({ bigint: true });
-    if (!s.isFile() || s.size > 100_000n)
-      throw new Error("Not a bounded text file");
+    if (!s.isFile() || s.size > BigInt(maxBytes))
+      throw new Error("Not a bounded file");
     // Another name for the same file (inside or outside the root) defeats path checks.
     if (s.nlink > 1n) throw new Error("Hard-linked file refused");
     if (!(await proven(r, p, s, before)))
       throw new Error("File changed during access; retry");
-    const t = await f.readFile("utf8");
-    if (t.includes("\0")) throw new Error("Binary file refused");
-    return t;
+    // Bound the allocation even if a writer grows the file after stat().
+    const bytes = Buffer.alloc(Number(s.size) + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const result = await f.read(bytes, length, bytes.length - length, length);
+      if (!result.bytesRead) break;
+      length += result.bytesRead;
+    }
+    const after = await f.stat({ bigint: true });
+    if (
+      BigInt(length) !== s.size ||
+      after.ctimeNs !== s.ctimeNs ||
+      !(await proven(r, p, after, before))
+    )
+      throw new Error("File changed during access; retry");
+    return bytes.subarray(0, length);
   } finally {
     await f.close();
   }
+}
+export async function readText(r: string, p: string) {
+  const bytes = await readBytes(r, p).catch((error: unknown) => {
+    if (error instanceof Error && error.message === "Not a bounded file")
+      throw new Error("Not a bounded text file");
+    throw error;
+  });
+  const text = bytes.toString("utf8");
+  if (text.includes("\0")) throw new Error("Binary file refused");
+  return text;
 }
 export async function files(r: string) {
   const out: string[] = [];

@@ -194,6 +194,7 @@ for (const task of cases.filter((c) => !args[3] || c.id === args[3])) {
     // normal workspace tools, never privilege/scope expansion or remote commands.
     let permit =
       title.startsWith("Activate exact workspace ") ||
+      title.startsWith("Start static preview of ") ||
       title.startsWith("MCP browser: http http://127.0.0.1:8931/mcp");
     if (params.toolCall.kind === "edit") permit = true;
     if (

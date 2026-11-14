@@ -93,6 +93,10 @@ manual fallback. Browser sign-in and OAuth are not implemented. See
 - **Tools:** connect MCP servers for IDE features, search, retrieval or memory.
   Optional Open WebUI-managed tasks and a browser container have separate
   configuration and approvals.
+- **Static previews (unreleased):** source builds can serve approved frontend
+  files to the browser for interaction checks, then close the preview. This
+  supports static pages and built output; it does not run framework servers or
+  backend APIs. See [preview setup and limits](docs/browser.md#starting-an-application-for-browser-checks).
 
 See [session controls](docs/sessions.md), [MCP and server tools](docs/tools.md),
 [browser setup](docs/browser.md), and [verification after edits](docs/ide-diagnostics.md).

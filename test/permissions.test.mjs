@@ -987,6 +987,7 @@ test("Read-only mode blocks writes, commands and MCP startup even with remembere
         "list_jobs",
         "poll_job",
         "stop_job",
+        "stop_preview",
         "list_checkpoints",
         "update_plan",
       ],
@@ -1015,6 +1016,7 @@ test("Read-only mode blocks writes, commands and MCP startup even with remembere
       "list_jobs",
       "poll_job",
       "stop_job",
+      "stop_preview",
       "list_checkpoints",
       "update_plan",
     ]);

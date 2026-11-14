@@ -24,6 +24,12 @@ import {
 } from "./verification.js";
 import { Jobs } from "./jobs.js";
 import {
+  Preview,
+  previewSchema,
+  previewPaths,
+  previewRoute,
+} from "./preview.js";
+import {
   checkpointsSchema,
   prepareCheckpoint,
   recordCheckpoint,
@@ -196,6 +202,8 @@ const schemas = {
     })
     .strict(),
   stop_job: z.object({ id: z.string().uuid() }).strict(),
+  start_preview: previewSchema,
+  stop_preview: z.object({ id: z.string().uuid() }).strict(),
   list_checkpoints: z.object({}).strict(),
   undo_edit: z.object({ id: z.string().default("latest") }).strict(),
 };
@@ -206,6 +214,7 @@ const inspectionTools = new Set([
   "list_jobs",
   "poll_job",
   "stop_job",
+  "stop_preview",
   "list_checkpoints",
 ]);
 const definitions = Object.entries(schemas).map(([name, schema]) => ({
@@ -223,6 +232,10 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
       poll_job:
         "Read a page of output/status from this session's job; use nextOffset for subsequent pages",
       stop_job: "Stop and clean up this session's command job",
+      start_preview:
+        "Serve an approved immutable snapshot of explicit workspace frontend files (HTML/CSS/JS and assets) on one temporary loopback port. No command or shell is needed. List workspace-relative files and an HTML entry; its directory is the web root and all assets must be within it. Returns ready url for a host browser and containerUrl for the documented Docker Desktop browser. Recreate after edits; stop_preview when done. Closes at turn end. No project server, backend API, build or hot reload is executed.",
+      stop_preview:
+        "Close this turn's static preview listener and release its snapshot",
       list_checkpoints:
         "List metadata for reversible agent text edits; snapshots are private and are not returned",
       undo_edit:
@@ -244,6 +257,7 @@ type Session = {
   title?: string;
   createdAt: string;
   jobs: Jobs;
+  preview: Preview;
   checkpoints: Checkpoint[];
   instructions: ProjectInstruction[];
   instructionReviewRequired?: boolean;
@@ -1261,6 +1275,36 @@ export function createAgent(
         "Unknown tool; model must support caller-executed function calling",
       );
     const a = schema.parse(args) as any;
+    if (name === "stop_preview") return s.preview.stop(a.id);
+    if (name === "start_preview") {
+      if (s.administrator.rules.allowPreviews === false)
+        throw new PolicyError("Administrator policy denies static previews");
+      const paths = await previewPaths(s.root, a.files);
+      for (const path of paths) previewRoute(a.entry, path);
+      if (!paths.includes(a.entry) || !a.entry.toLowerCase().endsWith(".html"))
+        throw new Error("Preview entry must be an explicitly listed HTML file");
+      const check = await approve(
+        client,
+        s,
+        `Start static preview of ${JSON.stringify(paths)} from ${s.root}; entry ${a.entry}; loopback only, ${a.port ? `port ${a.port}` : "one OS-assigned port"}; expires after ${a.timeout_ms} ms or at turn end. Any local process and the configured browser can read this snapshot. Page scripts execute in the browser; no workspace process is started.`,
+        signal,
+        false,
+        [],
+        undefined,
+        { id: c.id, kind: "network", input: a },
+        true,
+      );
+      await check();
+      return JSON.stringify(
+        await s.preview.start(
+          s.root,
+          a,
+          check,
+          signal,
+          caps.fs?.readTextFile ? (path) => read(client, s, path) : undefined,
+        ),
+      );
+    }
     if (name === "write_file" && (await sandboxMode(s)) === "read_only")
       throw new SandboxError(
         "File writes are disabled by the read-only sandbox setting",
@@ -1749,6 +1793,7 @@ export function createAgent(
       id: randomUUID(),
       createdAt: new Date().toISOString(),
       jobs: new Jobs(),
+      preview: new Preview(),
       checkpoints: [],
       instructions: [],
       root: await root(params.cwd),
@@ -1917,6 +1962,7 @@ export function createAgent(
       title: saved.title,
       createdAt: saved.createdAt ?? new Date().toISOString(),
       jobs: new Jobs(),
+      preview: new Preview(),
       checkpoints: saved.checkpoints,
       instructions: [],
       messages: restoreHistory(saved.messages),
@@ -2517,6 +2563,7 @@ export function createAgent(
                 },
                 plan: s.plan,
                 jobs: s.jobs.list(),
+                preview: s.preview.info() ?? null,
                 checkpoints: checkpointSummaries(s.checkpoints),
                 title: s.title ?? null,
                 compaction: {
@@ -3306,6 +3353,7 @@ export function createAgent(
       } finally {
         clearInterval(policyWatch);
         try {
+          await s.preview.close();
           await s.mcp.close();
         } finally {
           // Keep complete tool groups ahead of the marker and replacement user
@@ -3328,6 +3376,7 @@ export function createAgent(
       for (const s of sessions.values()) {
         cancelTurn(s);
         await s.jobs.stopAll();
+        await s.preview.close();
         await s.mcp.close();
         await leaveYolo(s);
       }
