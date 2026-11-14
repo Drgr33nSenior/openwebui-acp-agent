@@ -15,7 +15,15 @@ jobs:
           node-version: "24.22.3"
           cache: npm
           cache-dependency-path: browser/package-lock.json
+      - name: Build the agent for the catalog integration check
+        working-directory: .
+        run: |
+          npm ci --ignore-scripts
+          npm run build
       - run: npm ci --ignore-scripts
+      - name: Validate the real Playwright catalog through the agent
+        working-directory: .
+        run: node test/browser-catalog.mjs
       - run: npm test
       - run: npm audit --omit=dev --audit-level=high
       - run: docker compose build

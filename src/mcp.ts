@@ -3,6 +3,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { McpServer } from "@agentclientprotocol/sdk";
 import { Ajv, type ValidateFunction } from "ajv";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import { endpoint } from "./config.js";
 import { SandboxMcpTransport } from "./sandbox-mcp.js";
 import type { SandboxRun } from "./sandbox.js";
@@ -364,7 +365,15 @@ export class Mcp {
               { not: { required: ["filename"] } },
             ];
           }
-          const validate = new Ajv({ strict: false }).compile(schema);
+          // The pinned Playwright MCP catalog declares draft 2020-12. Use its
+          // actual validator rather than stripping the dialect or ignoring
+          // keywords; undeclared/older schemas retain their existing behavior.
+          const validator =
+            schema.$schema === "https://json-schema.org/draft/2020-12/schema" ||
+            schema.$schema === "https://json-schema.org/draft/2020-12/schema#"
+              ? new Ajv2020({ strict: false })
+              : new Ajv({ strict: false });
+          const validate = validator.compile(schema);
           this.tools.set(name, {
             label: `${s.name}/${t.name}`,
             ...(diagnosticScope && isIdeFileProblemsTool(t)

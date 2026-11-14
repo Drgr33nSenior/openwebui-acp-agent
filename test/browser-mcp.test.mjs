@@ -48,7 +48,7 @@ const tools = [...included, ...excluded].map((name) => ({
   },
 }));
 
-async function fixture() {
+async function fixture(catalog = tools) {
   const requests = [];
   const sessions = new Set();
   let serial = 0;
@@ -101,7 +101,7 @@ async function fixture() {
       return;
     }
     if (rpc.method === "tools/list") {
-      send({ tools });
+      send({ tools: catalog });
       return;
     }
     if (rpc.method === "ping") {
@@ -207,6 +207,78 @@ test("explicit allowlist excludes dangerous and future tools, prevents filename 
     assert.equal(snapshot.unsandboxed, true);
   } finally {
     await m.close();
+    await f.close();
+  }
+});
+
+test("MCP draft 2020-12 validates its own keywords without weakening file-output checks", async () => {
+  for (const dialect of [
+    "https://json-schema.org/draft/2020-12/schema",
+    "https://json-schema.org/draft/2020-12/schema#",
+  ]) {
+    const catalog = [
+      {
+        name: "browser_snapshot",
+        inputSchema: {
+          $schema: dialect,
+          type: "object",
+          properties: {
+            selection: {
+              type: "array",
+              prefixItems: [{ type: "integer" }],
+              items: false,
+            },
+            filename: { type: "string" },
+          },
+          required: ["selection"],
+          unevaluatedProperties: false,
+        },
+      },
+    ];
+    const f = await fixture(catalog);
+    const m = await connect(f);
+    try {
+      const snapshot = find(m, "browser_snapshot");
+      assert.equal(snapshot.validate({ selection: [1] }), true);
+      for (const args of [
+        { selection: ["1"] },
+        { selection: [1, 2] },
+        { selection: [1], extra: true },
+        { selection: [1], filename: "unwanted.txt" },
+      ]) {
+        assert.equal(snapshot.validate(args), false);
+        const before = f.requests.length;
+        await assert.rejects(
+          snapshot.call(args, AbortSignal.timeout(1000)),
+          /schema/,
+        );
+        assert.equal(f.requests.length, before);
+      }
+      assert.equal(snapshot.definition.function.parameters.$schema, dialect);
+    } finally {
+      await m.close();
+      await f.close();
+    }
+  }
+});
+
+test("unknown MCP schema dialect fails closed", async () => {
+  const f = await fixture([
+    {
+      name: "browser_snapshot",
+      inputSchema: {
+        $schema: "https://example.org/unknown-schema",
+        type: "object",
+      },
+    },
+  ]);
+  try {
+    await assert.rejects(connect(f), /tool catalog or schema validation/);
+    assert.equal(
+      f.requests.some((r) => r.method === "tools/call"),
+      false,
+    );
+  } finally {
     await f.close();
   }
 });
