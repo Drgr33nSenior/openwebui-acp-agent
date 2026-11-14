@@ -157,11 +157,24 @@ export function coerceToolInput(
     typeof s.properties === "object"
   ) {
     const properties = s.properties as Record<string, unknown>;
+    // A call missing a required argument fails validation either way. Keep its
+    // undeclared fields so the error can name them: a model that borrows another
+    // tool's argument names is otherwise told only what is missing.
+    const incomplete =
+      Array.isArray(s.required) &&
+      s.required.some(
+        (key) =>
+          typeof key === "string" &&
+          !Object.hasOwn(value, key) &&
+          !Object.hasOwn((properties[key] ?? {}) as object, "default"),
+      );
     return Object.fromEntries(
       Object.entries(value)
         .filter(
           ([key]) =>
-            Object.hasOwn(properties, key) || s.additionalProperties !== false,
+            incomplete ||
+            Object.hasOwn(properties, key) ||
+            s.additionalProperties !== false,
         )
         .map(([key, item]) => [
           key,
@@ -195,7 +208,13 @@ export function toolFailure(
 ): string {
   if (error instanceof PermissionDeclinedError) return error.message;
   if (error instanceof ToolArgumentsError || error instanceof z.ZodError) {
-    const fields = error.issues.slice(0, 3).map((issue) => {
+    // Undeclared fields usually explain the other issues, so they lead.
+    const undeclared = (issue: z.ZodError["issues"][number]) =>
+      issue.code === "unrecognized_keys" ? 0 : 1;
+    const issues = [...error.issues].sort(
+      (a, b) => undeclared(a) - undeclared(b),
+    );
+    const fields = issues.slice(0, 3).map((issue) => {
       const field =
         issue.path
           .map((p, i) =>
@@ -218,8 +237,10 @@ export function toolFailure(
         return `${field}: provide at least ${issue.minimum} ${issue.origin === "string" ? "characters" : "items or units"}`;
       if (issue.code === "too_big")
         return `${field}: keep within ${issue.maximum} ${issue.origin === "string" ? "characters" : "items or units"}`;
-      if (issue.code === "unrecognized_keys")
-        return "remove undeclared fields; use only the tool's declared arguments";
+      if (issue.code === "unrecognized_keys") {
+        const names = issue.keys.filter((key) => /^[a-z_]{1,40}$/.test(key));
+        return `remove undeclared fields${names.length ? " " + names.slice(0, 5).join(", ") : ""}; use only the tool's declared arguments`;
+      }
       return `${field}: use a value allowed by the tool's schema`;
     });
     return redact(

@@ -212,6 +212,20 @@ with Off, low, medium and Max levels and a declared default. No live Open WebUI,
 JetBrains or Zed session was run. Selector rendering, `session/set_mode` use by a real
 client and provider reasoning effects remain unverified.
 
+## Pre-request compaction and edit locations (unreleased)
+
+`test/auto-compaction.test.mjs` uses a fake service that reports four serialized
+characters per prompt token. It covers the usable-input calculation, the
+measured-ratio requirement, bounded summary requests, a compaction triggered
+while reported usage is under 80%, system-message and tool-pair preservation in
+the continued request, the visible notice, the retained transcript, a failed
+summary that stops the turn before any oversized request, disabled automatic
+compaction, and the three-per-turn limit. `test/edit-file.test.mjs` checks the
+`locations` entry, that the completed call repeats the approved diff, and the
+error naming undeclared fields when a required argument is missing.
+Results for this revision are in its pull request. Live client rendering of
+diffs, locations and the context indicator was not checked.
+
 ## Compatibility
 
 | Component                            | Scope                                                                                                |

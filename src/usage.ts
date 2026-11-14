@@ -36,6 +36,49 @@ export function contextSize(model: unknown): number | undefined {
   return result.success ? result.data : undefined;
 }
 
+// Input the server can accept for one request. An advertised max_input_tokens
+// is that limit. Otherwise the full context_window is shared with the reply, so
+// the output allowance is reserved: the catalog's explicit value or the
+// configured outputTokenBudget, never a guess from the model name.
+export function contextLimits(
+  model: unknown,
+  outputBudget: number,
+): { size: number; usable: number } | undefined {
+  const size = contextSize(model);
+  if (size === undefined) return undefined;
+  const m = model as any;
+  const input = tokens
+    .positive()
+    .safeParse(m?.max_input_tokens ?? m?.openai?.max_input_tokens);
+  if (input.success) return { size, usable: Math.min(size, input.data) };
+  const reserve = outputAllowance(model) ?? outputBudget;
+  // An allowance at or above the window describes no usable split; reserving
+  // half keeps both sides possible rather than refusing every request.
+  return {
+    size,
+    usable: reserve < size ? size - reserve : Math.ceil(size / 2),
+  };
+}
+
+// Serialized request characters per reported prompt token, from the server's
+// own count for the latest request. A floor stops an implausibly large count
+// from forcing compaction; a small count (some servers omit cached input) only
+// lowers the estimate, which leaves the reported-usage threshold in charge.
+export function charsPerToken(
+  requestChars: number,
+  promptTokens: number,
+): number | undefined {
+  if (!(requestChars > 0) || !(promptTokens > 0)) return undefined;
+  return Math.max(1.5, requestChars / promptTokens);
+}
+
+export function promptContextTokens(usage: unknown): number | undefined {
+  if (!usage || typeof usage !== "object") return undefined;
+  const u = usage as Record<string, unknown>;
+  const prompt = tokens.safeParse(u.prompt_tokens ?? u.prompt_eval_count);
+  return prompt.success ? prompt.data : undefined;
+}
+
 export function completionContextTokens(usage: unknown): number | undefined {
   if (!usage || typeof usage !== "object") return undefined;
   const u = usage as Record<string, unknown>;
