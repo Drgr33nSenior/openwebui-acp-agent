@@ -178,6 +178,21 @@ test("edit_file presents the full diff, keeps CRLF, checkpoints and supports und
           u.kind === "edit",
       ),
     );
+    // The client can open the edited line from the approval and the update.
+    const locations = [{ path: join(c.cwd, "a.txt"), line: 2 }];
+    assert.deepEqual(approval.toolCall.locations, locations);
+    assert(
+      c.updates.some(
+        (u) =>
+          u.sessionUpdate === "tool_call_update" &&
+          u.toolCallId === "edit_file" &&
+          JSON.stringify(u.locations) === JSON.stringify(locations),
+      ),
+    );
+    const done = c.updates.find(
+      (u) => u.toolCallId === "edit_file" && u.status === "completed",
+    );
+    assert.deepEqual(done.content[0], approval.toolCall.content[0]);
     pending = [call("undo_edit", { id: "latest" })];
     await c.prompt();
     assert.equal(
@@ -185,6 +200,35 @@ test("edit_file presents the full diff, keeps CRLF, checkpoints and supports und
       "head\r\nold\r\ntail\r\n",
     );
     assert.equal(c.state().checkpoints[0].status, "undone");
+  } finally {
+    await c.close();
+  }
+});
+
+test("edit_file called with write_file's argument names is told which fields to drop", async () => {
+  const c = await client();
+  try {
+    pending = [
+      call("edit_file", { path: "a.txt", before: "old", after: "new" }),
+      // A complete call still sheds a stray field, as before.
+      edit({ note: "stray" }),
+    ];
+    await c.prompt();
+    assert(
+      results().some((r) =>
+        /^Invalid tool arguments: remove undeclared fields before, after; .*old_string: expected string.*Nothing was executed\.$/.test(
+          r,
+        ),
+      ),
+    );
+    assert.equal(
+      c.approvals.filter((p) => p.toolCall.kind === "edit").length,
+      1,
+    );
+    assert.equal(
+      await readFile(join(c.cwd, "a.txt"), "utf8"),
+      "head\r\nnew\r\ntail\r\n",
+    );
   } finally {
     await c.close();
   }

@@ -91,11 +91,22 @@ old value until the next usage update.
 Compaction summarizes older completed history while keeping the original
 transcript, leading instructions, recent request and complete tool groups.
 Automatic compaction runs before inference at 80% of reported context capacity
-or 700000 serialized characters when a safe older prefix exists. Summarization
-uses the selected model with tools disabled. Failure or cancellation preserves
-context; automatic failure warns once per turn. Summaries are untrusted text,
-not permission grants. Compaction cannot reduce an indivisible oversized message
-or remove the local session-storage limit.
+or 700000 serialized characters when a safe older prefix exists. It also runs
+when the next request would not fit the model's usable input: the advertised
+`max_input_tokens`, or `context_window` minus the output allowance (the model's
+`max_output_tokens`, else `outputTokenBudget`). The request is estimated from
+its serialized size and the characters-per-token ratio of the server's latest
+reported prompt count; without a reported count only the 80% rule applies.
+Summarization uses the selected model with tools disabled, and the summary
+request is held to the same input limit.
+
+A turn compacts at most three times. Failure or cancellation preserves context.
+When the next request still fits, an automatic failure warns once per turn and
+the turn continues. When it would not fit and compaction fails, is switched off,
+has reached the limit or has no complete older history left, the turn stops
+before sending anything and says why; history and tool results are retained.
+Summaries are untrusted text, not permission grants. Compaction cannot reduce an
+indivisible oversized message or remove the local session-storage limit.
 
 Plan mode allows inspection and structured progress updates. It blocks edits,
 commands, MCP startup and server tasks. Plans persist through restore and

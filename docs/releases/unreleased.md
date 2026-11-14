@@ -31,6 +31,16 @@
   silently, adds `verify.ideTimeoutMs` (enforced client-side) and
   `verify.maxDiagnostics`, and documents enabling the server for the agent in
   [IDE diagnostics](../ide-diagnostics.md). No new permissions.
+- Send the edited file and first changed line as ACP `locations` with each file
+  edit, next to the existing `diff` content.
+- Name undeclared fields in argument errors when a required argument is missing,
+  for example `edit_file` called with `write_file`'s `before` and `after`.
+- Compact before a model request that would exceed the usable input (context
+  window minus the output allowance, or the advertised input limit), not only at
+  80% of reported usage. The summary request is held to the same limit and
+  records verification status. A turn compacts at most three times; when a
+  request still cannot fit, the turn stops with the reason instead of sending it.
+  `/status` reports the context size and usable input as `contextLimits`.
 
 See [verification](../verification.md), [session modes](../sessions.md#session-modes),
 [ACP v2 readiness](../design.md#acp-v2-readiness) and the

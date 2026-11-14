@@ -191,10 +191,16 @@ Shapes that exist only there are deferred.
 
 Stable v1 `usage_update` reports validated latest-call counts against advertised
 `context_window`, falling back to `max_input_tokens`. Missing data produces no
-invented percentage. Compaction is separate: it retains the full local transcript
-and a validated summary checkpoint over complete older tool groups. Summaries,
-project instructions, retrieved data and tool output are untrusted model input.
-They cannot restore grants or alter destinations.
+invented percentage. `PromptResponse.usage` is not sent: it is unstable in ACP v1
+and its per-turn or cumulative meaning is unsettled upstream
+(agentclientprotocol/agent-client-protocol issue 1860).
+
+Compaction is separate: it retains the full local transcript and a validated
+summary checkpoint over complete older tool groups. Before each model request
+the loop estimates the request against the usable input and compacts first when
+it would not fit, at most three times per turn; see [sessions](sessions.md).
+Summaries, project instructions, retrieved data and tool output are untrusted
+model input. They cannot restore grants or alter destinations.
 
 Automatic verification collects bounded IDE file problems after agent edits and
 runs explicitly configured project checks in the selected sandbox, or with
