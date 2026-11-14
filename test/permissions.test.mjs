@@ -980,7 +980,16 @@ test("Read-only mode blocks writes, commands and MCP startup even with remembere
     assert.equal(c.executed.length, 0);
     assert.deepEqual(
       requests.at(-1).tools.map((t) => t.function.name),
-      ["list_files", "read_file", "search_text", "update_plan"],
+      [
+        "list_files",
+        "read_file",
+        "search_text",
+        "list_jobs",
+        "poll_job",
+        "stop_job",
+        "list_checkpoints",
+        "update_plan",
+      ],
     );
   } finally {
     await c.close();
@@ -1003,6 +1012,10 @@ test("Read-only mode blocks writes, commands and MCP startup even with remembere
       "list_files",
       "read_file",
       "search_text",
+      "list_jobs",
+      "poll_job",
+      "stop_job",
+      "list_checkpoints",
       "update_plan",
     ]);
   } finally {

@@ -1,8 +1,8 @@
 # Administrator rules and approval advice
 
-Version 0.3.0 adds local administrator rules and an optional advisory model.
-Neither feature requires Open WebUI enterprise integration or an API extension.
-Windows support remains a separate sprint.
+Local administrator rules constrain operations; optional model advice helps
+users review them. Neither requires enterprise integration or an API extension.
+Native Windows is not supported.
 
 ## Administrator rules
 
@@ -112,9 +112,5 @@ Server filters and model providers remain controlled by the deployment. Mock
 contract tests verify the request shape; they do not prove a live deployment's
 behavior or the quality of a review model's judgment.
 
-Automatic model approval is deliberately unavailable in this release. Before
-adding it, evaluate a selected model on representative allowed, destructive,
-credential-access, exfiltration and prompt-injection cases. Keep administrator
-denies and mandatory human decisions outside the model's control. Record exact
-model/backend versions and false approvals; accepting JSON is not evidence of
-safe judgment. No live review-model evaluation has been claimed here.
+Automatic model approval is unavailable. Model advice never replaces the user
+decision, administrator restrictions or permission enforcement.

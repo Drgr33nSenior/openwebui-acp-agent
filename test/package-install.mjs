@@ -69,9 +69,13 @@ try {
     .map((line) => JSON.parse(line));
   const response = messages.find((m) => m.id === 1);
   assert.equal(response.result.protocolVersion, 1);
-  assert.equal(response.result.agentInfo.version, "0.3.0");
+  assert.equal(response.result.agentInfo.version, "0.4.0");
   assert.equal(response.result.authMethods[0].type, "terminal");
   assert.deepEqual(response.result.agentCapabilities.auth.logout, {});
+  assert.deepEqual(
+    response.result.agentCapabilities.sessionCapabilities.list,
+    {},
+  );
   assert.deepEqual(response.result.agentCapabilities.mcpCapabilities, {
     http: true,
     sse: true,
@@ -89,6 +93,24 @@ if (process.platform === "win32") {
 const { sandboxCommand } = await import(
   pathToFileURL(join(installed, "dist/sandbox.js"))
 );
+const { Jobs } = await import(pathToFileURL(join(installed, "dist/jobs.js")));
+const { prepareCheckpoint, checkpointRestore } = await import(
+  pathToFileURL(join(installed, "dist/checkpoints.js"))
+);
+const { instructionContext } = await import(
+  pathToFileURL(join(installed, "dist/instructions.js"))
+);
+const { normalizeSessionTitle } = await import(
+  pathToFileURL(join(installed, "dist/session-store.js"))
+);
+assert.deepEqual(new Jobs().list(), []);
+const checkpoint = prepareCheckpoint([], "fixture.txt", "before", "after");
+assert.equal(
+  checkpointRestore([checkpoint], "latest", "after").after,
+  "before",
+);
+assert.match(instructionContext([]), /Untrusted scoped project instructions/);
+assert.equal(normalizeSessionTitle("Fixture session"), "Fixture session");
 const { SERVER_TOOLS_VERSION } = await import(
   pathToFileURL(join(installed, "dist/server-tools.js"))
 );
@@ -121,5 +143,5 @@ assert.equal(
   "installed fixture",
 );
 console.log(
-  "Installed 0.3.0: clean ACP v1 handshake, terminal authentication and logout discovery, context usage module, and real sandbox command passed outside the checkout",
+  "Installed 0.4.0: clean ACP v1 handshake, terminal authentication and logout discovery, context usage module, and real sandbox command passed outside the checkout",
 );

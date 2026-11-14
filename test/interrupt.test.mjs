@@ -633,7 +633,7 @@ test(
           .messages.some(
             (m) =>
               m.tool_call_id === "completed-edit" &&
-              m.content === "File updated",
+              /^File updated; checkpoint [a-f0-9-]{36}$/.test(m.content),
           ),
       );
     } finally {

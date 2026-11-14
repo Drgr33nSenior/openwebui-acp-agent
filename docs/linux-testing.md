@@ -1,33 +1,14 @@
-# Temporary Linux acceptance environment
+# Linux setup and testing
 
-The automated ACP and sandbox tests are headless. A GUI is only needed for later
-interactive IDE acceptance. Test the Linux implementation in a disposable VM
-before introducing a container's additional namespace and seccomp restrictions.
+Install a supported Node LTS release and the distribution's bubblewrap, socat
+and ripgrep packages. The host must allow the namespaces and seccomp operations
+required by the sandbox runtime. Run `/doctor` to check prerequisites without
+executing project code.
 
-## Proposed development VM
-
-- QEMU/KVM, run as the workstation user; no host root privileges.
-- Ubuntu 24.04 LTS amd64 cloud image from
-  [Ubuntu's image service](https://cloud-images.ubuntu.com/noble/current/).
-  Resolve a dated build and verify its official SHA256 checksum before boot.
-- Two virtual CPUs, 4 GiB RAM and a 16 GiB sparse writable disk.
-- A new private directory containing the image, disk, cloud-init seed and logs.
-- User-mode NAT; guest SSH forwarded to one unused host loopback port.
-- A dedicated temporary SSH key, retained only on that host in the private
-  directory. No host directories, credentials, SSH agent, GPU or devices shared.
-- No changes to existing Kubernetes workloads, libvirt networks or host namespace
-  policy. No privileged container, host package installation or GUI service.
-- Guest-only installation of bubblewrap, socat, ripgrep, curl, a C compiler and
-  the pinned Node version. All tests use generated fixtures and mock servers.
-
-An operator must confirm the target VM as a development resource before remote
-creation. Stop only the VM process owned by this test. Keep the disk and logs
-until results have been reviewed; deletion is a separate explicit action.
-
-## Checks inside the VM
-
-Record the OS release, kernel, Node, npm and bubblewrap versions. From a copy of
-the source, run:
+Use a disposable development VM or CI runner to test platform enforcement.
+No GUI is needed for the automated suite; interactive IDE acceptance is separate.
+Use generated fixtures and mock services rather than live credentials. Do not
+mount host credential directories or forward an SSH agent into a test guest.
 
 ```sh
 npm ci --ignore-scripts
@@ -38,46 +19,29 @@ npm run build
 npm pack
 ```
 
-The suite exercises real namespace, filesystem, network, process and cancellation
-boundaries. A mock runner cannot establish Linux isolation. Also install the
-packed package outside the checkout and verify a clean ACP handshake. No real
-Open WebUI key or workstation MCP credential is required.
+Also install the tarball outside the checkout and run `test/package-install.mjs`
+as described in [testing](verification.md). Record the OS, kernel, Node, npm,
+bubblewrap and runtime versions with test results. Linux VM results do not
+establish native Windows or every container runtime's support.
 
-The IDE's `/doctor` command runs a bounded namespace probe on Linux. A successful
-probe establishes that bubblewrap can start the requested namespaces; it does
-not replace the enforcement tests. A denied probe must remain a failure.
+## Namespace failures
 
-If namespace creation fails, inspect the distribution's kernel and application
-security policy. In containers, also inspect the outer runtime's seccomp and
-namespace restrictions. Do not globally disable AppArmor, SELinux, seccomp or
-user-namespace restrictions to make a test pass. Bubblewrap requires host support
-for [unprivileged user namespaces](https://github.com/containers/bubblewrap).
+A denied namespace probe must remain a failure. Inspect distribution policy and,
+inside containers, the outer runtime's seccomp/namespace restrictions. Do not
+globally disable AppArmor, SELinux, seccomp or user-namespace restrictions.
 
-Native Windows remains a separate implementation sprint. Testing a Linux VM on
-a Windows host does not establish native Windows support.
+Ubuntu may require an administrator-reviewed application-specific user-namespace
+rule for root-owned `/usr/bin/bwrap`. The included [AppArmor profile](bwrap-apparmor.profile)
+is used by disposable development CI runners. It is not installed by agent setup.
+Validate syntax before loading any profile and preserve the global namespace
+restriction. An existing `bwrap` profile can include child-transition restrictions;
+replacing it changes those restrictions too and requires administrator review for
+that exact host. Do not install competing executable attachments.
 
-## Observed Ubuntu prerequisite
+An exception approved for a VM or CI runner does not authorize changes to its
+host or other machines. Follow [Ubuntu's per-application guidance](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces)
+and the host's administrative change process.
 
-The tested Ubuntu 24.04.5 image blocked bubblewrap under its
-`unprivileged_userns` AppArmor profile. An administrator-approved, guest-only
-[application profile](bwrap-apparmor.profile) resolved that denial. Its syntax was
-checked with `apparmor_parser --skip-kernel-load --skip-read-cache` before loading.
-`kernel.apparmor_restrict_unprivileged_userns` remained `1`. This follows
-[Ubuntu’s per-application guidance](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces).
-The agent does not install this rule automatically. The user separately approved
-loading the same profile on disposable GitHub Actions development runners on
-13 November 2026. CI explicitly tests Ubuntu 24.04 and 26.04 instead of the
-moving `ubuntu-latest` alias. It checks the executable's ownership and write
-permissions, validates the profile before loading it, and verifies that the
-global namespace restriction is unchanged. The profile exists only for the
-runner lifetime; no workstation or service configuration is changed. This
-approval does not apply to other hosts. See verification.md for observed runs.
-
-Ubuntu 26.04 already loads a profile named `bwrap`. The exception uses that
-same name so replacement updates one executable attachment rather than loading
-a competing profile for `/usr/bin/bwrap`. This replaces the runner's bwrap
-profile, including its child-transition policy; the runtime's namespaces,
-capability handling and seccomp remain the command boundary. Do not install this
-exception on another host without administrator review. An older test VM may
-still have the original `openwebui-acp-bwrap` name; do not load both profiles for
-the same executable. No existing VM profile was changed during the CI fix.
+`test/policy-system.mjs` needs separately prepared root-owned policy fixtures.
+`test/fixtures/linux-mount-repro.mjs` is a standalone mount diagnostic, not part
+of normal application startup. Neither should be used to weaken enforcement.
