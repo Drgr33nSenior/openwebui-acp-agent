@@ -81,11 +81,15 @@ manual fallback. Browser sign-in and OAuth are not implemented. See
   Optional project test commands run in the command sandbox. Errors return to
   the model for a bounded number of repair rounds.
 - **Commands and jobs:** command output streams into the tool log. Approved
-  background jobs can be listed, polled and stopped with `/jobs`.
-- **Undo:** `/checkpoints` lists agent edits; `/undo` proposes a reversal without
-  overwriting later changes. It does not revert commands or remote effects.
-- **Sessions:** browse saved sessions, set titles, fork a conversation and export
-  it as Markdown or JSON. Restoring history never replays actions.
+  background jobs report status in their tool call and can be listed, polled
+  and stopped with `/jobs`. The model is told once when a job finishes.
+- **Undo and rewind:** `/checkpoints` lists agent edits; `/undo` proposes a
+  reversal without overwriting later changes. `/rewind` returns the conversation
+  to an earlier turn and restores the agent's edits from the discarded turns.
+  Neither reverts commands or remote effects.
+- **Sessions:** browse, load or resume saved sessions, set titles, fork a
+  conversation and export it as Markdown or JSON. Restoring history never
+  replays actions.
 - **Context:** model-reported usage feeds the IDE context indicator. Automatic
   compaction preserves the original transcript; `/compact` is also available.
 - **Model controls:** model and reasoning selectors use Open WebUI metadata.

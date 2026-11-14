@@ -8,6 +8,7 @@ import { compactionStateSchema, contextMessages } from "./compaction.js";
 import { planSchema } from "./planning.js";
 import { contextUsageSchema } from "./usage.js";
 import { serverRunSchema } from "./server-tools.js";
+import { promptModes } from "./turns.js";
 
 export const sessionIdSchema = z.string().uuid();
 export const sessionTitleSchema = z
@@ -64,7 +65,7 @@ export const storedSessionSchema = z.object({
     compactionStateSchema.parse({}),
   ),
   contextUsage: contextUsageSchema.optional(),
-  promptMode: z.enum(["interrupt", "queue"]).default("interrupt"),
+  promptMode: z.enum(promptModes).default("interrupt"),
   workflow: z.enum(["code", "plan"]).default("code"),
   plan: planSchema.default([]),
   permissionMode: z

@@ -15,6 +15,8 @@ export type JobInfo = {
   limitedOrCancelled: boolean;
   startedAt: string;
   finishedAt?: string;
+  // Retained output length in characters, matching poll offsets.
+  outputChars: number;
 };
 export type JobPoll = JobInfo & { output: string; nextOffset: number };
 export type JobRunner = (
@@ -24,12 +26,15 @@ export type JobRunner = (
 type Options = {
   timeoutMs?: number;
   signal?: AbortSignal;
+  // onOutput runs at most once per progressMs with the latest running snapshot.
+  progressMs?: number;
   onOutput?: (snapshot: JobPoll) => void | Promise<void>;
   onComplete?: (snapshot: JobPoll) => void | Promise<void>;
 };
 type Job = {
   info: JobInfo;
   output: string;
+  reported: boolean;
   controller: AbortController;
   done: Promise<void>;
 };
@@ -39,6 +44,33 @@ const resultSchema = z.object({
   limitedOrCancelled: z.boolean(),
 });
 const OUTPUT_BYTES = 100000;
+const PROGRESS_MS = 1000;
+const TAIL_CHARS = 2000;
+
+// A bounded, human-readable status for client tool-call updates and notices.
+// Only the output tail is included; poll_job and /jobs poll page the rest.
+export function jobStatusText(snapshot: JobPoll): string {
+  const start = Math.max(0, snapshot.output.length - TAIL_CHARS);
+  // Do not begin the tail with the second half of a surrogate pair.
+  const tail = snapshot.output.slice(start).replace(/^[\uDC00-\uDFFF]/, "");
+  const ended = snapshot.finishedAt
+    ? Date.parse(snapshot.finishedAt)
+    : Date.now();
+  const seconds = Math.max(
+    0,
+    Math.round((ended - Date.parse(snapshot.startedAt)) / 1000),
+  );
+  return [
+    `Background job ${snapshot.id}: ${snapshot.state}` +
+      (snapshot.state === "running" ? "" : `, exit code ${snapshot.code}`) +
+      `, ${seconds}s, ${snapshot.outputChars} output characters` +
+      (snapshot.limitedOrCancelled ? " (limited or cancelled)" : ""),
+    start
+      ? `Last ${snapshot.output.length - start} characters; /jobs poll ${snapshot.id} ${start} shows them, offset 0 shows the start:`
+      : "Output:",
+    tail,
+  ].join("\n");
+}
 
 // A manager belongs to exactly one live ACP session. It has no persisted or
 // global process registry: restoration must never restart an executed command.
@@ -51,6 +83,18 @@ export class Jobs {
 
   list(): JobInfo[] {
     return [...this.jobs.values()].map((job) => ({ ...job.info }));
+  }
+
+  // Finished jobs whose final state has not yet been reported to the model.
+  // Each job is returned once, so the model need not poll for completion.
+  takeFinished(): JobInfo[] {
+    const result: JobInfo[] = [];
+    for (const job of this.jobs.values())
+      if (job.info.state !== "running" && !job.reported) {
+        job.reported = true;
+        result.push({ ...job.info });
+      }
+    return result;
   }
 
   private get(id: string) {
@@ -99,26 +143,49 @@ export class Jobs {
         code: null,
         limitedOrCancelled: false,
         startedAt: new Date().toISOString(),
+        outputChars: 0,
       },
       controller,
       output: "",
+      reported: false,
       done: Promise.resolve(),
     };
     this.jobs.set(job.info.id, job);
     const abort = () => controller.abort();
     options.signal?.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(abort, timeout);
+    // Progress is coalesced: a dev server or test run can print continuously,
+    // and each client update replaces the previous one anyway.
+    let progress: ReturnType<typeof setTimeout> | undefined;
+    let lastProgress = 0;
+    const publish = () => {
+      progress = undefined;
+      if (job.info.state !== "running" || !options.onOutput) return;
+      lastProgress = Date.now();
+      void Promise.resolve()
+        .then(() =>
+          options.onOutput!({
+            ...job.info,
+            output: job.output,
+            nextOffset: job.output.length,
+          }),
+        )
+        .catch(() => {});
+    };
     const output = async (snapshot: string) => {
       if (controller.signal.aborted || job.info.state !== "running") return;
       const bytes = Buffer.from(snapshot);
       job.output = utf8Prefix(bytes, OUTPUT_BYTES);
+      job.info.outputChars = job.output.length;
       if (bytes.length > OUTPUT_BYTES) controller.abort();
-      if (options.onOutput)
-        await options.onOutput({
-          ...job.info,
-          output: job.output,
-          nextOffset: job.output.length,
-        });
+      if (options.onOutput && !progress) {
+        const wait = Math.max(
+          0,
+          lastProgress + (options.progressMs ?? PROGRESS_MS) - Date.now(),
+        );
+        progress = setTimeout(publish, wait);
+        progress.unref();
+      }
     };
     job.done = Promise.resolve()
       .then(async () => {
@@ -128,6 +195,7 @@ export class Jobs {
           throw new Error("Job result exceeds limits");
         const result = resultSchema.parse(JSON.parse(raw));
         job.output = utf8Prefix(Buffer.from(result.output), OUTPUT_BYTES);
+        job.info.outputChars = job.output.length;
         job.info.code = result.code;
         job.info.limitedOrCancelled =
           result.limitedOrCancelled ||
@@ -147,9 +215,11 @@ export class Jobs {
           job.output = controller.signal.aborted
             ? "Job stopped."
             : "Job failed to start or returned invalid output.";
+        job.info.outputChars = job.output.length;
       })
       .finally(async () => {
         clearTimeout(timer);
+        clearTimeout(progress);
         options.signal?.removeEventListener("abort", abort);
         job.info.finishedAt = new Date().toISOString();
         if (options.onComplete)
