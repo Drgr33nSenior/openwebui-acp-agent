@@ -53,6 +53,10 @@
   records verification status. A turn compacts at most three times; when a
   request still cannot fit, the turn stops with the reason instead of sending it.
   `/status` reports the context size and usable input as `contextLimits`.
+- Apply the same compaction and input-budget checks to corrected-reply requests.
+  Keep context notices out of buffered model text and show them once per turn.
+  Explain output-limit truncation separately from malformed replies, while
+  preserving the single-retry and three-compaction limits.
 
 See [verification](../verification.md), [session modes](../sessions.md#session-modes),
 [ACP v2 readiness](../design.md#acp-v2-readiness) and the

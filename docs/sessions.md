@@ -109,6 +109,19 @@ before sending anything and says why; history and tool results are retained.
 Summaries are untrusted text, not permission grants. Compaction cannot reduce an
 indivisible oversized message or remove the local session-storage limit.
 
+The same checks run before the single corrected-reply attempt after a malformed
+or truncated response. That request is rebuilt from the current compaction
+checkpoint, with current instructions, plan and available-tool guidance. It shares
+the turn's three-compaction limit and stops if the input still cannot fit.
+No tool from the discarded response executes.
+
+A high-context notice appears at most once per turn, after the model's buffered
+text has finished. It does not reset the context wheel: every valid provider
+usage measurement still reaches the client. The wheel can stay full during
+summarization until a subsequent coding response reports new usage. Recovery
+messages distinguish output-limit truncation from malformed tool replies;
+compaction cannot raise the model's output limit.
+
 Plan mode allows inspection and structured progress updates. It blocks edits,
 commands, MCP startup and server tasks. Plans persist through restore and
 compaction without authorizing any operation.

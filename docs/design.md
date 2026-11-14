@@ -213,6 +213,14 @@ it would not fit, at most three times per turn; see [sessions](sessions.md).
 Summaries, project instructions, retrieved data and tool output are untrusted
 model input. They cannot restore grants or alter destinations.
 
+The initial request and its one allowed corrected reply share the same request
+preparation step. Each rechecks input pressure, the compaction budget and workspace
+permission before rebuilding context. Partial assistant text and the recovery note
+remain in the retained transcript; discarded tool calls never enter executable
+history. Context notices wait until the backend has flushed its buffered text,
+so they cannot interrupt a sentence. Notice deduplication does not suppress ACP
+usage updates or change their measurement basis.
+
 Automatic verification collects bounded IDE file problems after agent edits and
 runs explicitly configured project checks in the selected sandbox, or with
 explicitly confirmed session-only YOLO access. Errors return to the model within

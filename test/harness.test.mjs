@@ -808,7 +808,7 @@ for (const [name, reply] of [
     try {
       await c.prompt();
       assert.equal(requests.length, 1);
-      assert.doesNotMatch(text(c), /asking once/);
+      assert.doesNotMatch(text(c), /asking once/i);
     } finally {
       await c.close();
     }

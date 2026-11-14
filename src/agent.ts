@@ -3451,6 +3451,7 @@ export function createAgent(
         const failed = new Map<string, number>();
         let limit = "Model-round limit";
         let autoCompactionFailed = false;
+        let contextWarningSent = false;
         let fixRounds = 0;
         let lastVerification: VerificationResult | undefined;
         let mutationRevision = 0;
@@ -3745,7 +3746,9 @@ export function createAgent(
           return { modelContext, tools, availableTools };
         };
         let compactions = 0;
-        for (let round = 0; round < s.config.rounds; round++) {
+        // Recovery is another coding request. Apply the same budget/compaction
+        // checks and rebuild from the checkpoint before every attempt.
+        const prepareRequest = async () => {
           await permitted(s, signal);
           // Steered messages and job notes join history before the request is
           // built, so the compaction check below measures them too.
@@ -3836,10 +3839,16 @@ export function createAgent(
               );
             break;
           }
-          const { modelContext, tools, availableTools } = request;
+          return request;
+        };
+        for (let round = 0; round < s.config.rounds; round++) {
           let message: Message | undefined;
+          let availableTools: string[] = [];
           for (let attempt = 0; attempt < 2; attempt++) {
-            await permitted(s, signal);
+            const request = await prepareRequest();
+            const { modelContext, tools } = request;
+            availableTools = request.availableTools;
+            let contextNotice: string | undefined;
             try {
               message = await s.backend.complete(
                 modelContext,
@@ -3866,29 +3875,25 @@ export function createAgent(
                     s.metadata.find((m) => m.id === s.config.model),
                   );
                   if (size === undefined) return;
-                  const before = s.contextUsage;
                   s.contextUsage = { used, size };
                   await update(client, s, {
                     sessionUpdate: "usage_update",
                     ...s.contextUsage,
                   });
-                  // Say so once, when usage first crosses 90% of the advertised window:
-                  // past it the next request can be refused for its size.
-                  if (
-                    used >= size * 0.9 &&
-                    !(
-                      before &&
-                      before.size === size &&
-                      before.used >= size * 0.9
-                    )
-                  )
-                    await text(
-                      client,
-                      s,
-                      `\n\n[Context ${Math.round((used / size) * 100)}% full; ${s.compaction.automatic ? "automatic compaction will be attempted before the next model request when history can be reduced" : "use /compact or start a new session"}. History retained.]\n\n`,
-                    );
+                  // Once per turn; keep every measured usage update above.
+                  // Defer the notice until the final redaction-buffer flush so
+                  // it cannot split the model's sentence.
+                  if (used >= size * 0.9 && !contextWarningSent) {
+                    contextWarningSent = true;
+                    contextNotice = `\n\n[Reported context usage: ${Math.round((used / size) * 100)}%; ${autoCompactionFailed ? "automatic compaction already failed this turn; use /compact or start a new session" : s.compaction.automatic ? "automatic compaction is checked before each coding request, including corrected replies" : "use /compact or start a new session"}. History retained.]\n\n`;
+                  }
                 },
               );
+              if (contextNotice) {
+                const notice = contextNotice;
+                contextNotice = undefined;
+                await text(client, s, notice);
+              }
               // Check every envelope/JSON payload before running any call. A bad
               // later call must not cause earlier mutations to run twice.
               for (const call of message.tool_calls ?? []) {
@@ -3914,6 +3919,11 @@ export function createAgent(
               break;
             } catch (error) {
               signal.throwIfAborted();
+              if (contextNotice) {
+                const notice = contextNotice;
+                contextNotice = undefined;
+                await text(client, s, notice);
+              }
               if (!(error instanceof ModelReplyError)) throw error;
               if (partialText) {
                 const partial = {
@@ -3921,7 +3931,6 @@ export function createAgent(
                   content: s.backend.redact(partialText),
                 };
                 s.messages.push(partial);
-                modelContext.push(partial);
                 partialText = "";
               }
               const reason = s.backend.redact(error.message).slice(0, 300);
@@ -3939,7 +3948,6 @@ export function createAgent(
               // Assistant housekeeping must not replace compaction's pinned user request.
               const marker = { role: "assistant", content: note };
               s.messages.push(marker);
-              modelContext.push(marker);
               await save(s);
               if (attempt === 1)
                 throw new Error(
@@ -3958,7 +3966,7 @@ export function createAgent(
               await text(
                 client,
                 s,
-                "\n[Incomplete or malformed model reply; asking once for a corrected reply. No tools from that reply ran.]\n",
+                `\n[${reason}. Asking once for a ${error.kind === "truncated" ? "shorter reply with smaller tool calls" : "corrected reply"}. No tools from that reply ran.]\n`,
               );
             }
           }
