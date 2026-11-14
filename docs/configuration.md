@@ -26,7 +26,9 @@ available. Each command has a separate `timeout_ms`: default 120000, maximum 600
 no valid `max_output_tokens` value at the top level or under `openai`. Catalog
 metadata takes precedence and is reevaluated for the selected model each round.
 The guidance reserves space for reasoning when reasoning shares the allowance.
-It never sets, raises or bypasses the server's actual output cap.
+Coding requests carry no output cap. A compaction summary request sends
+`max_tokens` of at most 6,000, lowered to the catalog `max_output_tokens` or this
+value when either is smaller. Neither raises or bypasses the server's actual cap.
 
 Use `NODE_EXTRA_CA_CERTS` before launch for a private certificate authority.
 TLS verification remains enabled, redirects are refused, and credentials cannot

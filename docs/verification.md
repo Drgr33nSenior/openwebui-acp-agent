@@ -286,6 +286,27 @@ no issues. No live inference or interactive IDE acceptance was run for this
 revision. The context wheel still depends on
 subsequent provider usage; no estimated percentage or artificial reset is sent.
 
+## Compaction summary requests (unreleased)
+
+`test/auto-compaction.test.mjs` sets the session to `xhigh` with levels declared
+out of order. The summary request carries `low` and `max_tokens` 6,000, and the
+coding requests carry `xhigh` with no cap. Its input plus the cap fits the
+window. A summary cut off once by `finish_reason: "length"` is retried over fewer
+older messages and then succeeds. Notices name each failure without quoting the
+reply: HTTP refusal, empty, cut off after the retry, over 16,000 characters.
+Manual `/compact` uses the same request, with a 3,000-token advertised allowance
+lowering the cap and requested length. It reports an empty summary and a save
+refused by the transcript quota. Unit tests cover effort ranking and fallbacks,
+cap and input sizing for a 100,768-token window, the single retry, unretried
+failures and reason texts.
+
+On macOS 27.0 with Node 26.11.1, `npm ci --ignore-scripts`, lint, typecheck,
+Prettier, build and `npm test` passed: **456 tests, 450 passed, six platform
+skips, zero failures**. `npm pack`, installation into a fresh prefix and
+`test/package-install.mjs` passed. Checkout and installed production audits
+found zero vulnerabilities. No live Open WebUI or IDE session was run: whether
+the gateway honours `max_tokens` and `low` for summaries, and the summary quality
+at that level, are unverified.
 ## YOLO in the Mode selector (unreleased)
 
 JetBrains reported "Mode: yolo (the agent rejected the value)" on new sessions

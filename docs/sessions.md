@@ -120,10 +120,14 @@ when the next request would not fit the model's usable input: the advertised
 its serialized size and the characters-per-token ratio of the server's latest
 reported prompt count; without a reported count only the 80% rule applies.
 Summarization uses the selected model with tools disabled, and the summary
-request is held to the same input limit.
+request is held to the same input limit; see
+[summary requests](#compaction-summary-requests).
 
 A turn compacts at most three times. Failure or cancellation preserves context.
-When the next request still fits, an automatic failure warns once per turn and
+Failure notices state the reason: the request was refused (with its HTTP
+status); the summary was empty, cut off at the output limit or over 16,000
+characters; it did not reduce the context; no older history fits; or the session
+could not be saved. Notices never quote the summary or history. When the next request still fits, an automatic failure warns once per turn and
 the turn continues. When it would not fit and compaction fails, is switched off,
 has reached the limit or has no complete older history left, the turn stops
 before sending anything and says why; history and tool results are retained.
@@ -146,6 +150,30 @@ compaction cannot raise the model's output limit.
 Plan mode allows inspection and structured progress updates. It blocks edits,
 commands, MCP startup and server tasks. Plans persist through restore and
 compaction without authorizing any operation.
+
+### Compaction summary requests
+
+A summary request does not use the session's reasoning level. An uncapped high
+effort can spend the rest of the context window thinking and return no summary.
+The request instead sends the lowest declared `reasoning_effort` level other than
+`none`, ranked by the parameter's levels (`minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`), not by declaration order. When no declared level has a known
+rank, as with named workspace controls, the server's declared default is used;
+otherwise the model default. Thinking off is not chosen: summary quality without
+reasoning has not been measured.
+
+The request also sends `max_tokens`: 6,000, or the model's `max_output_tokens` or
+`outputTokenBudget` when smaller. The cap bounds thinking and summary together on
+servers that count both. The instruction asks for at most 12,000 characters (two
+per capped token when the cap is smaller); summaries over 16,000 characters are
+rejected. With a reported server token count, the summary input is held to 90%
+of the usable input and of the context window minus the cap, so the input and
+the capped reply fit together.
+Manual `/compact` uses the same request and limits.
+
+A summary cut off at the output limit, or over 16,000 characters, is retried once
+with a smaller cut: at most half the input, so fewer older messages. This retry
+belongs to the same compaction and does not count toward the per-turn limit.
 
 ## Incoming prompts
 

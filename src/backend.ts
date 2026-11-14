@@ -17,6 +17,9 @@ export const MAX = 1_000_000;
 // reasoning deltas, usage frames), not output. Response limits apply to the text and
 // tool arguments a reply produces; this only bounds a runaway stream.
 export const WIRE_MAX = 64 * MAX;
+// ModelReplyError message for a reply that ended with finish_reason "length".
+export const OUTPUT_LIMIT_CUTOFF =
+  "The model reply was cut off by its output limit";
 export const OUTPUT_LIMIT_NOTICE =
   "\n\n[Output limit reached before the reply finished; any unfinished tool call was not run. Ask to continue, or split the task.]";
 function parseResponse(value: string): any {
@@ -411,7 +414,7 @@ export class Backend {
       await emit("", true);
       throw new ModelReplyError(
         "truncated",
-        "The model reply was cut off by its output limit",
+        OUTPUT_LIMIT_CUTOFF,
         calls.size > 0,
       );
     }

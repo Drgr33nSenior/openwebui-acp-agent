@@ -71,6 +71,10 @@ import {
   PROJECT_GUIDANCE_PREFIX,
   STEERING_PREFIX,
   compactHistory,
+  CompactionError,
+  compactionFailure,
+  summaryRequest,
+  SUMMARY_MAX_CHARS,
   type CutOptions,
   canCompact,
   contextPressure,
@@ -763,6 +767,15 @@ export function createAgent(
       reason +
         "Compacting model context; the original transcript is retained locally.",
     );
+    // Fixed low reasoning and an explicit output cap, not the session's level:
+    // an uncapped high effort can spend the remaining window thinking.
+    const request = summaryRequest(
+      s.config.model,
+      s.metadata.find((m) => m.id === s.config.model),
+      s.config.outputTokenBudget,
+      s.choices,
+      s.tokenRatio,
+    );
     const next = await compactHistory(
       s.messages,
       s.compaction,
@@ -772,8 +785,10 @@ export function createAgent(
           [],
           requestSignal,
           async () => {},
-          reasoningPayload(s.config.model, s.reasoning, s.choices),
-          16000,
+          request.extra,
+          // Runaway bound only; compactHistory rejects summaries over
+          // SUMMARY_MAX_CHARS and retries those once with a smaller cut.
+          4 * SUMMARY_MAX_CHARS,
         );
         return {
           ...response,
@@ -784,7 +799,14 @@ export function createAgent(
         };
       },
       signal,
-      options,
+      {
+        ...options,
+        maxInputChars: Math.min(
+          options.maxInputChars ?? Infinity,
+          request.maxInputChars ?? Infinity,
+        ),
+        summaryChars: request.summaryChars,
+      },
     );
     await permitted(s, signal);
     const previous = s.compaction,
@@ -796,7 +818,13 @@ export function createAgent(
     } catch (error) {
       s.compaction = previous;
       s.contextUsage = previousUsage;
-      throw error;
+      const detail =
+        (error as NodeJS.ErrnoException)?.code ??
+        (error instanceof Error ? error.message : undefined);
+      throw new CompactionError(
+        "the compacted session could not be saved" +
+          (detail ? ` (${detail})` : ""),
+      );
     }
     await text(
       client,
@@ -3403,7 +3431,16 @@ export function createAgent(
           return { stopReason: "end_turn" };
         }
         if (compactRequested) {
-          await compactSession(client, s, signal);
+          try {
+            await compactSession(client, s, signal);
+          } catch (error) {
+            signal.throwIfAborted();
+            if (error instanceof BackendHttpError && error.status === 401)
+              throw error;
+            throw new Error(
+              `Compaction failed: ${compactionFailure(error)}. Original context retained. Use /compact to retry or start a new session.`,
+            );
+          }
           return { stopReason: "end_turn" };
         }
         await refreshInstructions(client, s, s.root, signal, true);
@@ -3857,12 +3894,13 @@ export function createAgent(
                   throw error;
                 await permitted(s, signal);
                 autoCompactionFailed = true;
-                blocked = "automatic compaction failed";
+                const reason = s.backend.redact(compactionFailure(error));
+                blocked = `automatic compaction failed (${reason})`;
                 if (!pressure.over)
                   await text(
                     client,
                     s,
-                    "Automatic compaction failed; original context retained. Continuing within existing context limits. Use /compact to retry, /autocompact off to disable, or start a new session.",
+                    `Automatic compaction failed: ${reason}. Original context retained. Continuing within existing context limits. Use /compact to retry, /autocompact off to disable, or start a new session.`,
                   );
               }
             }
