@@ -87,8 +87,11 @@ export const commandSchema = z
       (s.sandbox_permissions !== "require_escalated" &&
         !s.additional_read_paths.length &&
         !s.additional_write_paths.length) ||
-      !!s.justification,
-    "Scope expansion requires a justification",
+      !!s.justification?.trim(),
+    {
+      message: "Scope expansion requires a justification",
+      path: ["justification"],
+    },
   );
 export type CommandInput = z.infer<typeof commandSchema>;
 export type NetworkRequest = { host: string; port: number };

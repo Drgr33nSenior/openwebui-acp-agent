@@ -97,6 +97,11 @@ const { Jobs } = await import(pathToFileURL(join(installed, "dist/jobs.js")));
 const { prepareCheckpoint, checkpointRestore } = await import(
   pathToFileURL(join(installed, "dist/checkpoints.js"))
 );
+const { replaceText } = await import(
+  pathToFileURL(join(installed, "dist/edits.js"))
+);
+assert.equal(replaceText("before\r\n", "before", "after"), "after\r\n");
+assert.throws(() => replaceText("same same", "same", "new"), /2 occurrences/);
 const { instructionContext } = await import(
   pathToFileURL(join(installed, "dist/instructions.js"))
 );

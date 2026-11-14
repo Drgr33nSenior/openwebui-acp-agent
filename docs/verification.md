@@ -151,6 +151,43 @@ The merged feature revision `60ae33cc` also passed CI on macOS, Ubuntu 24.04 and
 The Windows check does not establish native Windows support. Publication and
 public-download verification are separate results in the GitHub release workflow.
 
+## Targeted file edits (unreleased)
+
+`edit_file` shares the full protected application path with `write_file`.
+Tests cover zero/unique/multiple matches, explicit replacement of all matches,
+literal replacement text, CRLF/trailing newlines and the resulting file limit.
+ACP tests exercise full diffs, checkpoints/undo, read-only modes, protected and
+out-of-root paths, instruction changes, denied/invalid/late approvals, unsaved
+editor content and stale edits. Client denial has no local fallback. Automatic
+IDE and project checks run after changes; no-ops preserve cached project results.
+
+Validation tests cover concise field-specific errors, whitespace-only command
+justification and oversized arguments. Guidance tests cover filtered tool catalogs,
+model output metadata, model switching, fallback configuration and the absence of
+provider output-cap overrides. A partial truncated tool call never executes; its
+single recovery asks for smaller changes only through tools currently offered.
+
+On macOS 27.0 with Node 26.11.1, `npm ci --ignore-scripts`, lint, typecheck and
+`npm test` passed: **396 tests passed, six platform skips, zero failures**.
+The initial focused suite passed 62 tests; the final harness-only check passed
+27 tests, including argument-versus-result schema errors. The checkout production audit found zero
+vulnerabilities. Real sandbox tests ran with the required host process/listener
+permissions and isolated application state. No Linux, Windows or interactive IDE
+acceptance was run for this revision.
+
+Prettier, build, `npm pack` and the isolated installed-package check passed,
+including the new edit module, clean ACP/auth discovery, preview lifecycle and
+real command isolation outside the checkout. The installed production audit also
+found zero vulnerabilities. Documentation clarity audits found no issues.
+
+The [live comparison](edit-verification.md) records successful before/after runs:
+six fixture tests passed in each, with 16 versus 13 tool calls and eight versus
+nine model rounds. Two earlier changed-build attempts returned HTTP 503 before
+tool execution. The completed run used `edit_file`, recovering from one zero-match
+edit and one malformed command. This small sample does not establish a general
+efficiency improvement. The default 40 rounds and 64-call budget are unchanged;
+schema failures still count toward both.
+
 ## Compatibility
 
 | Component                            | Scope                                                                                                |

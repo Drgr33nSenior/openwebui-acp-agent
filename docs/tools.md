@@ -1,4 +1,4 @@
-# MCP and Open WebUI-managed tools
+# Coding, MCP and Open WebUI-managed tools
 
 The agent refreshes runtime-verification guidance from the tools offered in each
 model request. When commands are available, it asks the model to run executable
@@ -8,6 +8,44 @@ and documentation guidance; interactive checks also require a click tool. Web
 search guidance requires an enabled server-task catalog with that feature.
 Plan and read-only modes omit execution guidance. This is model guidance, not a
 guarantee of successful verification or additional permission.
+
+## Text-file edits
+
+Use `edit_file` for small changes to an existing file:
+
+```json
+{
+  "path": "src/example.py",
+  "old_string": "return total - bonus",
+  "new_string": "return total + bonus"
+}
+```
+
+Read the file first. `old_string` must be nonempty and match exactly once,
+including whitespace and line endings. Zero or multiple matches return the
+count and ask for current text with enough surrounding lines. Set
+`replace_all: true` only to replace every non-overlapping occurrence. Replacement
+text is literal: `$&` and similar sequences have no special meaning. The tool
+does not normalize CRLF or add a trailing newline. The resulting file must fit
+within 100,000 characters.
+
+Use `write_file` with `before: null` to create a file. For a deliberate whole-file
+rewrite, supply the complete current text in `before` and replacement in `after`.
+Build large files as a small skeleton, then extend them through small `edit_file`
+calls. Both tools show the full proposed diff and use the same workspace rules,
+approvals, checkpoints and undo support. A file changed during approval is not
+overwritten. When client file methods are available, edits preserve unsaved
+editor content; client denial never causes a local write fallback.
+
+File tools remain unavailable in Plan or read-only permission mode. Read-only
+sandbox mode rejects their writes. Successful changes participate in automatic
+[verification after edits](ide-diagnostics.md). A no-op does not create a
+checkpoint or invalidate a cached project check.
+
+The model receives small-edit guidance and an output-token budget only when
+file tools are available. Explicit model metadata takes precedence over the
+configurable [fallback budget](configuration.md#private-configuration).
+This guidance does not change the server's output limit.
 
 ## Direct MCP
 

@@ -1,6 +1,18 @@
 import { z } from "zod";
 
 const tokens = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+export const DEFAULT_OUTPUT_TOKEN_BUDGET = 12288;
+
+// An explicit catalog allowance, never inferred from model names or context size.
+// This guides reply size only; it does not override the server's request limits.
+export function outputAllowance(model: unknown): number | undefined {
+  const m = model as any;
+  for (const value of [m?.max_output_tokens, m?.openai?.max_output_tokens]) {
+    const parsed = tokens.positive().safeParse(value);
+    if (parsed.success) return parsed.data;
+  }
+  return undefined;
+}
 export const contextUsageSchema = z
   .object({
     used: tokens,

@@ -17,7 +17,7 @@ assert.equal(
   process.env.OPENWEBUI_ACP_HOME,
   "Application state must use the test's private directory before any writes",
 );
-const { contextSize, completionContextTokens } =
+const { contextSize, completionContextTokens, outputAllowance } =
   await import("../dist/usage.js");
 const { createAgent } = await import("../dist/agent.js");
 const { root, changeTrust } = await import("../dist/workspace.js");
@@ -419,5 +419,60 @@ test("restoration rejects a stale capacity and accepts old transcripts without u
   } finally {
     models = oldModels;
     await restored.close();
+  }
+});
+
+test("output guidance uses explicit catalog allowances, refreshes per model, and never overrides provider caps", async () => {
+  assert.equal(outputAllowance({ max_output_tokens: 6000 }), 6000);
+  assert.equal(outputAllowance({ openai: { max_output_tokens: 8000 } }), 8000);
+  for (const value of [0, -1, 1.5, Infinity, "12000", null])
+    assert.equal(outputAllowance({ max_output_tokens: value }), undefined);
+  assert.equal(
+    outputAllowance({ name: "128k", context_window: 100000 }),
+    undefined,
+  );
+  assert.equal(
+    configSchema.parse({ url: conf.url, model: "a" }).outputTokenBudget,
+    12288,
+  );
+  assert.throws(() =>
+    configSchema.parse({ url: conf.url, model: "a", outputTokenBudget: 0 }),
+  );
+  const previous = models;
+  models = [
+    { id: "a", max_output_tokens: 3000 },
+    { id: "b", openai: { max_output_tokens: 16000 } },
+    { id: "unknown" },
+  ];
+  await writeJson("config.json", { ...conf, outputTokenBudget: 2048 });
+  const c = await client();
+  try {
+    const id = (await newSession(c)).sessionId;
+    response = async (_, res) => json(res, completed());
+    for (const [model, budget] of [
+      ["a", 3000],
+      ["b", 16000],
+      ["unknown", 2048],
+    ]) {
+      await c.request("session/set_config_option", {
+        sessionId: id,
+        configId: "model",
+        value: model,
+      });
+      await prompt(c, id);
+      const request = requests.at(-1);
+      assert(
+        request.messages.some((m) =>
+          m.content?.includes(`Plan for ${budget} output tokens`),
+        ),
+      );
+      assert.equal(request.max_tokens, undefined);
+      assert.equal(request.max_completion_tokens, undefined);
+      assert.equal(request.params?.max_tokens, undefined);
+    }
+  } finally {
+    await c.close();
+    models = previous;
+    await writeJson("config.json", conf);
   }
 });

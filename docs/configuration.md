@@ -13,6 +13,7 @@ Setup writes `url` and `model`. Optional settings include:
 | ----------------------- | ------------------------------------------------------------- |
 | `header`                | `Authorization`; change only for a verified proxy requirement |
 | `rounds`                | 40 model rounds per turn; maximum 100                         |
+| `outputTokenBudget`     | 12288 fallback guidance tokens per reply; integer 1–1000000 |
 | `timeoutMs`             | 120000 ms for discovery; maximum 3600000                      |
 | `firstContentTimeoutMs` | 900000 ms to first streamed content; maximum 3600000          |
 | `idleTimeoutMs`         | 300000 ms between streamed chunks; maximum 3600000            |
@@ -20,6 +21,12 @@ Setup writes `url` and `model`. Optional settings include:
 
 There is no overall turn deadline while content continues to stream. Stop remains
 available. Each command has a separate `timeout_ms`: default 120000, maximum 600000. Existing explicit configuration values are preserved on setup.
+
+`outputTokenBudget` guides the model toward small file edits when its catalog has
+no valid `max_output_tokens` value at the top level or under `openai`. Catalog
+metadata takes precedence and is reevaluated for the selected model each round.
+The guidance reserves space for reasoning when reasoning shares the allowance.
+It never sets, raises or bypasses the server's actual output cap.
 
 Use `NODE_EXTRA_CA_CERTS` before launch for a private certificate authority.
 TLS verification remains enabled, redirects are refused, and credentials cannot
