@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtemp, writeFile, realpath, rm } from "node:fs/promises";
-import { readdirSync, statSync, writeFileSync } from "node:fs";
+import { readdirSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClientApp } from "@agentclientprotocol/sdk";
@@ -11,7 +11,7 @@ const temporary = await realpath(await mkdtemp(join(tmpdir(), "ow-auto-")));
 process.env.OPENWEBUI_ACP_HOME = join(temporary, "state");
 process.env.OPENWEBUI_API_KEY = "synthetic-compaction-key";
 const { createAgent } = await import("../dist/agent.js");
-const { directory, writeJson, configSchema } =
+const { directory, writeJson, configSchema, SESSION_STORAGE_BYTES } =
   await import("../dist/config.js");
 assert.equal(
   directory,
@@ -629,9 +629,11 @@ test("manual /compact uses the same summary request and reports why it failed", 
       const total = readdirSync(directory)
         .filter((n) => /^session-.*\.json$/.test(n))
         .reduce((sum, n) => sum + statSync(join(directory, n)).size, 0);
-      writeFileSync(
+      // A sparse file: its size counts toward the quota without the disk use.
+      writeFileSync(filler, "");
+      truncateSync(
         filler,
-        "0".repeat(64_000_000 - total - statSync(own).size - 3000),
+        SESSION_STORAGE_BYTES - total - statSync(own).size - 3000,
       );
       return "Task: inspect the fixtures. ".padEnd(6000, ".");
     };
