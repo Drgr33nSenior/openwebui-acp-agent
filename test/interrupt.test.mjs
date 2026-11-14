@@ -664,7 +664,7 @@ test(
       const first = c.prompt("/permissions mode development");
       await entered.promise;
       const replacement = c.prompt("/status");
-      await waitFor(() => c.state().pending !== undefined);
+      await waitFor(() => c.state().turns.queued > 0);
       release.resolve();
       assert.equal((await first).stopReason, "cancelled");
       assert.equal((await replacement).stopReason, "end_turn");
@@ -700,7 +700,7 @@ for (const control of ["mode development", "sandbox full_access"]) {
         const first = c.prompt(`/permissions ${control}`);
         await entered.promise;
         const replacement = c.prompt("/status");
-        await waitFor(() => c.state().pending !== undefined);
+        await waitFor(() => c.state().turns.queued > 0);
         release.resolve();
         assert.equal((await first).stopReason, "cancelled");
         assert.equal((await replacement).stopReason, "end_turn");
@@ -737,7 +737,7 @@ test(
       const first = c.prompt("/model alternate");
       await entered.promise;
       const replacement = c.prompt("/status");
-      await waitFor(() => c.state().pending !== undefined);
+      await waitFor(() => c.state().turns.queued > 0);
       assert.equal(modelSignal.aborted, true);
       release.resolve();
       assert.equal((await first).stopReason, "cancelled");
@@ -776,16 +776,523 @@ test(
       const failed = assert.rejects(first);
       await entered.promise;
       const replacement = c.prompt("replacement");
-      await waitFor(() => c.state().pending !== undefined);
+      await waitFor(() => c.state().turns.queued > 0);
       release.resolve();
       await failed;
       assert.equal((await replacement).stopReason, "end_turn");
       assert.equal(c.state().abort, undefined);
-      assert.equal(c.state().running, undefined);
-      assert.equal(c.state().pending, undefined);
+      assert.equal(c.state().turns.busy, false);
+      assert.equal(c.state().turns.queued, 0);
       paired(c.state().messages);
     } finally {
       release.resolve();
+      await c.cancel();
+      await c.close();
+    }
+  },
+);
+
+async function queueMode(c) {
+  const result = await c.connection.agent.request("session/set_config_option", {
+    sessionId: c.id,
+    configId: "prompt_mode",
+    value: "queue",
+  });
+  assert.equal(
+    result.configOptions.find((o) => o.id === "prompt_mode").currentValue,
+    "queue",
+  );
+}
+
+test(
+  "queued prompts finish FIFO after cleanup and see complete prior tool results",
+  { timeout: 10000 },
+  async () => {
+    const c = await client();
+    await queueMode(c);
+    const cleanup = holdCleanup(c);
+    respond = (request, res) => {
+      if (
+        latestUser(request) === "first" &&
+        request.messages.at(-1).role === "user"
+      )
+        return reply(res, null, [
+          call("read_file", { path: "a.txt" }, "first-read"),
+        ]);
+      reply(res, `done ${latestUser(request)}`);
+    };
+    try {
+      const first = c.prompt("first");
+      await cleanup.entered;
+      const second = c.prompt("second");
+      const third = c.prompt("third");
+      await waitFor(() => c.state().turns.queued === 2);
+      assert.equal(c.state().abort.signal.aborted, false);
+      assert.equal(requests.length, 2);
+      assert(!JSON.stringify(c.state().messages).includes("second"));
+      const saved = await readJson(`session-${c.id}.json`);
+      assert(!JSON.stringify(saved).includes("second"));
+      cleanup.release();
+      const results = await Promise.all([first, second, third]);
+      assert.deepEqual(
+        results.map((r) => r.stopReason),
+        ["end_turn", "end_turn", "end_turn"],
+      );
+      assert.deepEqual(requests.map(latestUser), [
+        "first",
+        "first",
+        "second",
+        "third",
+      ]);
+      paired(requests.at(-1).messages);
+      assert(
+        requests
+          .at(-1)
+          .messages.some(
+            (m) => m.tool_call_id === "first-read" && m.content === "original",
+          ),
+      );
+      assert(requests.at(-1).messages.some((m) => m.content === "done second"));
+      assert(
+        !JSON.stringify(c.state().messages).includes(
+          "Previous turn interrupted",
+        ),
+      );
+    } finally {
+      cleanup.release();
+      await c.cancel();
+      await c.close();
+    }
+  },
+);
+
+test(
+  "cancelling a queued request removes only that request without releasing the active barrier",
+  { timeout: 10000 },
+  async () => {
+    const c = await client();
+    await queueMode(c);
+    const cleanup = holdCleanup(c);
+    const controller = new AbortController();
+    try {
+      const first = c.prompt("first");
+      await cleanup.entered;
+      const second = c.prompt("remove this message", {
+        cancellationSignal: controller.signal,
+      });
+      const third = c.prompt("third");
+      await waitFor(() => c.state().turns.queued === 2);
+      controller.abort();
+      assert.equal((await second).stopReason, "cancelled");
+      assert.equal(c.state().turns.queued, 1);
+      assert.equal(requests.length, 1);
+      assert.equal(c.state().abort.signal.aborted, false);
+      cleanup.release();
+      assert.equal((await first).stopReason, "end_turn");
+      assert.equal((await third).stopReason, "end_turn");
+      assert.deepEqual(requests.map(latestUser), ["first", "third"]);
+      assert(
+        !JSON.stringify(c.state().messages).includes("remove this message"),
+      );
+    } finally {
+      controller.abort();
+      cleanup.release();
+      await c.cancel();
+      await c.close();
+    }
+  },
+);
+
+test(
+  "Stop empties the FIFO queue and a new prompt waits for cancelled turn cleanup",
+  { timeout: 10000 },
+  async () => {
+    const c = await client();
+    await queueMode(c);
+    const cleanup = holdCleanup(c);
+    try {
+      const first = c.prompt("first");
+      await cleanup.entered;
+      const second = c.prompt("discard second");
+      const third = c.prompt("discard third");
+      await waitFor(() => c.state().turns.queued === 2);
+      await c.cancel();
+      assert.equal((await second).stopReason, "cancelled");
+      assert.equal((await third).stopReason, "cancelled");
+      const next = c.prompt("after Stop");
+      await waitFor(() => c.state().turns.queued === 1);
+      assert.equal(requests.length, 1);
+      cleanup.release();
+      assert.equal((await first).stopReason, "cancelled");
+      assert.equal((await next).stopReason, "end_turn");
+      assert.deepEqual(requests.map(latestUser), ["first", "after Stop"]);
+      assert(!JSON.stringify(c.state().messages).includes("discard"));
+    } finally {
+      cleanup.release();
+      await c.cancel();
+      await c.close();
+    }
+  },
+);
+
+test(
+  "queue bounds and invalid prompts fail without interrupting or doing workspace work",
+  { timeout: 10000 },
+  async () => {
+    const activation = deferred(),
+      late = deferred();
+    const c = await client({
+      choose: () => {
+        activation.resolve();
+        return late.promise;
+      },
+    });
+    await queueMode(c);
+    try {
+      const first = c.prompt("first");
+      await activation.promise;
+      const waiting = Array.from({ length: 10 }, (_, i) =>
+        c.prompt(`queued ${i}`),
+      );
+      await waitFor(() => c.state().turns.queued === 10);
+      await assert.rejects(c.prompt("overflow"), /Prompt queue is full/);
+      await assert.rejects(c.prompt("x".repeat(100001)), (error) => {
+        assert.match(JSON.stringify(error.data), /Prompt too large/);
+        return true;
+      });
+      assert.equal(c.state().abort.signal.aborted, false);
+      assert.equal(requests.length, 0);
+      assert.equal(c.approvals.length, 1);
+      assert.deepEqual(c.state().messages, []);
+      await c.cancel();
+      for (const result of await Promise.all([first, ...waiting]))
+        assert.equal(result.stopReason, "cancelled");
+      late.resolve("once");
+      await delay(20);
+      assert.equal(
+        requests.length,
+        0,
+        "late activation cannot start a queued prompt",
+      );
+      assert.equal(c.state().turns.queued, 0);
+    } finally {
+      late.resolve("deny");
+      await c.cancel();
+      await c.close();
+    }
+  },
+);
+
+test(
+  "queue controls persist the mode but never restore waiting requests",
+  { timeout: 10000 },
+  async () => {
+    const c = await client();
+    let held;
+    try {
+      assert.equal(c.state().promptMode, "interrupt");
+      await c.prompt("/queue on");
+      assert.equal(c.state().promptMode, "queue");
+      await c.prompt("/queue nope");
+      assert.equal(c.state().promptMode, "queue");
+      await assert.rejects(
+        c.connection.agent.request("session/set_config_option", {
+          sessionId: c.id,
+          configId: "prompt_mode",
+          value: "invented",
+        }),
+        /Unknown incoming prompt mode/,
+      );
+      await c.prompt("/queue");
+      const status = JSON.parse(
+        c.updates.findLast((u) =>
+          u.update.content?.text?.startsWith('{"backend"'),
+        ).update.content.text,
+      );
+      assert.deepEqual(status.promptQueue, {
+        mode: "queue",
+        waiting: 0,
+        limit: 10,
+        stopCancelsWaiting: true,
+      });
+      assert(
+        c.updates.some((u) =>
+          u.update.availableCommands?.some((cmd) => cmd.name === "queue"),
+        ),
+      );
+      assert.equal(requests.length, 0);
+      held = holdCleanup(c);
+      const first = c.prompt("completed before save");
+      await held.entered;
+      const second = c.prompt("never restore this queued request");
+      await waitFor(() => c.state().turns.queued === 1);
+      const saved = await readJson(`session-${c.id}.json`);
+      assert.equal(saved.promptMode, "queue");
+      assert(!JSON.stringify(saved).includes("never restore"));
+      await c.cancel();
+      held.release();
+      assert.equal((await first).stopReason, "cancelled");
+      assert.equal((await second).stopReason, "cancelled");
+      await c.close();
+      const count = requests.length;
+      const restored = await client({ cwd: c.cwd, load: c.id });
+      try {
+        assert.equal(restored.state().promptMode, "queue");
+        assert.equal(restored.state().turns.queued, 0);
+        assert.equal(requests.length, count);
+        await restored.prompt("/queue off");
+        assert.equal(restored.state().promptMode, "interrupt");
+      } finally {
+        await restored.close();
+      }
+    } finally {
+      held?.release();
+      await c.cancel().catch(() => {});
+      await c.close();
+    }
+  },
+);
+
+test(
+  "queued edits request their own approval and preserve history ordering",
+  { timeout: 10000 },
+  async () => {
+    const approvals = deferred(),
+      release = deferred();
+    let edits = 0;
+    const c = await client({
+      choose: (params) => {
+        if (!params.toolCall.title.startsWith("Write ")) return "once";
+        if (++edits === 1) {
+          approvals.resolve();
+          return release.promise;
+        }
+        return "deny";
+      },
+    });
+    await queueMode(c);
+    respond = (request, res) => {
+      if (request.messages.at(-1).role === "tool")
+        return reply(res, "edit result recorded");
+      const first = latestUser(request) === "first";
+      reply(res, null, [
+        call(
+          "write_file",
+          {
+            path: "a.txt",
+            before: first ? "original" : "edited",
+            after: first ? "edited" : "denied edit",
+          },
+          first ? "first-edit" : "second-edit",
+        ),
+      ]);
+    };
+    try {
+      const first = c.prompt("first");
+      await approvals.promise;
+      const second = c.prompt("second");
+      await waitFor(() => c.state().turns.queued === 1);
+      assert.equal(edits, 1);
+      release.resolve("once");
+      assert.equal((await first).stopReason, "end_turn");
+      assert.equal((await second).stopReason, "end_turn");
+      assert.equal(edits, 2);
+      assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "edited");
+      paired(c.state().messages);
+    } finally {
+      release.resolve("deny");
+      await c.cancel();
+      await c.close();
+    }
+  },
+);
+
+test(
+  "queue waits for an owned command and Stop kills it without starting waiting work",
+  { timeout: 10000 },
+  async () => {
+    const started = deferred();
+    let pid,
+      finished = false;
+    const c = await client({
+      runner: async (executable, args, run, signal) => {
+        const result = await command(executable, args, run.root, signal, {
+          timeoutMs: 5000,
+          outputBytes: 10000,
+        });
+        finished = true;
+        return result;
+      },
+    });
+    await queueMode(c);
+    const pidFile = join(c.cwd, "queued-command-pid");
+    respond = (_request, res) => {
+      started.resolve();
+      reply(res, null, [
+        call("run_command", {
+          executable: process.execPath,
+          args: [
+            "-e",
+            `require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`,
+          ],
+        }),
+      ]);
+    };
+    try {
+      const first = c.prompt("run command");
+      await started.promise;
+      await waitFor(async () => {
+        try {
+          pid = Number(await readFile(pidFile, "utf8"));
+          return pid > 0;
+        } catch {
+          return false;
+        }
+      });
+      const second = c.prompt("queued behind command");
+      await waitFor(() => c.state().turns.queued === 1);
+      assert.equal(finished, false);
+      assert.equal(requests.length, 1);
+      await c.cancel();
+      assert.equal((await first).stopReason, "cancelled");
+      assert.equal((await second).stopReason, "cancelled");
+      assert.equal(finished, true);
+      assert.throws(
+        () => process.kill(pid, 0),
+        (e) => e.code === "ESRCH",
+      );
+      assert.equal(requests.length, 1);
+      paired(c.state().messages);
+    } finally {
+      await c.cancel();
+      await c.close();
+    }
+  },
+);
+
+test(
+  "closing the agent cancels active and queued prompts",
+  { timeout: 10000 },
+  async () => {
+    const started = deferred();
+    respond = () => started.resolve();
+    const c = await client();
+    await queueMode(c);
+    try {
+      const first = c.prompt("active");
+      await started.promise;
+      const second = c.prompt("waiting on disconnect");
+      await waitFor(() => c.state().turns.queued === 1);
+      await c.agent.close();
+      assert.equal((await first).stopReason, "cancelled");
+      assert.equal((await second).stopReason, "cancelled");
+      assert.equal(requests.length, 1);
+      assert.equal(c.state().turns.busy, false);
+    } finally {
+      await c.close();
+    }
+  },
+);
+
+test(
+  "queued prompts recheck authentication when their turn starts",
+  { timeout: 10000 },
+  async () => {
+    const c = await client();
+    await queueMode(c);
+    const cleanup = holdCleanup(c);
+    try {
+      const first = c.prompt("first");
+      await cleanup.entered;
+      const second = c.prompt("must not use expired authentication");
+      const rejected = assert.rejects(second, (error) => error.code === -32000);
+      await waitFor(() => c.state().turns.queued === 1);
+      // Model the epoch changing while waiting, without reading or changing credentials.
+      c.state().authEpoch = { stale: true };
+      cleanup.release();
+      await first;
+      await rejected;
+      assert.equal(requests.length, 1);
+      assert.equal(c.state().turns.busy, false);
+    } finally {
+      cleanup.release();
+      await c.cancel();
+      await c.close();
+    }
+  },
+);
+
+test(
+  "another session runs independently and revocation cancels matching queued work",
+  { timeout: 10000 },
+  async () => {
+    const running = deferred();
+    respond = (request, res) =>
+      latestUser(request) === "first"
+        ? running.resolve()
+        : reply(res, "other session done");
+    const c = await client();
+    await queueMode(c);
+    const other = await c.connection.agent.request("session/new", {
+      cwd: c.cwd,
+      mcpServers: [],
+    });
+    const promptOther = (text) =>
+      c.connection.agent.request("session/prompt", {
+        sessionId: other.sessionId,
+        prompt: [{ type: "text", text }],
+      });
+    try {
+      const first = c.prompt("first");
+      await running.promise;
+      const second = c.prompt("must be cancelled on revocation");
+      await waitFor(() => c.state().turns.queued === 1);
+      assert.equal(
+        c.agent.sessions.get(other.sessionId).promptMode,
+        "interrupt",
+      );
+      assert.equal(
+        (await promptOther("other session request")).stopReason,
+        "end_turn",
+      );
+      assert.equal(c.state().abort.signal.aborted, false);
+      assert.equal(
+        (await promptOther("/permissions revoke-tools")).stopReason,
+        "end_turn",
+      );
+      assert.equal((await first).stopReason, "cancelled");
+      assert.equal((await second).stopReason, "cancelled");
+      assert.deepEqual(requests.map(latestUser), [
+        "first",
+        "other session request",
+      ]);
+    } finally {
+      await c.cancel();
+      await c.close();
+    }
+  },
+);
+
+test(
+  "a queued revocation finishes but cancels subsequent prompts in its own session",
+  { timeout: 10000 },
+  async () => {
+    const c = await client();
+    await queueMode(c);
+    const cleanup = holdCleanup(c);
+    try {
+      const first = c.prompt("first");
+      await cleanup.entered;
+      const revoke = c.prompt("/permissions revoke-tools");
+      const later = c.prompt("cancel this after revocation");
+      await waitFor(() => c.state().turns.queued === 2);
+      cleanup.release();
+      assert.equal((await first).stopReason, "end_turn");
+      assert.equal((await revoke).stopReason, "end_turn");
+      assert.equal((await later).stopReason, "cancelled");
+      assert.equal(requests.length, 1);
+    } finally {
+      cleanup.release();
       await c.cancel();
       await c.close();
     }

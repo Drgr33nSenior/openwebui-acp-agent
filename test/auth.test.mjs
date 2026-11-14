@@ -617,6 +617,49 @@ test(
   },
 );
 test(
+  "IDE logout cancels queued prompts without entering another inference",
+  { timeout: 10000 },
+  async () => {
+    await runSetup(ui([url, "fixture-key"]), AbortSignal.timeout(5000));
+    const arrived = Promise.withResolvers();
+    completionHandler = () => arrived.resolve();
+    const c = await connect(modern);
+    try {
+      const { sessionId } = await c.connection.agent.request("session/new", {
+        cwd: workspace,
+        mcpServers: [],
+      });
+      await c.connection.agent.request("session/set_config_option", {
+        sessionId,
+        configId: "prompt_mode",
+        value: "queue",
+      });
+      const prompt = (text) =>
+        c.connection.agent.request("session/prompt", {
+          sessionId,
+          prompt: [{ type: "text", text }],
+        });
+      const first = prompt("active");
+      await arrived.promise;
+      const before = completionRequests;
+      const second = prompt("queued before logout");
+      const deadline = Date.now() + 5000;
+      while (!c.agent.sessions.get(sessionId).turns.queued) {
+        assert(Date.now() < deadline, "queue did not receive the prompt");
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      await prompt("/logout");
+      assert.equal((await first).stopReason, "cancelled");
+      assert.equal((await second).stopReason, "cancelled");
+      assert.equal(completionRequests, before);
+      assert.equal(c.agent.sessions.get(sessionId).turns.queued, 0);
+    } finally {
+      completionHandler = undefined;
+      await c.close();
+    }
+  },
+);
+test(
   "logout cancels an executing command and closes connected MCP clients",
   { timeout: 10000 },
   async () => {
