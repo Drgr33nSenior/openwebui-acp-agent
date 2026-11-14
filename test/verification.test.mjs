@@ -707,6 +707,59 @@ test("failed project checks reach the model and are checked again after its repa
   }
 });
 
+test("edit_file triggers IDE checks and invalidates project checks only for actual changes", async () => {
+  for (const noChange of [false, true]) {
+    let runs = 0;
+    const c = await client({
+      diagnose: async ({ filePath }) =>
+        problemResult(
+          filePath,
+          (await readFile(join(c.cwd, filePath), "utf8")) === "fixed"
+            ? []
+            : [problem()],
+        ),
+      checks: [{ executable: "npm", args: ["test"] }],
+      runner: async () => {
+        runs++;
+        return (await readFile(join(c.cwd, "a.txt"), "utf8")) === "fixed"
+          ? resultString()
+          : resultString(1, "Fixture lint failed");
+      },
+    });
+    let round = 0;
+    respond = (_request, res) => {
+      const n = round++;
+      if (n === 0 || n === 2)
+        return reply(res, null, [
+          tool(
+            "edit_file",
+            {
+              path: "a.txt",
+              old_string: n === 0 ? "original" : "broken",
+              new_string: n === 0 || noChange ? "broken" : "fixed",
+            },
+            `replace-${n}`,
+          ),
+        ]);
+      return reply(res, "Finished.");
+    };
+    try {
+      assert.equal((await c.prompt()).stopReason, "end_turn");
+      assert.equal(runs, noChange ? 1 : 2);
+      assert.equal(c.fixture.calls.length, noChange ? 3 : 2);
+      assert.equal(c.state().checkpoints.length, noChange ? 1 : 2);
+      assert.equal(
+        await readFile(join(c.cwd, "a.txt"), "utf8"),
+        noChange ? "broken" : "fixed",
+      );
+      assert.match(JSON.stringify(c.state().messages), /Fixture lint failed/);
+      paired(c.state().messages);
+    } finally {
+      await c.close();
+    }
+  }
+});
+
 test("approved IDE mutations invalidate cached project checks even if the remote tool reports failure", async () => {
   let runs = 0;
   const c = await client({

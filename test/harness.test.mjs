@@ -5,12 +5,15 @@ import { mkdtemp, realpath, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClientApp } from "@agentclientprotocol/sdk";
+import { z } from "zod";
 import {
   codingInstruction,
   runtimeInstruction,
   coerceToolInput,
   toolFailure,
   PermissionDeclinedError,
+  replyRecoveryHint,
+  parseToolArguments,
 } from "../dist/harness.js";
 
 const temporary = await mkdtemp(join(tmpdir(), "ow-harness-"));
@@ -251,6 +254,151 @@ test("round defaults and bounds remain finite and configurable", () => {
   );
 });
 
+test("edit/output guidance and recovery hints name only available tools", () => {
+  const offered = (...names) => names.map((name) => ({ function: { name } }));
+  const both = runtimeInstruction(
+    offered("write_file", "edit_file"),
+    new Map(),
+    false,
+    4096,
+  );
+  assert.match(both, /4096 output tokens/);
+  assert.match(both, /small skeleton with write_file.*small edit_file calls/);
+  assert.match(both, /unique literal old_string/);
+  assert.match(both, /under 100 lines/);
+  assert.doesNotMatch(
+    runtimeInstruction(offered("write_file"), new Map(), false),
+    /edit_file/,
+  );
+  assert.doesNotMatch(
+    runtimeInstruction(offered("edit_file"), new Map(), false),
+    /write_file/,
+  );
+  assert.equal(runtimeInstruction(offered("read_file"), new Map(), false), "");
+  assert.doesNotMatch(
+    replyRecoveryHint("truncated", true, []),
+    /edit_file|write_file/,
+  );
+  assert.doesNotMatch(
+    toolFailure(new Error("Stale edit proposal"), (s) => s),
+    /edit_file|write_file/,
+  );
+});
+
+test("schema failures name fields and fixes without raw arrays or side effects", async () => {
+  replies = [
+    calls(
+      call("run_command", {
+        executable: "/bin/echo",
+        args: [],
+        additional_read_paths: ["/example"],
+      }),
+    ),
+    calls(
+      call("run_command", {
+        executable: "/bin/sh",
+        args: ["-c", "x".repeat(10001)],
+      }),
+    ),
+    calls(
+      call("run_command", {
+        executable: "/bin/echo",
+        args: [],
+        sandbox_permissions: "require_escalated",
+        justification: "   ",
+      }),
+    ),
+  ];
+  const c = await client();
+  try {
+    await c.prompt();
+    const messages = toolResults(requests.at(-1));
+    assert.match(
+      messages[0],
+      /add justification: one sentence.*extra paths or escalation/,
+    );
+    assert.match(
+      messages[1],
+      /args\[1\].*10000 characters.*edit_file\/write_file/,
+    );
+    assert.match(messages[2], /add justification/);
+    assert(
+      messages.every(
+        (m) =>
+          m.startsWith("Invalid tool arguments:") &&
+          !m.includes('"code":') &&
+          m.length < 500,
+      ),
+    );
+    assert.equal(c.executed.length, 0);
+    assert.equal(c.approvals.length, 1);
+  } finally {
+    await c.close();
+  }
+});
+
+test("argument errors and schema failures after execution have distinct side-effect advice", () => {
+  const schema = z.object({ id: z.number() });
+  let argumentError;
+  try {
+    parseToolArguments(schema, { id: "invalid" });
+  } catch (error) {
+    argumentError = error;
+  }
+  const before = toolFailure(argumentError, (s) => s);
+  assert.match(before, /Invalid tool arguments: id: expected number/);
+  assert.match(before, /Nothing was executed/);
+  const after = toolFailure(
+    schema.safeParse({ id: "invalid" }).error,
+    (s) => s,
+  );
+  assert.match(after, /Validation failed: id: expected number/);
+  assert.match(after, /may already have taken effect/);
+  assert.doesNotMatch(
+    after,
+    /Nothing was executed|Invalid tool arguments|"code":/,
+  );
+});
+
+test("cut-off tool calls re-ask with small-edit advice and never run the partial change", async () => {
+  for (const plan of [false, true]) {
+    requests.length = 0;
+    replies = [
+      (res) =>
+        response(
+          res,
+          calls(
+            call("write_file", {
+              path: "a.txt",
+              before: "original",
+              after: "not executed",
+            }),
+          ),
+          "length",
+        ),
+    ];
+    const c = await client();
+    if (plan) c.state().workflow = "plan";
+    try {
+      await c.prompt();
+      const marker = requests[1].messages.find((m) =>
+        m.content?.startsWith("[Your last reply"),
+      );
+      assert.match(marker.content, /output limit inside a tool call/);
+      if (plan) assert.doesNotMatch(marker.content, /edit_file/);
+      else
+        assert.match(
+          marker.content,
+          /Split the change into smaller edit_file calls/,
+        );
+      assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "original");
+      assert.equal(c.approvals.length, 1);
+    } finally {
+      await c.close();
+    }
+  }
+});
+
 test("system workflow prompt snapshot stays short and model independent", () => {
   assert.equal(
     codingInstruction,
@@ -258,7 +406,7 @@ test("system workflow prompt snapshot stays short and model independent", () => 
 
 Workflow:
 - Inspect relevant files before editing. Prefer targeted reads; never invent file contents.
-- Make minimal changes that address the user's request and preserve unrelated work.
+- Make small, targeted changes that address the user's request and preserve unrelated work. Read before editing; follow the currently available file tools' edit contracts.
 - After changes, run the project's relevant tests or checks. Inspect failures, fix their cause and check again. Report what you actually verified and anything still unresolved.
 - If permission is denied or required access is unavailable, stop that action and ask the user. Do not retry denied actions, bypass restrictions or treat a plan as approval.
 - Before retrying a failed command or other mutation, inspect its result and any partial effects.
@@ -334,7 +482,7 @@ test("specific schema and stale-edit errors reach the model; actual prompt and A
     );
     assert.match(
       toolResults(requests[2]).at(-1),
-      /entire current file.*not a search fragment/,
+      /Prefer a small edit_file change.*unique old_string/,
     );
     assert.match(
       requests[0].tools.find((t) => t.function.name === "write_file").function

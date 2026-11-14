@@ -11,7 +11,10 @@ import {
   coerceToolInput,
   PermissionDeclinedError,
   toolFailure,
+  replyRecoveryHint,
+  parseToolArguments,
 } from "./harness.js";
+import { replaceText } from "./edits.js";
 import { userMcp, mcpOptions } from "./user-mcp.js";
 import { mcpSecrets, ideFileProblemsArguments } from "./ide-mcp.js";
 import {
@@ -67,7 +70,12 @@ import {
   planningInstruction,
 } from "./planning.js";
 import { normalizePrompt } from "./prompt.js";
-import { contextSize, contextUsageSchema, type ContextUsage } from "./usage.js";
+import {
+  contextSize,
+  contextUsageSchema,
+  outputAllowance,
+  type ContextUsage,
+} from "./usage.js";
 import { abortable } from "./cancel.js";
 import { Turns, MAX_QUEUED_PROMPTS, type PromptMode } from "./turns.js";
 import {
@@ -193,6 +201,14 @@ const schemas = {
       after: z.string().max(100000),
     })
     .strict(),
+  edit_file: z
+    .object({
+      path: z.string(),
+      old_string: z.string().min(1).max(100000),
+      new_string: z.string().max(100000),
+      replace_all: z.boolean().default(false),
+    })
+    .strict(),
   run_command: commandSchema,
   list_jobs: z.object({}).strict(),
   poll_job: z
@@ -226,7 +242,9 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
       read_file: "Read a text file",
       search_text: "Search literal project text",
       write_file:
-        "Propose full text replacement. before must be the entire current file, including whitespace and the final newline, not a search fragment; after is the entire replacement. Read first. Use before=null only for creation.",
+        "Create a file with before=null or deliberately rewrite a whole file. before must be the entire current file, including whitespace and the final newline; after is the entire replacement. Read first. Prefer edit_file for changes to existing files. Create large files as a small skeleton, then extend with small edits.",
+      edit_file:
+        "Make a small literal replacement in an existing text file. Read first. old_string must occur exactly once; include enough surrounding lines. replace_all=true explicitly replaces all non-overlapping occurrences. Preserve line endings and trailing newlines. The resulting file must stay within 100,000 characters. Shows a diff and uses the normal approvals and checkpoints.",
       list_jobs:
         "List this session's bounded command jobs; jobs are not restarted on restore",
       poll_job:
@@ -1031,6 +1049,111 @@ export function createAgent(
     if (changed) s.instructionReviewRequired = true;
     return changed;
   };
+  // Both file tools share the complete protection, consent and checkpoint path.
+  const applyFileEdit = async (
+    client: AgentContext,
+    s: Session,
+    proposal:
+      z.infer<typeof schemas.write_file> | z.infer<typeof schemas.edit_file>,
+    signal: AbortSignal,
+    toolId: string,
+    changedFiles: Set<string> | undefined,
+    forceOnce: boolean,
+  ): Promise<string | ToolResult> => {
+    if ((await sandboxMode(s)) === "read_only")
+      throw new SandboxError(
+        "File writes are disabled by the read-only sandbox setting",
+      );
+    await refreshInstructions(client, s, proposal.path, signal);
+    if (s.instructionReviewRequired && !forceOnce)
+      return {
+        failed: true,
+        text:
+          "Project instructions changed or were newly discovered. Read and follow these scoped instructions, then propose the edit again; nothing was written.\n" +
+          instructionContext(s.instructions),
+      };
+    const path = await target(s.root, proposal.path, true);
+    const before = await read(client, s, proposal.path).catch((e) => {
+      if (
+        (e as NodeJS.ErrnoException).code === "ENOENT" &&
+        "before" in proposal &&
+        proposal.before === null
+      )
+        return null;
+      throw e;
+    });
+    let after: string;
+    if ("old_string" in proposal) {
+      if (before === null)
+        throw new Error("edit_file requires an existing file");
+      after = replaceText(
+        before,
+        proposal.old_string,
+        proposal.new_string,
+        proposal.replace_all,
+      );
+    } else {
+      if (before !== proposal.before) throw new Error("Stale edit proposal");
+      after = proposal.after;
+    }
+    if (before === after) return "No change needed";
+    const checkpoint = prepareCheckpoint(
+      s.checkpoints,
+      relative(s.root, path).replaceAll("\\", "/"),
+      before,
+      after,
+      (value) => s.backend.redact(value),
+    );
+    const nextCheckpoints = recordCheckpoint(s.checkpoints, checkpoint);
+    await reserveEditStorage(s, nextCheckpoints);
+    const check = await approve(
+      client,
+      s,
+      `Write ${path}`,
+      signal,
+      false,
+      [{ type: "diff", path, oldText: before, newText: after }],
+      grant(
+        "edit",
+        "workspace-text-edits",
+        "all text edits within this workspace",
+      ),
+      { id: toolId, input: { path } },
+      forceOnce,
+    );
+    await permitted(s, signal);
+    if (
+      !forceOnce &&
+      (await refreshInstructions(client, s, proposal.path, signal))
+    )
+      throw new Error(
+        "Project instructions changed during approval; read the current scoped instructions and propose the edit again. Nothing was written.",
+      );
+    if (caps.fs?.writeTextFile) {
+      const latest = await read(client, s, proposal.path).catch((e) => {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw e;
+      });
+      if (latest !== before)
+        throw new Error("Stale edit: editor changed during approval");
+      await check();
+      await client.request("fs/write_text_file", {
+        sessionId: s.id,
+        path,
+        content: after,
+      });
+    } else {
+      await check();
+      await atomicEdit(s.root, proposal.path, before, after);
+    }
+    changedFiles?.add(path);
+    s.checkpoints = nextCheckpoints;
+    await save(s);
+    return {
+      text: "File updated; checkpoint " + checkpoint.id,
+      content: [{ type: "diff", path, oldText: before, newText: after }],
+    };
+  };
   const undoEdit = async (
     client: AgentContext,
     s: Session,
@@ -1155,7 +1278,7 @@ export function createAgent(
       throw new Error("Invalid tool arguments");
     }
     if (name === "update_plan") {
-      const next = planArgumentsSchema.parse(args).entries;
+      const next = parseToolArguments(planArgumentsSchema, args).entries;
       s.plan = planSchema.parse(
         next.map((entry) => ({
           ...entry,
@@ -1274,7 +1397,7 @@ export function createAgent(
       throw new Error(
         "Unknown tool; model must support caller-executed function calling",
       );
-    const a = schema.parse(args) as any;
+    const a = parseToolArguments(schema as z.ZodType, args) as any;
     if (name === "stop_preview") return s.preview.stop(a.id);
     if (name === "start_preview") {
       if (s.administrator.rules.allowPreviews === false)
@@ -1305,26 +1428,14 @@ export function createAgent(
         ),
       );
     }
-    if (name === "write_file" && (await sandboxMode(s)) === "read_only")
-      throw new SandboxError(
-        "File writes are disabled by the read-only sandbox setting",
-      );
     if (name === "list_jobs") return JSON.stringify(s.jobs.list());
     if (name === "poll_job") return JSON.stringify(s.jobs.poll(a.id, a.offset));
     if (name === "stop_job") return JSON.stringify(await s.jobs.stop(a.id));
     if (name === "list_checkpoints")
       return JSON.stringify(checkpointSummaries(s.checkpoints));
     if (name === "undo_edit") return undoEdit(client, s, a.id, signal, c.id);
-    if (name === "read_file" || name === "write_file") {
+    if (name === "read_file")
       await refreshInstructions(client, s, a.path, signal);
-      if (s.instructionReviewRequired && name === "write_file" && !forceOnce)
-        return {
-          failed: true,
-          text:
-            "Project instructions changed or were newly discovered. Read and follow these scoped instructions, then propose the edit again; nothing was written.\n" +
-            instructionContext(s.instructions),
-        };
-    }
     if (inspectionTools.has(name))
       await update(client, s, {
         sessionUpdate: "tool_call_update",
@@ -1350,65 +1461,8 @@ export function createAgent(
       }
       return hits.join("\n").slice(0, 100000);
     }
-    if (name === "write_file") {
-      const path = await target(s.root, a.path, true);
-      const before = await read(client, s, a.path).catch((e) => {
-        if ((e as NodeJS.ErrnoException).code === "ENOENT" && a.before === null)
-          return null;
-        throw e;
-      });
-      if (before !== a.before) throw new Error("Stale edit proposal");
-      if (before === a.after) return "No change needed";
-      const checkpoint = prepareCheckpoint(
-        s.checkpoints,
-        relative(s.root, path).replaceAll("\\", "/"),
-        before,
-        a.after,
-        (value) => s.backend.redact(value),
-      );
-      const nextCheckpoints = recordCheckpoint(s.checkpoints, checkpoint);
-      await reserveEditStorage(s, nextCheckpoints);
-      const check = await approve(
-        client,
-        s,
-        `Write ${path}`,
-        signal,
-        false,
-        [{ type: "diff", path, oldText: before, newText: a.after }],
-        grant(
-          "edit",
-          "workspace-text-edits",
-          "all text edits within this workspace",
-        ),
-        { id: c.id, input: { path } },
-        forceOnce,
-      );
-      await permitted(s, signal);
-      if (caps.fs?.writeTextFile) {
-        const latest = await read(client, s, a.path).catch((e) => {
-          if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-          throw e;
-        });
-        if (latest !== before)
-          throw new Error("Stale edit: editor changed during approval");
-        await check();
-        await client.request("fs/write_text_file", {
-          sessionId: s.id,
-          path,
-          content: a.after,
-        });
-      } else {
-        await check();
-        await atomicEdit(s.root, a.path, before, a.after);
-      }
-      changedFiles?.add(path);
-      s.checkpoints = nextCheckpoints;
-      await save(s);
-      return {
-        text: "File updated; checkpoint " + checkpoint.id,
-        content: [{ type: "diff", path, oldText: before, newText: a.after }],
-      };
-    }
+    if (name === "write_file" || name === "edit_file")
+      return applyFileEdit(client, s, a, signal, c.id, changedFiles, forceOnce);
     if (name === "run_command") {
       const selectedSandbox = await sandboxMode(s);
       const escalation = a.sandbox_permissions === "require_escalated";
@@ -3057,10 +3111,15 @@ export function createAgent(
               ? [serverTaskDefinition(s.serverCatalog)]
               : []),
           ];
+          const availableTools = tools.map(
+            (t) => (t as { function: { name: string } }).function.name,
+          );
           const runtimeGuidance = runtimeInstruction(
             tools,
             s.mcp.tools,
             s.serverCatalog?.features.includes("web_search") ?? false,
+            outputAllowance(s.metadata.find((m) => m.id === s.config.model)) ??
+              s.config.outputTokenBudget,
           );
           if (runtimeGuidance)
             modelContext.splice(
@@ -3124,6 +3183,7 @@ export function createAgent(
                   throw new ModelReplyError(
                     "malformed",
                     "Tool call arguments are not valid JSON",
+                    true,
                   );
                 }
                 const definition = tools.find(
@@ -3149,7 +3209,17 @@ export function createAgent(
                 partialText = "";
               }
               const reason = s.backend.redact(error.message).slice(0, 300);
-              const note = `[Your last reply was ${error.kind === "truncated" ? "cut off" : "malformed"}: ${reason}. No tool from that reply was executed.${attempt === 0 ? " Reply again with complete text and valid function-call JSON. Prior completed tools must not be repeated." : " Recovery failed; stop and report the remaining work."}]`;
+              const note = `[Your last reply was ${error.kind === "truncated" ? "cut off" : "malformed"}: ${reason}. No tool from that reply was executed.${
+                attempt === 0
+                  ? " " +
+                    replyRecoveryHint(
+                      error.kind,
+                      error.inToolCall,
+                      availableTools,
+                    ) +
+                    " Prior completed tools must not be repeated."
+                  : " Recovery failed; stop and report the remaining work."
+              }]`;
               // Assistant housekeeping must not replace compaction's pinned user request.
               const marker = { role: "assistant", content: note };
               s.messages.push(marker);
@@ -3226,12 +3296,11 @@ export function createAgent(
                 toolCallId: c.id,
                 title: c.function.name,
                 status: "pending",
-                kind:
-                  c.function.name === "write_file"
-                    ? "edit"
-                    : c.function.name === "run_command"
-                      ? "execute"
-                      : "other",
+                kind: ["write_file", "edit_file"].includes(c.function.name)
+                  ? "edit"
+                  : c.function.name === "run_command"
+                    ? "execute"
+                    : "other",
               });
               const remote = s.mcp.tools.get(c.function.name);
               // Failed commands and MCP calls may still have changed files.
@@ -3242,7 +3311,12 @@ export function createAgent(
               )
                 mutationRevision++;
               const outcome = await execute(client, s, c, signal, changedFiles);
-              if (c.function.name === "write_file") mutationRevision++;
+              if (
+                ["write_file", "edit_file"].includes(c.function.name) &&
+                typeof outcome !== "string" &&
+                !outcome.failed
+              )
+                mutationRevision++;
               result = typeof outcome === "string" ? outcome : outcome.text;
               const tally =
                 typeof outcome === "string" || !outcome.failed
@@ -3275,7 +3349,11 @@ export function createAgent(
                 c.function.name,
                 (failed.get(c.function.name) ?? 0) + 1,
               );
-              result = toolFailure(error, (value) => s.backend.redact(value));
+              result = toolFailure(
+                error,
+                (value) => s.backend.redact(value),
+                availableTools,
+              );
               await update(client, s, {
                 sessionUpdate: "tool_call_update",
                 toolCallId: c.id,

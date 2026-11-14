@@ -41,6 +41,7 @@ export class ModelReplyError extends Error {
   constructor(
     readonly kind: "truncated" | "malformed",
     message: string,
+    readonly inToolCall = false,
   ) {
     super(message);
   }
@@ -385,7 +386,11 @@ export class Backend {
         }
         buffer += decoder.decode();
         if (!done && !finish)
-          throw new ModelReplyError("truncated", "Truncated stream");
+          throw new ModelReplyError(
+            "truncated",
+            "Truncated stream",
+            calls.size > 0,
+          );
       } catch (e) {
         await r.body.cancel().catch(() => {});
         throw e;
@@ -404,6 +409,7 @@ export class Backend {
       throw new ModelReplyError(
         "truncated",
         "The model reply was cut off by its output limit",
+        calls.size > 0,
       );
     }
     if (finish === "content_filter")

@@ -55,6 +55,16 @@ arrival order. Every prompt returns its own stop reason. Cancellation closes
 pending permission waits and owned processes. Late replies cannot approve work.
 Completed tool groups and partial text remain paired in history.
 
+`edit_file` derives a full replacement from a unique literal match in current
+text. It then shares `write_file`'s application helper: path and sandbox checks,
+scoped instruction review, checkpoint/storage preflight, full-diff approval,
+stale-content recheck, client filesystem or atomic local write, and persistence.
+Both tools recheck scoped instructions after approval. New or changed instructions
+return to the model before a model-proposed write. The existing explicitly
+approved manual-export path retains its instruction-gate exception.
+Only an actual successful file change adds a verification target and advances
+the file mutation revision. No-op and rejected changes do neither.
+
 ## Open WebUI requests
 
 Core inference uses `GET /api/models` and `POST /api/chat/completions` beneath
@@ -75,6 +85,24 @@ permitted by the declared schema; validation precedes execution. Multiple tool
 calls keep their IDs and paired results across rounds. A malformed/truncated
 reply gets one corrective re-ask before tools execute; HTTP failures and possibly
 completed effects are not automatically retried.
+
+Schema failures return bounded, redacted field-and-fix messages rather than raw
+validation arrays. Permission denial keeps its separate wording and never asks
+the model to retry. Only failures at the argument parser state that nothing
+executed; response/state validation failures warn that effects may have occurred.
+A truncated tool reply is discarded before execution; the
+single re-ask requests smaller `edit_file` calls only when that tool is offered.
+Runtime guidance uses a positive integer `max_output_tokens` from model metadata
+(top level, then `openai`), or the private `outputTokenBudget` fallback of 12,288.
+This is a planning allowance, not a measured output count or a request override.
+No `max_tokens` or equivalent parameter is added to inference requests.
+
+The default remains 40 model rounds, maximum 100, with 64 attempted tool calls
+per turn. Schema failures still consume a round and tool-call allowance. No free
+retry allowance was added: one reply can mix failed validation and completed
+side effects, and the live comparison does not justify changing these limits.
+The existing one-re-ask rule for malformed/truncated replies remains bounded
+within its model round. See the [targeted-edit measurements](edit-verification.md).
 
 The optional Open WebUI task path uses native retained chats and task IDs.
 It requires Open WebUI 0.9.0 or newer, with no upper version limit.
