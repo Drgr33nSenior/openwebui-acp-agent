@@ -212,6 +212,8 @@ const server = createServer(async (req, res) => {
   res.setHeader("Content-Type", "application/json");
   if (req.url === "/api/models")
     return res.end(JSON.stringify({ data: [model] }));
+  // Decoded as a stream: a multi-byte character may span two chunks.
+  req.setEncoding("utf8");
   let raw = "";
   for await (const part of req) raw += part;
   const request = JSON.parse(raw);
