@@ -38,8 +38,19 @@ This proves agent scheduling with an ACP test client and fake inference, plus th
 existing real macOS process-boundary fixtures. It does not establish a native IDE
 queue UI. The earlier PyCharm 2026.3/AI Assistant 263.7307.206 observation still
 applies: the client shows Stop while busy and cannot deliver another prompt until
-stopped. No newer live JetBrains queue test, Linux/Windows run, installation,
-publication or hosted CI was performed for this change.
+stopped. No newer live JetBrains queue test or Linux/Windows run was performed
+locally for this change. Hosted CI is tracked on PR #11.
+
+After owner authorization, commit `0cbbb30` was packed and installed into a new
+versioned preview directory. The installed package passed its clean ACP v1
+handshake, terminal authentication/logout discovery and real sandbox command
+checks from outside the source checkout. Built JavaScript matched the source
+build, and the isolated fallback state remained empty. Only the existing
+**Open WebUI (Preview)** launch reference was changed; unrelated ACP entries,
+application settings, credentials and sessions were preserved. The previous
+installation and rollback launch record remain available. PyCharm was rechecked
+as 2026.3 build 263.7307.206. A new agent connection is required to use this build;
+interactive queue acceptance remains pending. No npm package was published.
 
 ## Browser schema compatibility (unreleased)
 
