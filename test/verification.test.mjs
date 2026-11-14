@@ -578,15 +578,101 @@ test(
   },
 );
 
-test("an edit without a connected IDE bridge skips diagnostics silently", async () => {
+test("an edit without a connected IDE bridge says IDE checks did not run", async () => {
   const c = await client({ ide: false });
   let round = 0;
   respond = (_request, res) =>
     round++ === 0 ? reply(res, null, [edit("changed")]) : reply(res, "Done.");
   try {
     assert.equal((await c.prompt()).stopReason, "end_turn");
-    assert.equal(requests.length, 2);
-    assert(!/diagnostic|verification/i.test(displayed(c)));
+    assert.equal(requests.length, 2, "no repair round is started");
+    assert.match(displayed(c), /Verification incomplete/);
+    assert.match(displayed(c), /no IntelliJ MCP server/);
+  } finally {
+    await c.close();
+  }
+});
+
+test("project checks still run, with an IDE-absent note, when the bridge is missing", async () => {
+  const c = await client({
+    ide: false,
+    checks: [{ executable: "npm", args: ["test"] }],
+  });
+  let round = 0;
+  respond = (_request, res) =>
+    round++ === 0 ? reply(res, null, [edit("changed")]) : reply(res, "Done.");
+  try {
+    assert.equal((await c.prompt()).stopReason, "end_turn");
+    assert.match(displayed(c), /Verification passed/);
+    assert.match(displayed(c), /no IntelliJ MCP server/);
+  } finally {
+    await c.close();
+  }
+});
+
+test("a failing IDE diagnostic tool falls back to project checks and is reported", async () => {
+  const c = await client({
+    diagnose: () => {
+      throw new Error("synthetic IDE failure");
+    },
+    checks: [{ executable: "npm", args: ["test"] }],
+  });
+  let round = 0;
+  respond = (_request, res) =>
+    round++ === 0 ? reply(res, null, [edit("changed")]) : reply(res, "Done.");
+  try {
+    assert.equal((await c.prompt()).stopReason, "end_turn");
+    assert.match(displayed(c), /Verification incomplete/);
+    assert.match(displayed(c), /IDE diagnostics unavailable or malformed/);
+    assert.match(displayed(c), /Project check 1: passed/);
+  } finally {
+    await c.close();
+  }
+});
+
+test("a hanging IDE diagnostic is abandoned after the configured timeout", async () => {
+  const c = await client({
+    verify: { ideTimeoutMs: 1000, maxFixRounds: 0 },
+    diagnose: () => new Promise(() => {}),
+  });
+  let round = 0;
+  respond = (_request, res) =>
+    round++ === 0 ? reply(res, null, [edit("changed")]) : reply(res, "Done.");
+  try {
+    assert.equal((await c.prompt()).stopReason, "end_turn");
+    assert.equal(c.fixture.calls[0].timeout, 1000);
+    assert.match(displayed(c), /Verification incomplete/);
+    paired(c.state().messages);
+  } finally {
+    await c.close();
+  }
+});
+
+test("maxDiagnostics bounds problems across files and says how many were omitted", async () => {
+  const c = await client({
+    verify: { maxDiagnostics: 3, maxFixRounds: 0 },
+    diagnose: ({ filePath }) =>
+      problemResult(
+        filePath,
+        Array.from({ length: 5 }, (_, i) => problem(`${filePath} issue ${i}`)),
+      ),
+  });
+  let round = 0;
+  respond = (_request, res) =>
+    round++ === 0
+      ? reply(res, null, [edit("a"), edit("b", null, "b.txt", "b")])
+      : reply(res, "Done.");
+  try {
+    assert.equal((await c.prompt()).stopReason, "end_turn");
+    const shown = displayed(c);
+    const tools = c
+      .state()
+      .messages.filter((m) => m.role === "tool")
+      .map((m) => m.content)
+      .join("\n");
+    assert.equal(tools.match(/ERROR \S+ issue/g)?.length, 3);
+    assert.match(tools, /2 more IDE problems omitted \(limit 3\)/);
+    assert.match(shown, /remaining problems/);
   } finally {
     await c.close();
   }

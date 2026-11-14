@@ -24,6 +24,9 @@ export const verificationSchema = z
     includeWarnings: z.boolean().default(false),
     maxFiles: z.number().int().min(1).max(10).default(10),
     maxOutputChars: z.number().int().min(1000).max(16000).default(8000),
+    // IDE diagnostics bounds: per-file wait and total reported problems.
+    ideTimeoutMs: z.number().int().min(1000).max(30000).default(10000),
+    maxDiagnostics: z.number().int().min(1).max(500).default(50),
     projects: z
       .array(
         z
@@ -60,6 +63,8 @@ export type VerificationResult = {
   text: string;
   failures: boolean;
   unavailable: boolean;
+  // Number of IDE problems reported in `text` (IDE diagnostics only).
+  reported?: number;
 };
 export const unavailableVerification = (
   message: string,
@@ -99,11 +104,15 @@ const problemsSchema = z.object({
     .max(2000),
   timedOut: z.boolean().nullable().optional(),
 });
+export const IDE_DIAGNOSTICS_ABSENT =
+  "IDE diagnostics unavailable: no IntelliJ MCP server (get_file_problems) is connected to this session; edited files were not checked by the IDE.";
 export function fileProblemsResult(
   raw: string,
   root: string,
   path: string,
   settings: VerificationSettings,
+  // Remaining problem budget shared by all files in one verification pass.
+  budget = settings.maxDiagnostics,
 ): VerificationResult {
   const label = oneLine(relative(root, path));
   const unavailable = () =>
@@ -153,6 +162,14 @@ export function fileProblemsResult(
       );
     }
     const failures = lines.length > 0;
+    const allowed = Math.max(0, budget);
+    const omitted = Math.max(0, lines.length - allowed);
+    const reported = lines.length - omitted;
+    lines.splice(allowed);
+    if (omitted)
+      lines.push(
+        `${label}: ${omitted} more IDE problems omitted (limit ${settings.maxDiagnostics}).`,
+      );
     if (parsed.timedOut || unknown)
       lines.push(
         `${label}: IDE analysis incomplete; no clean result established.`,
@@ -164,6 +181,7 @@ export function fileProblemsResult(
       ),
       failures,
       unavailable: parsed.timedOut === true || unknown,
+      reported,
     };
   } catch {
     return unavailable();

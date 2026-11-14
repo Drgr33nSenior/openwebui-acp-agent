@@ -12,6 +12,10 @@
   (default 12,288), to discourage oversized replies. Truncated tool replies get
   one re-ask for smaller changes. Server limits and default round limits are unchanged.
 - Recheck scoped project instructions after file approval, before writing.
+- Verification reports when the IntelliJ MCP server is absent instead of skipping
+  silently, adds `verify.ideTimeoutMs` (enforced client-side) and
+  `verify.maxDiagnostics`, and documents enabling the server for the agent in
+  [IDE diagnostics](../ide-diagnostics.md). No new permissions.
 
 See [verification](../verification.md) and the
 [live comparison](../edit-verification.md). These changes are not in 0.5.0.
