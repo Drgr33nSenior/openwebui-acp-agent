@@ -74,8 +74,10 @@ manual fallback. Browser sign-in and OAuth are not implemented. See
 
 ## Working with the agent
 
-- **Code and Plan:** inspect a project first, or let the agent propose diffs and
-  apply approved edits. Editor filesystem integration preserves unsaved content
+- **Ask, Plan and Code:** the Mode selector answers questions read-only (Ask),
+  inspects and plans without changes (Plan), or proposes diffs and applies
+  approved edits (Code). Ask and Plan only narrow the Permissions setting; see
+  [session modes](docs/sessions.md#session-modes). Editor filesystem integration preserves unsaved content
   where the client supports it. Stale edits are rejected.
 - **Checks after edits:** the connected JetBrains bridge supplies file problems.
   Optional project test commands run in the command sandbox. Errors return to
@@ -89,7 +91,8 @@ manual fallback. Browser sign-in and OAuth are not implemented. See
 - **Context:** model-reported usage feeds the IDE context indicator. Automatic
   compaction preserves the original transcript; `/compact` is also available.
 - **Model controls:** model and reasoning selectors use Open WebUI metadata.
-  **Model default** sends no reasoning override.
+  The reasoning selector starts on the server's declared default level; without
+  one, **Model default** sends no reasoning override.
 - **Tools:** connect MCP servers for IDE features, search, retrieval or memory.
   Optional Open WebUI-managed tasks and a browser container have separate
   configuration and approvals.

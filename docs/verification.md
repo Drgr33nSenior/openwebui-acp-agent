@@ -188,6 +188,30 @@ edit and one malformed command. This small sample does not establish a general
 efficiency improvement. The default 40 rounds and 64-call budget are unchanged;
 schema failures still count toward both.
 
+## Session modes, model controls and ACP v2 readiness (unreleased)
+
+`test/session-modes.test.mjs` covers the Ask/Plan/Code mapping, administrator
+mode limits, v1 `session/set_mode` and `current_mode_update`, slash commands,
+per-session persistence and restore, model display names and declared reasoning
+defaults. Ask and Plan tests start from the development permission mode, then
+send `write_file`, `edit_file` and `run_command` calls. No file changes, command
+or operation approval occurs, and the request omits those tools. Returning to
+Code does not restore development or YOLO. A v2-shaped `initialize` receives
+protocol version 1. File edits then use local atomic writes and commands use the
+owned runner; no client `fs/*` or `terminal/*` request is made.
+
+On macOS 27.0 with Node 26.11.1, `npm ci --ignore-scripts`, lint, typecheck,
+Prettier, build and `npm test` passed: **412 tests, 406 passed, six platform
+skips, zero failures**. `npm pack`, installation into a fresh temporary prefix
+and `test/package-install.mjs` passed. Checkout and installed production audits
+found zero vulnerabilities. Real sandbox tests ran with the required host
+permissions and isolated application state.
+
+The reasoning fixture uses the `provider_model_controls.reasoning_effort` shape
+with Off, low, medium and Max levels and a declared default. No live Open WebUI,
+JetBrains or Zed session was run. Selector rendering, `session/set_mode` use by a real
+client and provider reasoning effects remain unverified.
+
 ## Compatibility
 
 | Component                            | Scope                                                                                                |
