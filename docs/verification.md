@@ -27,7 +27,7 @@ public release, first download the `.tgz` and verify it against `SHA256SUMS` fro
 GitHub Releases:
 
 ```sh
-npm install --prefix /path/to/isolated-install --ignore-scripts ./openwebui-acp-agent-0.4.1.tgz
+npm install --prefix /path/to/isolated-install --ignore-scripts ./openwebui-acp-agent-0.5.0.tgz
 npm audit --prefix /path/to/isolated-install --omit=dev --audit-level=high
 node test/package-install.mjs /path/to/isolated-install
 ```
@@ -68,7 +68,7 @@ skips and no failures. `npm pack` and the isolated installed-package check passe
 including discovery with a synthetic future version. Documentation audits found
 no issues.
 
-## Runtime verification guidance (unreleased)
+## Runtime verification guidance (0.5.0)
 
 The harness refreshes entrypoint, failure-case, background-job, browser and
 documentation guidance from each request's filtered tools. Tests cover absent
@@ -99,7 +99,7 @@ locally. At that revision the macOS sandbox blocked a dev-server listener, so
 browser play-through was unverified. The static preview follow-up below covers
 the missing hosting path without changing command socket permissions.
 
-## Approved static preview (unreleased)
+## Approved static preview (0.5.0)
 
 `start_preview` serves only approved frontend files from an immutable snapshot;
 `stop_preview`, turn completion, cancellation and expiry close the listener.
@@ -135,6 +135,21 @@ Two signed-in live model attempts failed before coding with HTTP 503
 acceptance remain unverified. These tests ran on macOS; they do not establish
 Linux container routing or Windows support. See the
 [follow-up results](runtime-verification-results.md#static-preview-follow-up).
+
+## 0.5.0 release candidate
+
+On macOS 27.0 with Node 26.11.1, `npm ci --ignore-scripts`, lint, typecheck,
+Prettier, build and `npm test` passed: 382 tests passed, six platform skips and
+zero failures. The 0.5.0 tarball installed into a fresh temporary prefix and
+passed ACP/auth discovery, preview startup/fetch/shutdown and real command
+isolation. Both production dependency audits reported zero vulnerabilities.
+Package inspection included the preview module and release notes, with no
+application state or credential files.
+
+The merged feature revision `60ae33cc` also passed CI on macOS, Ubuntu 24.04 and
+26.04, the browser container, the dependency audit and Windows rejection checks.
+The Windows check does not establish native Windows support. Publication and
+public-download verification are separate results in the GitHub release workflow.
 
 ## Compatibility
 

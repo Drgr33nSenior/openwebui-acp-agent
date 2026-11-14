@@ -18,7 +18,7 @@ supported; see the [Windows plan](docs/windows-plan.md) for a later version.
 Linux needs bubblewrap, socat and ripgrep for command isolation.
 
 ```sh
-npm install --global https://github.com/Drgr33nSenior/openwebui-acp-agent/releases/download/v0.4.1/openwebui-acp-agent-0.4.1.tgz
+npm install --global https://github.com/Drgr33nSenior/openwebui-acp-agent/releases/download/v0.5.0/openwebui-acp-agent-0.5.0.tgz
 ```
 
 In your ACP client's custom-agent settings, use an absolute Node executable and
@@ -41,7 +41,7 @@ JetBrains registration has this form; preserve your other entries:
 }
 ```
 
-`npm root --global` shows the global `node_modules` directory. This release is distributed through [GitHub Releases](https://github.com/Drgr33nSenior/openwebui-acp-agent/releases/tag/v0.4.1); no npm account is needed.
+`npm root --global` shows the global `node_modules` directory. This release is distributed through [GitHub Releases](https://github.com/Drgr33nSenior/openwebui-acp-agent/releases/tag/v0.5.0); no npm account is needed.
 The [ACP registry manifest](registry/agent.json) is a proposal for future catalog
 distribution. Its npm target is not published, and it is not an installable
 catalog entry for this release. This project does not ship a JetBrains
@@ -93,7 +93,7 @@ manual fallback. Browser sign-in and OAuth are not implemented. See
 - **Tools:** connect MCP servers for IDE features, search, retrieval or memory.
   Optional Open WebUI-managed tasks and a browser container have separate
   configuration and approvals.
-- **Static previews (unreleased):** source builds can serve approved frontend
+- **Static previews:** serve approved frontend
   files to the browser for interaction checks, then close the preview. This
   supports static pages and built output; it does not run framework servers or
   backend APIs. See [preview setup and limits](docs/browser.md#starting-an-application-for-browser-checks).

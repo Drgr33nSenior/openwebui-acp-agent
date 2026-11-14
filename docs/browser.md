@@ -128,8 +128,8 @@ host routing or native Windows support.
 
 ### Starting an application for browser checks
 
-Source builds include `start_preview` and `stop_preview` for static HTML/CSS/JS
-and built frontend output. These tools are not in the published 0.4.1 package.
+Version 0.5.0 includes `start_preview` and `stop_preview` for static HTML/CSS/JS
+and built frontend output.
 Ask the agent to preview the application and exercise its main interactions.
 With browser MCP connected, it can create a preview, navigate, click controls,
 check accessibility snapshots, and stop the preview in the same turn.
