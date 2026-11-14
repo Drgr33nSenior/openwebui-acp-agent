@@ -4,10 +4,20 @@ import {
   compactionStateSchema,
   contextMessages,
   compactHistory,
+  compactionFailure,
   shouldAutoCompact,
+  summaryReasoning,
+  summaryRequest,
   PROJECT_GUIDANCE_PREFIX,
 } from "../dist/compaction.js";
-import { MAX, OUTPUT_LIMIT_NOTICE } from "../dist/backend.js";
+import {
+  BackendHttpError,
+  MAX,
+  ModelReplyError,
+  OUTPUT_LIMIT_CUTOFF,
+  OUTPUT_LIMIT_NOTICE,
+} from "../dist/backend.js";
+import { reasoningChoices } from "../dist/reasoning.js";
 
 const fresh = () => compactionStateSchema.parse({});
 const signal = () => AbortSignal.timeout(10000);
@@ -317,7 +327,9 @@ test("summary requests are bounded and never silently drop an oversized group", 
       },
       signal(),
     ),
-    /did not reduce/,
+    (error) =>
+      /did not reduce/.test(error.message) &&
+      compactionFailure(error) === "the summary did not reduce the context",
   );
   assert(JSON.stringify(input).length <= MAX);
   assert(!JSON.parse(input[1].content).history.some((m) => m.tool_calls));
@@ -358,5 +370,192 @@ test("automatic thresholds use reported usage or serialized size, and respect th
   assert.equal(
     shouldAutoCompact([user("new session")], state, { used: 900, size: 1000 }),
     false,
+  );
+});
+
+test("summary requests use fixed low reasoning, a capped reply and room for it in the window", () => {
+  // Ranked by the reasoning_effort levels, not declaration order or default.
+  const efforts = reasoningChoices({
+    provider_model_controls: {
+      reasoning_effort: {
+        default: "xhigh",
+        options: { xhigh: {}, none: {}, medium: {}, low: {}, high: {} },
+      },
+    },
+  });
+  assert.deepEqual(summaryReasoning("m", efforts), { reasoning_effort: "low" });
+  assert.deepEqual(
+    summaryReasoning(
+      "m",
+      reasoningChoices({
+        provider_model_controls: {
+          reasoning_effort: { options: { minimal: {}, low: {}, none: {} } },
+        },
+      }),
+    ),
+    { reasoning_effort: "minimal" },
+  );
+  // Levels without a known order fall back to the server's declared default.
+  assert.deepEqual(
+    summaryReasoning(
+      "m",
+      reasoningChoices({
+        provider_model_controls: {
+          reasoning_effort: {
+            default: "quick",
+            options: { deep: {}, quick: {} },
+          },
+        },
+      }),
+    ),
+    { reasoning_effort: "quick" },
+  );
+  assert.deepEqual(
+    summaryReasoning(
+      "m",
+      reasoningChoices({
+        info: {
+          params: {
+            model_controls: {
+              thinking: { default: "quick", options: { deep: {}, quick: {} } },
+            },
+          },
+        },
+      }),
+    ),
+    { params: { model_controls: { m: { thinking: "quick" } } } },
+  );
+  assert.deepEqual(summaryReasoning("m", reasoningChoices({})), {});
+
+  // The owner's reported window: 100,768 tokens, no advertised output limit.
+  const owner = summaryRequest(
+    "m",
+    { context_window: 100768 },
+    12288,
+    efforts,
+    4,
+  );
+  assert.deepEqual(owner.extra, { reasoning_effort: "low", max_tokens: 6000 });
+  assert.equal(owner.summaryChars, 12000);
+  assert.equal(owner.maxInputChars, Math.floor((100768 - 12288) * 4 * 0.9));
+  assert(owner.maxInputChars / 4 + owner.maxTokens <= 100768);
+  // A smaller advertised allowance lowers the cap and the requested length.
+  const small = summaryRequest(
+    "m",
+    { context_window: 100768, max_output_tokens: 3000 },
+    12288,
+    [],
+    4,
+  );
+  assert.deepEqual(small.extra, { max_tokens: 3000 });
+  assert.equal(small.summaryChars, 6000);
+  // An input limit equal to the window still leaves room for the capped reply.
+  assert.equal(
+    summaryRequest(
+      "m",
+      { context_window: 10000, max_input_tokens: 10000 },
+      12288,
+      [],
+      2,
+    ).maxInputChars,
+    Math.floor((10000 - 6000) * 2 * 0.9),
+  );
+  assert.equal(
+    summaryRequest("m", { id: "m" }, 12288, [], undefined).maxInputChars,
+    undefined,
+  );
+});
+
+test("a cut-off or overlong summary is retried once over fewer older messages", async () => {
+  const historyLength = (input) => JSON.parse(input[1].content).history.length;
+  const cutOff = async () => {
+    throw new ModelReplyError("truncated", OUTPUT_LIMIT_CUTOFF);
+  };
+  for (const first of [cutOff, async () => response("x".repeat(16001))]) {
+    const inputs = [];
+    const next = await compactHistory(
+      history(),
+      fresh(),
+      async (input) => {
+        inputs.push(input);
+        return inputs.length === 1 ? first() : response();
+      },
+      signal(),
+    );
+    assert.equal(inputs.length, 2);
+    assert(JSON.stringify(inputs[1]).length < JSON.stringify(inputs[0]).length);
+    assert(historyLength(inputs[1]) < historyLength(inputs[0]));
+    assert.equal(next.count, 1);
+    // The checkpoint falls on a complete group boundary.
+    assert(next.through > 0 && contextMessages(history(), next).length > 0);
+  }
+  // The retry is the only one: a second cut-off fails with that reason.
+  let calls = 0;
+  await assert.rejects(
+    compactHistory(
+      history(),
+      fresh(),
+      async () => {
+        calls++;
+        return cutOff();
+      },
+      signal(),
+    ),
+    (error) =>
+      compactionFailure(error) ===
+      "the summary was cut off at the output limit",
+  );
+  assert.equal(calls, 2);
+  // Other failures are not retried.
+  for (const [value, reason] of [
+    [response(""), "the summary was empty"],
+    [
+      { ...response(), tool_calls: group("bad")[0].tool_calls },
+      "the summary reply contained tool calls",
+    ],
+  ]) {
+    calls = 0;
+    await assert.rejects(
+      compactHistory(
+        history(),
+        fresh(),
+        async () => {
+          calls++;
+          return value;
+        },
+        signal(),
+      ),
+      (error) => compactionFailure(error) === reason,
+    );
+    assert.equal(calls, 1);
+  }
+});
+
+test("compaction failure reasons name the cause without reply content", () => {
+  assert.equal(
+    compactionFailure(new BackendHttpError(500, "Backend failed (HTTP 500)")),
+    "the summary request was refused (HTTP 500)",
+  );
+  assert.equal(
+    compactionFailure(
+      new BackendHttpError(400, "Backend failed (HTTP 400): context_too_long"),
+    ),
+    "the summary request was refused (HTTP 400: context_too_long)",
+  );
+  assert.equal(
+    compactionFailure(new BackendHttpError(429, "Rate limited; try later")),
+    "the summary request was refused (HTTP 429: Rate limited; try later)",
+  );
+  assert.equal(
+    compactionFailure(new ModelReplyError("truncated", "Truncated stream")),
+    "the summary reply ended before it finished",
+  );
+  assert.equal(
+    compactionFailure(new ModelReplyError("malformed", "Malformed completion")),
+    "the summary reply was malformed",
+  );
+  assert.equal(
+    compactionFailure(new Error("The model stream stalled for 300 s")),
+    "The model stream stalled for 300 s",
   );
 });

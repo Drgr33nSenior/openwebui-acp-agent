@@ -322,6 +322,49 @@ skips, zero failures**. `npm pack`, installation into a fresh temporary prefix
 and `test/package-install.mjs` passed. Checkout and installed production audits
 found zero vulnerabilities. No live Open WebUI or IDE session was run; how a
 client renders the notice and replayed markers is unverified.
+## Compaction summary requests (unreleased)
+
+`test/auto-compaction.test.mjs` sets the session to `xhigh` with levels declared
+out of order. The summary request carries `low` and `max_tokens` 6,000, and the
+coding requests carry `xhigh` with no cap. Its input plus the cap fits the
+window. A summary cut off once by `finish_reason: "length"` is retried over fewer
+older messages and then succeeds. Notices name each failure without quoting the
+reply: HTTP refusal, empty, cut off after the retry, over 16,000 characters.
+Manual `/compact` uses the same request, with a 3,000-token advertised allowance
+lowering the cap and requested length. It reports an empty summary and a save
+refused by the transcript quota. Unit tests cover effort ranking and fallbacks,
+cap and input sizing for a 100,768-token window, the single retry, unretried
+failures and reason texts.
+
+On macOS 27.0 with Node 26.11.1, `npm ci --ignore-scripts`, lint, typecheck,
+Prettier, build and `npm test` passed: **456 tests, 450 passed, six platform
+skips, zero failures**. `npm pack`, installation into a fresh prefix and
+`test/package-install.mjs` passed. Checkout and installed production audits
+found zero vulnerabilities. No live Open WebUI or IDE session was run: whether
+the gateway honours `max_tokens` and `low` for summaries, and the summary quality
+at that level, are unverified.
+## YOLO in the Mode selector (unreleased)
+
+JetBrains reported "Mode: yolo (the agent rejected the value)" on new sessions
+after PR #21 moved ACP category `mode` from Permissions to the new Mode
+selector. The cause is inferred from that message and JetBrains' per-category
+memory of the last choice; the exact replay request (`session/set_config_option`
+or `session/set_mode`) was not captured, so tests cover both.
+
+Fake-backend tests replay `yolo` through both requests. Each is accepted, shows
+YOLO in both views and approves nothing. The next prompt asks for confirmation
+before any model request or command; declining leaves YOLO, and accepting runs
+the command unsandboxed. Other tests cover the other Permissions IDs, rejection
+of unknown values, administrator rules that hide and refuse YOLO, and leaving
+YOLO through Code and Plan. Three PR #21 assertions changed only because YOLO is
+now a mode: the mode lists, `/status` modes and the helper results.
+
+On macOS 27.0 with Node 26.11.1, `npm ci`, lint, typecheck, build, Prettier and
+`npm test` passed: **449 tests passed, six platform skips, zero failures**.
+`npm pack` and installation outside the checkout passed, including the installed
+ACP handshake and sandbox command. Both checkout and installed production audits
+found zero vulnerabilities. No live Open WebUI or JetBrains session was run, so
+JetBrains rendering of the fourth mode and removal of the warning are unverified.
 
 ## Compatibility
 

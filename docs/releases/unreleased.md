@@ -32,6 +32,15 @@
   fallback.
 - Return the same modes through ACP v1 `modes`, `session/set_mode` and
   `current_mode_update` for clients without session config options.
+- Add **YOLO** to the Mode selector. It selects the existing YOLO permission
+  mode with the Code workflow and still asks for confirmation at the next
+  workspace prompt. It is hidden and refused when administrator rules disallow
+  YOLO or full access. Choosing Code from YOLO exits it. The Mode selector and
+  `session/set_mode` also accept Permissions IDs from earlier releases, which
+  JetBrains replays onto new sessions: `yolo` selects YOLO, `read_only` Ask, and
+  `scoped`, `edits` or `development` Code with that mode. This fixes the
+  JetBrains warning "Mode: yolo (the agent rejected the value)" and the silent
+  loss of the YOLO choice. Unknown values are rejected as invalid parameters.
 - Start the reasoning selector on the server's declared default level and send
   it explicitly. **Model default** remains only when no default is declared.
   Levels keep the server's order; Off appears only when declared.
