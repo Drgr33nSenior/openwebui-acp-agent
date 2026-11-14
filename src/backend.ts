@@ -277,7 +277,9 @@ export class Backend {
     };
     const calls = new Map<number, Call>();
     let finish: string | undefined;
-    let used: number | undefined, prompt: number | undefined;
+    let usage: unknown, prompt: number | undefined;
+    // Reasoning characters received; never output, never counted in limits.
+    let thought = 0;
     let produced = 0;
     const count = (value: string) => {
       produced += value.length;
@@ -294,9 +296,8 @@ export class Backend {
               ? ": " + this.redact(x.error.message).slice(0, 200)
               : "; check context size and function-calling support"),
         );
-      const reported = completionContextTokens(x.usage);
-      if (reported !== undefined) {
-        used = reported;
+      if (completionContextTokens(x.usage) !== undefined) {
+        usage = x.usage;
         prompt = promptContextTokens(x.usage);
       }
       if (Array.isArray(x.choices) && x.choices.length === 0 && x.usage) return;
@@ -317,6 +318,8 @@ export class Backend {
         choice.finish_reason
       )
         active();
+      const reasoning = d.reasoning_content ?? d.reasoning;
+      if (typeof reasoning === "string") thought += reasoning.length;
       if (d.content != null) {
         if (typeof d.content !== "string")
           throw new ModelReplyError("malformed", "Malformed text");
@@ -408,6 +411,8 @@ export class Backend {
       await consume(parseCompletion(await bounded(r, signal, MAX)), false);
     }
     signal.throwIfAborted();
+    // Measured once the reply is complete, so the reasoning share is final.
+    const used = completionContextTokens(usage, produced, thought);
     if (used !== undefined) await onUsage?.(used, prompt);
     if (finish === "length") {
       // The coding loop may ask again once; never return a cut-short tool call.

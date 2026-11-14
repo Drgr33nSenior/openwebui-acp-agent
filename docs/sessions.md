@@ -105,18 +105,68 @@ models refreshes choices and selects the new model's default. Restoration keeps
 a still-supported choice and otherwise uses the declared default. Metadata and HTTP
 acceptance alone do not establish that a provider applies the selected control.
 
-The context indicator uses latest-call prompt and completion tokens with the
-advertised full context window, falling back to the input budget. It does not
-sum billing totals or estimate missing counts. Client rendering can retain an
-old value until the next usage update.
+The context indicator uses the latest call's prompt tokens plus its visible
+reply (text and tool calls) with the advertised full context window, falling
+back to the input budget. Reasoning is left out: it is generated once and never
+sent back, so it does not occupy the next request. The server's
+`completion_tokens_details.reasoning_tokens` is used when reported; otherwise
+the completion count is split by the characters received as reasoning and as
+visible output. It does not sum billing totals or estimate missing counts.
+Client rendering can retain an old value until the next usage update.
 
-Compaction summarizes older completed history while keeping the original
+At the `xhigh` reasoning effort the agent sends `max_tokens` itself: 32,768, or
+the advertised `max_output_tokens` when larger, and never more than half the
+advertised `context_window`. A server that leaves that level uncapped would
+otherwise let one reply think until the window is full. The same amount is
+reserved when requests are sized. Other levels send no `max_tokens`, and a
+model without an advertised `context_window` gets none. 32,768 is a fixed
+figure, not a measured percentile of reply sizes.
+
+### Clearing older tool results
+
+Before compaction, the agent clears older tool results from what the model is
+sent. The saved transcript keeps them. When the next request is estimated at
+55% of the usable input, one batch runs:
+
+1. Arguments of recorded `write_file` and `edit_file` calls outside the kept
+   tail are elided: `before`, `after`, `content`, `old_string` and `new_string`
+   values over 200 characters become
+   `[elided from context: N chars; read the file for its current content]`.
+   The call, its path and its result (with the checkpoint ID) stay. A read that
+   was repeated later with the same arguments is cleared.
+2. Tool results are then cleared oldest first until the request is at about 30%:
+   `[cleared from context: <tool> <arguments> returned N chars; re-run to see it again]`.
+   Every call, its ID and its success or failure remain.
+
+Never cleared: user and assistant messages; results of 600 characters or less;
+failed or declined results up to 2,000 characters; the most recent tool results
+(the latest two tool groups, and further back up to the lesser of 40,000 tokens
+and 15% of the usable input); and the latest read of a file whose applied edit
+is still in the uncleared part of the context. A batch that would reclaim less
+than the lesser of 20,000 tokens and 10% of the usable input is skipped.
+
+The boundary is saved with the session. Between batches the masked prompt does
+not change, so a server prefix cache keeps working from round to round and
+after a restart; each batch costs one full prompt evaluation. Masking needs the
+model's advertised limits and one reported prompt count, like the pre-request
+size check. `/doctor` output lists the boundary as `contextMask`. A write whose
+argument is one of these placeholders is refused.
+
+The task plan is not placed ahead of the conversation. The model sees it in its
+own latest `update_plan` call. When that call is no longer in context (after
+compaction or a restore without it), a short untrusted note after the latest
+messages restates the plan. Nothing that changes during a turn precedes the
+conversation, so a plan update leaves the prompt prefix intact.
+
+Compaction is the next tier. It summarizes older completed history, as the
+model was sent it, while keeping the original
 transcript, leading instructions, recent request and complete tool groups.
 Automatic compaction runs before inference at 80% of reported context capacity
 or 700000 serialized characters when a safe older prefix exists. It also runs
 when the next request would not fit the model's usable input: the advertised
 `max_input_tokens`, or `context_window` minus the output allowance (the model's
-`max_output_tokens`, else `outputTokenBudget`). The request is estimated from
+`max_output_tokens`, else `outputTokenBudget`; at `xhigh`, the reply cap the
+agent sends). The request is estimated from
 its serialized size and the characters-per-token ratio of the server's latest
 reported prompt count; without a reported count only the 80% rule applies.
 Summarization uses the selected model with tools disabled, and the summary

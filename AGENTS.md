@@ -29,7 +29,7 @@ other agents, installed configurations, credentials and sessions.
 | `permissions.ts`, `policy.ts`, `reviewer.ts`                                      | Grants, administrator rules and advisory-only review                         |
 | `commands.ts`, `jobs.ts`, `sandbox*.ts`, `macos-sandbox.ts`, `protected-paths.ts` | Bounded owned execution and platform protection                              |
 | `mcp.ts`, `ide-mcp.ts`, `user-mcp.ts`, `server-tools.ts`                          | Direct MCP and separate Open WebUI tasks                                     |
-| `verification.ts`, `compaction.ts`, `planning.ts`                                 | Bounded diagnostics, context summaries and progress plans                    |
+| `verification.ts`, `context-mask.ts`, `compaction.ts`, `planning.ts`              | Bounded diagnostics, cleared tool results, context summaries, progress plans |
 | `checkpoints.ts`, `undo-created.ts`, `session-store.ts`, `rewind.ts`              | Stale-safe undo/rewind, retained recovery, session listing/fork/export       |
 | `test/`, `browser/`, `registry/`                                                  | Automated fixtures, optional browser package and registry artifacts          |
 

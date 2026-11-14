@@ -21,6 +21,11 @@ import {
 } from "./compaction.js";
 import { planSchema } from "./planning.js";
 import { contextUsageSchema } from "./usage.js";
+import {
+  contextMaskSchema,
+  NO_MASK,
+  type ContextMask,
+} from "./context-mask.js";
 import { serverRunSchema } from "./server-tools.js";
 import { promptModes } from "./turns.js";
 import { UNTRACKED_TURN, userTurns } from "./rewind.js";
@@ -83,6 +88,7 @@ export const storedSessionSchema = z.object({
     compactionStateSchema.parse({}),
   ),
   contextUsage: contextUsageSchema.optional(),
+  contextMask: contextMaskSchema.catch(NO_MASK).default(NO_MASK),
   promptMode: z.enum(promptModes).default("interrupt"),
   workflow: z.enum(["code", "plan"]).default("code"),
   plan: planSchema.default([]),
@@ -342,7 +348,11 @@ export async function forkStoredSession(
   const conversation = redactedConversation(source, options.redact);
   // Redaction can lengthen text; the fork is fitted like any other save.
   const fitted = fitSessionRecord(
-    { messages: conversation.messages, compaction: conversation.compaction },
+    {
+      messages: conversation.messages,
+      compaction: conversation.compaction,
+      contextMask: source.contextMask,
+    },
     SESSION_RECORD_BYTES - 100_000,
   ).record;
   const record = storedSessionSchema.parse({
@@ -478,6 +488,7 @@ function trimArguments(args: string, from: number, head: number, tail: number) {
 type Fittable = {
   messages: Message[];
   compaction: CompactionState;
+  contextMask?: ContextMask;
   checkpointTurns?: Record<string, number>;
   failedToolCalls?: string[];
 };
@@ -502,6 +513,7 @@ export function fitSessionRecord<T extends Fittable>(
       : {}),
   }));
   let compaction = input.compaction;
+  let contextMask = input.contextMask;
   let checkpointTurns = input.checkpointTurns;
   let trimmed = 0;
 
@@ -611,7 +623,23 @@ export function fitSessionRecord<T extends Fittable>(
     trimmed += messages.length - next.length;
     messages = next;
     if (compaction.through > 0) compaction = { ...compaction, through };
-    size = byteSize({ ...input, messages, compaction, checkpointTurns });
+    // The mask indexes follow the messages they stood before.
+    if (contextMask) {
+      const moved = (index: number) =>
+        [...map.keys()].filter((i) => i < index).length;
+      contextMask = {
+        masked: moved(contextMask.masked),
+        elided: moved(contextMask.elided),
+        seen: moved(contextMask.seen),
+      };
+    }
+    size = byteSize({
+      ...input,
+      messages,
+      compaction,
+      checkpointTurns,
+      ...(contextMask ? { contextMask } : {}),
+    });
     return true;
   };
 
@@ -661,6 +689,7 @@ export function fitSessionRecord<T extends Fittable>(
     ...input,
     messages,
     compaction,
+    ...(contextMask ? { contextMask } : {}),
     ...(checkpointTurns ? { checkpointTurns } : {}),
     ...(input.failedToolCalls
       ? { failedToolCalls: input.failedToolCalls.filter((id) => ids.has(id)) }

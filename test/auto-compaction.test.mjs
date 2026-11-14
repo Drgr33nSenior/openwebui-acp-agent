@@ -443,12 +443,10 @@ test("automatic compaction is bounded per turn", async () => {
     await c.prompt("Measure");
     const chunk = Math.floor(usable * 4 * 0.4);
     const s = c.state();
+    // Assistant text, not tool results: older tool results are cleared from
+    // context before any summary is needed (see context-mask.test.mjs).
     for (let i = 0; i < 12; i++)
-      s.messages.push(read("first.txt", `seed-${i}`), {
-        role: "tool",
-        tool_call_id: `seed-${i}`,
-        content: "y".repeat(chunk),
-      });
+      s.messages.push({ role: "assistant", content: "y".repeat(chunk) });
     requests.length = 0;
     const result = await c.prompt("Continue");
     assert.equal(result.stopReason, "end_turn");
@@ -473,7 +471,13 @@ const efforts = {
   provider_model_controls: {
     reasoning_effort: {
       default: "medium",
-      options: { xhigh: {}, medium: {}, none: { label: "Off" }, low: {} },
+      options: {
+        xhigh: {},
+        high: {},
+        medium: {},
+        none: { label: "Off" },
+        low: {},
+      },
     },
   },
 };
@@ -500,7 +504,9 @@ test("summary requests use the lowest declared effort and an explicit output cap
   const usable = await tightModel(efforts);
   const c = await client();
   try {
-    await c.select("reasoning", '["reasoning_effort","xhigh"]');
+    // "high" keeps the server's own cap; xhigh sends an explicit one, which
+    // context-mask.test.mjs covers.
+    await c.select("reasoning", '["reasoning_effort","high"]');
     pending = [read("first.txt", "one"), read("second.txt", "two")];
     assert.equal((await c.prompt()).stopReason, "end_turn");
     assert.deepEqual(
@@ -509,7 +515,7 @@ test("summary requests use the lowest declared effort and an explicit output cap
     );
     const [first, second, summaryRequest, continued] = requests;
     for (const r of [first, second, continued]) {
-      assert.equal(r.reasoning_effort, "xhigh");
+      assert.equal(r.reasoning_effort, "high");
       assert.equal(r.max_tokens, undefined);
     }
     assert.equal(summaryRequest.reasoning_effort, "low");
