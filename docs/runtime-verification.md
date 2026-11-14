@@ -1,6 +1,6 @@
 # Runtime verification: evidence and limits
 
-This unreleased change builds on released 0.4.1 (`374ed526`). It adds runtime
+Version 0.5.0 builds on released 0.4.1 (`374ed526`). It adds runtime
 guidance and an approved static preview for browser checks. The preview is a new
 agent-owned listener with an explicit file scope and lifetime. Command sandbox
 rules, browser approvals, dependencies, reasoning defaults and server-tool

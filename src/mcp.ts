@@ -231,7 +231,7 @@ export class Mcp {
         const connecting = new AbortController();
         const client = new Client({
           name: "openwebui-acp-agent",
-          version: "0.4.1",
+          version: "0.5.0",
         });
         let failed = false;
         let cleanupSignal: AbortSignal | undefined;
