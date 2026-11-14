@@ -22,7 +22,9 @@ and use `node --test test/NAME.test.mjs`. Real sandbox tests need local listener
 and process permissions; outer sandboxes can prevent those checks from running.
 Do not replace enforcement failures with silent skips.
 
-Install the packed artifact into a fresh prefix outside the checkout:
+Install the packed artifact into a fresh prefix outside the checkout. For a
+public release, first download the `.tgz` and verify it against `SHA256SUMS` from
+GitHub Releases:
 
 ```sh
 npm install --prefix /path/to/isolated-install --ignore-scripts ./openwebui-acp-agent-0.4.0.tgz

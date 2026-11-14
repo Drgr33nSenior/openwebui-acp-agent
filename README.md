@@ -17,7 +17,7 @@ see [compatibility and testing](docs/verification.md). Native Windows is not
 supported. Linux needs bubblewrap, socat and ripgrep for command isolation.
 
 ```sh
-npm install --global openwebui-acp-agent@0.4.0
+npm install --global https://github.com/Drgr33nSenior/openwebui-acp-agent/releases/download/v0.4.0/openwebui-acp-agent-0.4.0.tgz
 ```
 
 In your ACP client's custom-agent settings, use an absolute Node executable and
@@ -40,9 +40,10 @@ JetBrains registration has this form; preserve your other entries:
 }
 ```
 
-`npm root --global` shows the global `node_modules` directory. The package includes
-an [ACP registry manifest](registry/agent.json); availability in an IDE's catalog
-requires separate registry inclusion. This project does not ship a JetBrains
+`npm root --global` shows the global `node_modules` directory. This release is distributed through [GitHub Releases](https://github.com/Drgr33nSenior/openwebui-acp-agent/releases/tag/v0.4.0); no npm account is needed.
+The [ACP registry manifest](registry/agent.json) is a proposal for future catalog
+distribution. Its npm target is not published, and it is not an installable
+catalog entry for this release. This project does not ship a JetBrains
 Marketplace plugin. Client support depends on the installed ACP client version.
 
 ## Connect Open WebUI

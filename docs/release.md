@@ -12,11 +12,13 @@
   a tarball outside the checkout. Inspect `npm pack --dry-run` contents.
 - Verify the active GitHub owner account before creating the source PR. The owner
   reviews and merges it. Do not rewrite shared history or merge automatically.
-- Verify npm package ownership and local authentication. A missing package is not
-  a reserved name. Authenticate locally; never paste tokens into chat or files.
-- Publish only the reviewed tarball. Confirm the registry version and integrity,
-  then install that exact public package into a clean prefix and repeat the
-  installed-package check. Keep the source revision with release records.
+- Create a GitHub Release for the exact tested source revision. Upload the
+  packed `.tgz` and `SHA256SUMS`, then download and install the public asset in a
+  fresh prefix. Verify the checksum and repeat the installed-package check.
+  Do not replace an existing version or asset silently.
+- npm registry publication is optional and separate. If chosen, verify account
+  ownership and authenticate locally; never paste tokens into chat or files.
+  Publish the reviewed tarball and verify the public package's integrity.
 
 Native Windows must remain excluded from support until state ACLs and execution
 are implemented and tested. Mock tests cannot replace live IDE/backend acceptance.
@@ -25,7 +27,8 @@ No dependency audit or security control should be weakened to obtain a release.
 ## ACP registry
 
 The manifest and icon are in `registry/`. Registry inclusion is separate from
-npm publication. Use version-pinned distribution references and empty environment
+GitHub release publication. The current npm-based manifest remains a proposal
+until its package is published. Use version-pinned distribution references and empty environment
 objects. Run upstream schema, icon, packaging and authentication checks without
 altering their requirements. A structural pass does not prove a public package
 exists or installs successfully.
