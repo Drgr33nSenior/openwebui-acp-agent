@@ -74,9 +74,10 @@ manual fallback. Browser sign-in and OAuth are not implemented. See
 
 ## Working with the agent
 
-- **Ask, Plan and Code:** the Mode selector answers questions read-only (Ask),
-  inspects and plans without changes (Plan), or proposes diffs and applies
-  approved edits (Code). Ask and Plan only narrow the Permissions setting; see
+- **Ask, Plan, Code and YOLO:** the Mode selector answers questions read-only
+  (Ask), inspects and plans without changes (Plan), or proposes diffs and applies
+  approved edits (Code). YOLO is Code with the confirmed YOLO permission mode
+  below. Ask and Plan only narrow the Permissions setting; see
   [session modes](docs/sessions.md#session-modes). Editor filesystem integration preserves unsaved content
   where the client supports it. Stale edits are rejected.
 - **Checks after edits:** the connected JetBrains bridge supplies file problems.
@@ -131,8 +132,9 @@ exception is described in
 [verification after edits](docs/ide-diagnostics.md). Optional approval advice
 also forces a human decision.
 
-Select **YOLO — full access (session)** or send `/permissions mode yolo`, then
-confirm at the next workspace prompt. Workspace activation is still required.
+Select the **YOLO** mode, **YOLO — full access (session)** or send
+`/permissions mode yolo`, then confirm at the next workspace prompt. Workspace
+activation is still required.
 YOLO permits arbitrary commands, background jobs, edits, configured MCP calls
 and enabled Open WebUI tasks without routine approval. Commands have your user
 account’s filesystem and network access, including outside the project; they can
