@@ -127,7 +127,9 @@ assert.equal(
   completionContextTokens({ prompt_tokens: 120, completion_tokens: 30 }),
   150,
 );
-await writeFile(join(temporary, "fixture.txt"), "installed fixture");
+// End with a newline so EOF cannot resemble a random proxy-secret prefix.
+const fixtureText = "installed fixture\n";
+await writeFile(join(temporary, "fixture.txt"), fixtureText);
 const result = JSON.parse(
   await sandboxCommand(
     "/bin/cat",
@@ -137,10 +139,10 @@ const result = JSON.parse(
   ),
 );
 assert.equal(result.code, 0, result.output);
-assert.match(result.output, /installed fixture/);
+assert.equal(result.output, fixtureText);
 assert.equal(
   await readFile(join(temporary, "fixture.txt"), "utf8"),
-  "installed fixture",
+  fixtureText,
 );
 console.log(
   "Installed 0.4.0: clean ACP v1 handshake, terminal authentication and logout discovery, context usage module, and real sandbox command passed outside the checkout",

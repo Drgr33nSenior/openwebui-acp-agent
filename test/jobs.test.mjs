@@ -197,7 +197,7 @@ for (const sandboxed of [false, true]) {
             callback,
           );
     const response = run(
-      "process.stdout.write('ready\\n');const euro=Buffer.from('€');setTimeout(()=>process.stdout.write(euro.subarray(0,1)),80);setTimeout(()=>process.stdout.write(euro.subarray(1)),160);setTimeout(()=>process.stdout.write(' done'),350)",
+      "process.stdout.write('ready\\n');const euro=Buffer.from('€');setTimeout(()=>process.stdout.write(euro.subarray(0,1)),80);setTimeout(()=>process.stdout.write(euro.subarray(1)),160);setTimeout(()=>process.stdout.write(' done\\n'),350)",
       (output) => {
         assert.equal(completed, false);
         snapshots.push(output);
@@ -209,7 +209,7 @@ for (const sandboxed of [false, true]) {
     await waitFor(() => snapshots.some((s) => s === "ready\n"));
     const actual = await response;
     assert.equal(actual.code, 0, actual.output);
-    assert.equal(actual.output, "ready\n€ done");
+    assert.equal(actual.output, "ready\n€ done\n");
     assert(snapshots.every((s) => !s.includes("�")));
     assert.equal(snapshots.at(-1), actual.output);
   });

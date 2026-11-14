@@ -438,7 +438,9 @@ test("HTTPS through the sandbox preserves certificate validation and supports an
   );
   const server = createHttpsServer(
     { key: await readFile(key), cert: await readFile(certificate) },
-    (_req, res) => res.end("tls-verified"),
+    // Terminate fixture text: an EOF hex character can match a random proxy
+    // secret prefix and must remain conservatively redacted.
+    (_req, res) => res.end("tls-verified\n"),
   );
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const url = `https://127.0.0.1:${server.address().port}/`;
@@ -471,7 +473,7 @@ test("HTTPS through the sandbox preserves certificate validation and supports an
       ),
     );
     assert.equal(trusted.code, 0, trusted.output);
-    assert.equal(trusted.output, "tls-verified");
+    assert.equal(trusted.output, "tls-verified\n");
   } finally {
     await new Promise((r) => server.close(r));
   }
