@@ -36,3 +36,14 @@ export function replaceText(
     );
   return pieces.join(newString);
 }
+
+// 1-based line of the first difference, for the client's follow-along location.
+export function firstChangedLine(before: string | null, after: string): number {
+  if (before === null) return 1;
+  let index = 0;
+  const end = Math.min(before.length, after.length);
+  while (index < end && before[index] === after[index]) index++;
+  let line = 1;
+  for (let i = 0; i < index; i++) if (before[i] === "\n") line++;
+  return line;
+}

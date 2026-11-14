@@ -4,6 +4,7 @@ import { CheckpointError, type Checkpoint } from "./checkpoints.js";
 import {
   compactionStateSchema,
   PROJECT_GUIDANCE_PREFIX,
+  STEERING_PREFIX,
   type CompactionState,
 } from "./compaction.js";
 
@@ -53,7 +54,14 @@ export function turnSummaries(
   tags: CheckpointTurns,
 ): TurnSummary[] {
   return userTurns(messages).map((index, i) => {
-    const text = (messages[index]!.content ?? "").replace(/\s+/g, " ").trim();
+    const content = messages[index]!.content ?? "";
+    const text = (
+      content.startsWith(STEERING_PREFIX)
+        ? "(steering) " + content.slice(STEERING_PREFIX.length)
+        : content
+    )
+      .replace(/\s+/g, " ")
+      .trim();
     return {
       turn: i + 1,
       preview:

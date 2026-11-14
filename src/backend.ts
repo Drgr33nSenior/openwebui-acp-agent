@@ -1,6 +1,6 @@
 import { endpoint, type Config } from "./config.js";
 import { enforceDestination, loadPolicy } from "./policy.js";
-import { completionContextTokens } from "./usage.js";
+import { completionContextTokens, promptContextTokens } from "./usage.js";
 export type Message = {
   role: string;
   content: string | null;
@@ -183,7 +183,7 @@ export class Backend {
     onText: (s: string) => Promise<void>,
     extra: Record<string, unknown> = {},
     maxResponseChars = MAX,
-    onUsage?: (used: number) => Promise<void>,
+    onUsage?: (used: number, prompt?: number) => Promise<void>,
   ): Promise<Message> {
     if (JSON.stringify(messages).length > MAX)
       throw new Error(
@@ -247,7 +247,7 @@ export class Backend {
     onText: (s: string) => Promise<void>,
     extra: Record<string, unknown>,
     maxResponseChars: number,
-    onUsage: ((used: number) => Promise<void>) | undefined,
+    onUsage: ((used: number, prompt?: number) => Promise<void>) | undefined,
     active: () => void,
     unbounded: () => void,
   ): Promise<Message> {
@@ -274,7 +274,7 @@ export class Backend {
     };
     const calls = new Map<number, Call>();
     let finish: string | undefined;
-    let used: number | undefined;
+    let used: number | undefined, prompt: number | undefined;
     let produced = 0;
     const count = (value: string) => {
       produced += value.length;
@@ -292,7 +292,10 @@ export class Backend {
               : "; check context size and function-calling support"),
         );
       const reported = completionContextTokens(x.usage);
-      if (reported !== undefined) used = reported;
+      if (reported !== undefined) {
+        used = reported;
+        prompt = promptContextTokens(x.usage);
+      }
       if (Array.isArray(x.choices) && x.choices.length === 0 && x.usage) return;
       // Streamed events without choices (e.g. Open WebUI's {"sources": [...]}) carry
       // no completion data.
@@ -402,7 +405,7 @@ export class Backend {
       await consume(parseCompletion(await bounded(r, signal, MAX)), false);
     }
     signal.throwIfAborted();
-    if (used !== undefined) await onUsage?.(used);
+    if (used !== undefined) await onUsage?.(used, prompt);
     if (finish === "length") {
       // The coding loop may ask again once; never return a cut-short tool call.
       await emit("", true);

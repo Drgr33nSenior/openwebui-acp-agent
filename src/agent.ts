@@ -14,7 +14,7 @@ import {
   replyRecoveryHint,
   parseToolArguments,
 } from "./harness.js";
-import { replaceText } from "./edits.js";
+import { firstChangedLine, replaceText } from "./edits.js";
 import { userMcp, mcpOptions } from "./user-mcp.js";
 import { mcpSecrets, ideFileProblemsArguments } from "./ide-mcp.js";
 import {
@@ -69,7 +69,12 @@ import { quarantineCreatedFile, UndoRecoveryError } from "./undo-created.js";
 import {
   compactionStateSchema,
   PROJECT_GUIDANCE_PREFIX,
+  STEERING_PREFIX,
   compactHistory,
+  type CutOptions,
+  canCompact,
+  contextPressure,
+  MAX_TURN_COMPACTIONS,
   contextMessages,
   shouldAutoCompact,
   type CompactionState,
@@ -82,6 +87,8 @@ import {
 } from "./planning.js";
 import { normalizePrompt } from "./prompt.js";
 import {
+  charsPerToken,
+  contextLimits,
   contextSize,
   contextUsageSchema,
   outputAllowance,
@@ -271,7 +278,7 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
       write_file:
         "Create a file with before=null or deliberately rewrite a whole file. before must be the entire current file, including whitespace and the final newline; after is the entire replacement. Read first. Prefer edit_file for changes to existing files. Create large files as a small skeleton, then extend with small edits.",
       edit_file:
-        "Make a small literal replacement in an existing text file. Read first. old_string must occur exactly once; include enough surrounding lines. replace_all=true explicitly replaces all non-overlapping occurrences. Preserve line endings and trailing newlines. The resulting file must stay within 100,000 characters. Shows a diff and uses the normal approvals and checkpoints.",
+        "Make a small literal replacement in an existing text file. Read first. Arguments are old_string and new_string, not write_file's before and after. old_string must occur exactly once; include enough surrounding lines. replace_all=true explicitly replaces all non-overlapping occurrences. Preserve line endings and trailing newlines. The resulting file must stay within 100,000 characters. Shows a diff and uses the normal approvals and checkpoints.",
       list_jobs:
         "List this session's bounded command jobs; jobs are not restarted on restore",
       poll_job:
@@ -327,6 +334,9 @@ type Session = {
   announcedMode?: SessionModeId;
   plan: z.infer<typeof planSchema>;
   contextUsage?: ContextUsage;
+  // Serialized request characters per prompt token, from the latest reported
+  // usage. Held in memory only; a restored session measures it again.
+  tokenRatio?: number;
   active: boolean;
   authEpoch: unknown;
   permissions: Permissions;
@@ -742,12 +752,15 @@ export function createAgent(
     client: AgentContext,
     s: Session,
     signal: AbortSignal,
+    options: CutOptions = {},
+    reason = "",
   ) => {
     await permitted(s, signal);
     await text(
       client,
       s,
-      "Compacting model context; the original transcript is retained locally.",
+      reason +
+        "Compacting model context; the original transcript is retained locally.",
     );
     const next = await compactHistory(
       s.messages,
@@ -770,6 +783,7 @@ export function createAgent(
         };
       },
       signal,
+      options,
     );
     await permitted(s, signal);
     const previous = s.compaction,
@@ -801,6 +815,8 @@ export function createAgent(
       id: string;
       input: Record<string, unknown>;
       kind?: Grant["kind"];
+      // ACP display metadata only: lets the client open the edited place.
+      locations?: { path: string; line?: number }[];
     },
     forceOnce = false,
   ) => {
@@ -830,6 +846,7 @@ export function createAgent(
       title,
       kind,
       ...(operation ? { rawInput: operation.input } : {}),
+      ...(operation?.locations ? { locations: operation.locations } : {}),
       status: "pending",
       content,
     });
@@ -897,6 +914,9 @@ export function createAgent(
                           s.backend.redact(JSON.stringify(operation.input)),
                         ),
                       }
+                    : {}),
+                  ...(operation?.locations
+                    ? { locations: operation.locations }
                     : {}),
                   status: "pending",
                   content: JSON.parse(
@@ -1219,7 +1239,11 @@ export function createAgent(
         "workspace-text-edits",
         "all text edits within this workspace",
       ),
-      { id: toolId, input: { path } },
+      {
+        id: toolId,
+        input: { path },
+        locations: [{ path, line: firstChangedLine(before, after) }],
+      },
       forceOnce,
     );
     await permitted(s, signal);
@@ -2015,7 +2039,7 @@ export function createAgent(
       if (!candidate.take()) break;
       s.messages.push({
         role: "user",
-        content: s.backend.redact(input.content),
+        content: STEERING_PREFIX + s.backend.redact(input.content),
       });
       absorbed++;
     }
@@ -2125,7 +2149,12 @@ export function createAgent(
       )
         await update(client, s, {
           sessionUpdate: "user_message_chunk",
-          content: { type: "text", text: m.content },
+          content: {
+            type: "text",
+            text: m.content.startsWith(STEERING_PREFIX)
+              ? m.content.slice(STEERING_PREFIX.length)
+              : m.content,
+          },
         });
       if (m.role !== "assistant") continue;
       if (m.content)
@@ -2634,6 +2663,7 @@ export function createAgent(
       s.choices = reasoningChoices(s.metadata.find((m) => m.id === value));
       s.reasoning = defaultReasoning(s.choices);
       s.contextUsage = undefined;
+      s.tokenRatio = undefined;
       s.serverTools = false;
       s.serverCatalog = undefined;
     } else if (id === "permissions") {
@@ -3175,6 +3205,11 @@ export function createAgent(
                   transcriptMessages: s.messages.length,
                 },
                 contextUsage: s.contextUsage ?? null,
+                contextLimits:
+                  contextLimits(
+                    s.metadata.find((m) => m.id === s.config.model),
+                    s.config.outputTokenBudget,
+                  ) ?? null,
                 contextUsageBasis:
                   "Latest reported prompt plus completion tokens against advertised context_window, or max_input_tokens when unavailable; not a live tokenizer estimate or cumulative usage",
                 approvalReviewer: s.reviewer,
@@ -3632,29 +3667,9 @@ export function createAgent(
             unavailable: results.some((r) => r.unavailable),
           };
         };
-        for (let round = 0; round < s.config.rounds; round++) {
-          await permitted(s, signal);
-          await absorbSteering(client, s, signal);
-          await reportFinishedJobs(s);
-          if (
-            !autoCompactionFailed &&
-            shouldAutoCompact(s.messages, s.compaction, s.contextUsage)
-          ) {
-            try {
-              await compactSession(client, s, signal);
-            } catch (error) {
-              signal.throwIfAborted();
-              if (error instanceof BackendHttpError && error.status === 401)
-                throw error;
-              await permitted(s, signal);
-              autoCompactionFailed = true;
-              await text(
-                client,
-                s,
-                "Automatic compaction failed; original context retained. Continuing within existing context limits. Use /compact to retry, /autocompact off to disable, or start a new session.",
-              );
-            }
-          }
+        // Everything one model request carries, rebuilt after a compaction so the
+        // size check below measures what would actually be sent.
+        const requestContext = () => {
           const historicalGuidance = s.messages.find((m) => m.role === "user");
           const modelContext = contextMessages(s.messages, s.compaction).filter(
             (m) =>
@@ -3727,6 +3742,101 @@ export function createAgent(
               0,
               { role: "system", content: runtimeGuidance },
             );
+          return { modelContext, tools, availableTools };
+        };
+        let compactions = 0;
+        for (let round = 0; round < s.config.rounds; round++) {
+          await permitted(s, signal);
+          // Steered messages and job notes join history before the request is
+          // built, so the compaction check below measures them too.
+          await absorbSteering(client, s, signal);
+          await reportFinishedJobs(s);
+          let request = requestContext();
+          for (;;) {
+            const limits = contextLimits(
+              s.metadata.find((m) => m.id === s.config.model),
+              s.config.outputTokenBudget,
+            );
+            const pressure = contextPressure(
+              JSON.stringify(request.modelContext).length +
+                JSON.stringify(request.tools).length,
+              s.tokenRatio,
+              limits,
+            );
+            // The summary request must fit the same input limit, with a margin
+            // for the chat template and the estimate itself.
+            const bounded: CutOptions =
+              limits && s.tokenRatio
+                ? {
+                    maxInputChars: Math.floor(
+                      limits.usable * s.tokenRatio * 0.9,
+                    ),
+                  }
+                : {};
+            // A request that would not fit may give up the recent-message
+            // preference when keeping it leaves nothing to summarize.
+            const cut: CutOptions =
+              pressure.over && !canCompact(s.messages, s.compaction, bounded)
+                ? { ...bounded, keepRecent: false }
+                : bounded;
+            if (
+              !pressure.over &&
+              (autoCompactionFailed ||
+                !shouldAutoCompact(
+                  s.messages,
+                  s.compaction,
+                  s.contextUsage,
+                  cut,
+                ))
+            )
+              break;
+            let blocked = !s.compaction.automatic
+              ? "automatic compaction is off"
+              : autoCompactionFailed
+                ? "automatic compaction already failed in this turn"
+                : compactions >= MAX_TURN_COMPACTIONS
+                  ? `this turn already compacted its context ${MAX_TURN_COMPACTIONS} times`
+                  : !canCompact(s.messages, s.compaction, cut)
+                    ? "no complete older history is left to summarize"
+                    : undefined;
+            if (!blocked) {
+              try {
+                await compactSession(
+                  client,
+                  s,
+                  signal,
+                  cut,
+                  pressure.over && limits
+                    ? `The next request needs about ${pressure.estimate} input tokens; the model accepts ${limits.usable}. `
+                    : "",
+                );
+                compactions++;
+                request = requestContext();
+                continue;
+              } catch (error) {
+                signal.throwIfAborted();
+                if (error instanceof BackendHttpError && error.status === 401)
+                  throw error;
+                await permitted(s, signal);
+                autoCompactionFailed = true;
+                blocked = "automatic compaction failed";
+                if (!pressure.over)
+                  await text(
+                    client,
+                    s,
+                    "Automatic compaction failed; original context retained. Continuing within existing context limits. Use /compact to retry, /autocompact off to disable, or start a new session.",
+                  );
+              }
+            }
+            // The estimate rests on the server's own token counts. Sending a
+            // request it would refuse only spends the turn on an error.
+            if (pressure.over && limits)
+              throw new Error(
+                `Context is full: the next request needs about ${pressure.estimate} input tokens and the model accepts ${limits.usable} of its ${limits.size}-token context once the reply allowance is reserved, and ${blocked}. Nothing was sent; history and completed tool results are retained. Use /compact, ask for a smaller step, or start a new session.`,
+              );
+            break;
+          }
+          const { modelContext, tools, availableTools } = request;
           let message: Message | undefined;
           for (let attempt = 0; attempt < 2; attempt++) {
             await permitted(s, signal);
@@ -3744,8 +3854,14 @@ export function createAgent(
                 },
                 reasoningPayload(s.config.model, s.reasoning, s.choices),
                 undefined,
-                async (used) => {
+                async (used, prompt) => {
                   signal.throwIfAborted();
+                  s.tokenRatio =
+                    charsPerToken(
+                      JSON.stringify(modelContext).length +
+                        JSON.stringify(tools).length,
+                      prompt ?? 0,
+                    ) ?? s.tokenRatio;
                   const size = contextSize(
                     s.metadata.find((m) => m.id === s.config.model),
                   );

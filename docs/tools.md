@@ -29,6 +29,10 @@ text is literal: `$&` and similar sequences have no special meaning. The tool
 does not normalize CRLF or add a trailing newline. The resulting file must fit
 within 100,000 characters.
 
+A call that omits a required argument and adds undeclared ones, such as
+`edit_file` with `write_file`'s `before` and `after`, is rejected with those
+field names. Nothing runs and no alias is applied.
+
 Use `write_file` with `before: null` to create a file. For a deliberate whole-file
 rewrite, supply the complete current text in `before` and replacement in `after`.
 Build large files as a small skeleton, then extend them through small `edit_file`
@@ -36,6 +40,13 @@ calls. Both tools show the full proposed diff and use the same workspace rules,
 approvals, checkpoints and undo support. A file changed during approval is not
 overwritten. When client file methods are available, edits preserve unsaved
 editor content; client denial never causes a local write fallback.
+
+Both tools report the change as ACP `diff` content (absolute path, complete old
+and new text, `oldText: null` for a new file) on the approval request and on the
+completed tool call. They also send the file and first changed line as an ACP
+`locations` entry so the client can open the place being edited. Locations are
+display metadata and grant no access. How a client renders either is its own
+choice.
 
 File tools remain unavailable in Plan or read-only permission mode. Read-only
 sandbox mode rejects their writes. Successful changes participate in automatic

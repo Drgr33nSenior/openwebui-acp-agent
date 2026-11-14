@@ -23,7 +23,8 @@ const {
 } = await import("../dist/rewind.js");
 const { prepareCheckpoint, recordCheckpoint, CheckpointError } =
   await import("../dist/checkpoints.js");
-const { compactionStateSchema } = await import("../dist/compaction.js");
+const { compactionStateSchema, contextMessages, STEERING_PREFIX } =
+  await import("../dist/compaction.js");
 
 const requests = [];
 let respond;
@@ -263,6 +264,33 @@ test("rewind plans restore the earliest agent state and refuse gaps", () => {
     count: 2,
     automatic: true,
   });
+});
+
+test("compaction keeps the turn request pinned and steering messages verbatim", () => {
+  const messages = [
+    { role: "system", content: "s" },
+    { role: "user", content: "older request" },
+    { role: "assistant", content: "older answer" },
+    { role: "user", content: "fix the parser" },
+    { role: "assistant", content: "working" },
+    { role: "user", content: STEERING_PREFIX + "also update the docs" },
+    { role: "assistant", content: "noted" },
+    { role: "assistant", content: "latest" },
+  ];
+  const context = contextMessages(
+    messages,
+    compactionStateSchema.parse({ summary: "earlier work", through: 7 }),
+  );
+  const users = context.filter((m) => m.role === "user").map((m) => m.content);
+  assert.match(users[1], /Latest user request.*"fix the parser"/s);
+  assert.match(users[2], /Steering messages.*\["also update the docs"\]/s);
+  assert(!users.some((u) => u.includes("older request")));
+  assert.equal(context.at(-1).content, "latest");
+  // Rewind lists a steered message as its own turn, without the marker.
+  assert.equal(
+    turnSummaries(messages, [], {})[2].preview,
+    "(steering) also update the docs",
+  );
 });
 
 test("steering joins the active turn in order and falls back to a queued turn", async () => {
@@ -572,7 +600,7 @@ test("steering adds a message to the running turn after its tool step", async ()
     const toolIndex = messages.findIndex((m) => m.tool_call_id === "r1");
     assert(toolIndex > 0);
     assert.equal(messages.at(-1).role, "user");
-    assert.equal(messages.at(-1).content, "also check b");
+    assert.equal(messages.at(-1).content, STEERING_PREFIX + "also check b");
     assert.match(texts(c.updates), /1 steering message added/);
     const saved = await readJson(`session-${c.id}.json`);
     assert.equal(saved.promptMode, "steer");
@@ -606,7 +634,10 @@ test("steering during the final reply continues the turn; commands are never abs
       ["end_turn", "end_turn", "end_turn"],
     );
     assert.equal(requests.length, 2);
-    assert.equal(latestUser(requests[1]), "and one more thing");
+    assert.equal(
+      latestUser(requests[1]),
+      STEERING_PREFIX + "and one more thing",
+    );
     assert(
       requests[1].messages.some((m) => m.content === "first answer"),
       "earlier final reply stays in context",

@@ -212,6 +212,20 @@ with Off, low, medium and Max levels and a declared default. No live Open WebUI,
 JetBrains or Zed session was run. Selector rendering, `session/set_mode` use by a real
 client and provider reasoning effects remain unverified.
 
+## Pre-request compaction and edit locations (unreleased)
+
+`test/auto-compaction.test.mjs` uses a fake service that reports four serialized
+characters per prompt token. It covers the usable-input calculation, the
+measured-ratio requirement, bounded summary requests, a compaction triggered
+while reported usage is under 80%, system-message and tool-pair preservation in
+the continued request, the visible notice, the retained transcript, a failed
+summary that stops the turn before any oversized request, disabled automatic
+compaction, and the three-per-turn limit. `test/edit-file.test.mjs` checks the
+`locations` entry, that the completed call repeats the approved diff, and the
+error naming undeclared fields when a required argument is missing.
+Results for this revision are in its pull request. Live client rendering of
+diffs, locations and the context indicator was not checked.
+
 ## Sessions, rewind, steering and job status (unreleased)
 
 `test/sessions.test.mjs` covers advertised `resume`/`close` capabilities. Load
@@ -227,10 +241,14 @@ checkpoint chain gaps and the compaction reset. Created files are removed on
 Linux; elsewhere the test deletes them manually, then rewinds. Job tests cover
 coalesced progress, output size and tail, completion updates, notices only
 with the client capability, and one model report per finished job.
+`test/auto-compaction.test.mjs` adds a steered message that joins mid-turn.
+It is sent in the next request, before the size check that triggers compaction.
+After compaction it survives beside the pinned original request. A unit test
+covers the pinned steering block.
 
-On macOS 27.0 with Node 26.11.1, after merging main at `defb929`,
+On macOS 27.0 with Node 26.11.1, after merging main at `27e6a9f`,
 `npm ci --ignore-scripts`, lint, typecheck, `npm test`, build and Prettier passed:
-**432 tests, 426 passed, six platform skips, zero failures**. `npm pack`,
+**442 tests, 436 passed, six platform skips, zero failures**. `npm pack`,
 installation into a fresh temporary prefix and `test/package-install.mjs` passed.
 Checkout and installed production audits found zero vulnerabilities.
 
