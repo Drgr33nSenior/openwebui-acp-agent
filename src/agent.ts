@@ -20,6 +20,7 @@ import { mcpSecrets, ideFileProblemsArguments } from "./ide-mcp.js";
 import {
   verificationCommands,
   fileProblemsResult,
+  IDE_DIAGNOSTICS_ABSENT,
   projectCheckResult,
   boundedVerificationText,
   unavailableVerification,
@@ -2973,14 +2974,26 @@ export function createAgent(
             ([, tool]) => tool.ideFileProblems,
           );
           const commands = await verificationCommands(settings, s.root);
-          if (!diagnostic && !commands.length) return undefined;
           const results: VerificationResult[] = [];
+          // Say so when the IntelliJ MCP server is absent; never imply a check.
+          if (!diagnostic)
+            results.push(
+              commands.length
+                ? {
+                    text: IDE_DIAGNOSTICS_ABSENT,
+                    failures: false,
+                    unavailable: false,
+                  }
+                : unavailableVerification(IDE_DIAGNOSTICS_ABSENT),
+            );
+          let diagnosticsLeft = settings.maxDiagnostics;
           let remaining = settings.maxOutputChars;
           const check = async (
             name: string,
             args: Record<string, unknown>,
             title: string,
             format: (raw: string) => VerificationResult,
+            timeoutMs?: number,
           ) => {
             await permitted(s, signal);
             const identity = JSON.stringify([name, args]);
@@ -3045,7 +3058,15 @@ export function createAgent(
                 throw new SandboxError(
                   "Select an OS sandbox to run automatic project checks",
                 );
-              const output = await execute(client, s, c, signal);
+              // The IDE-side timeout is advisory; also bound the call itself.
+              const output = await execute(
+                client,
+                s,
+                c,
+                timeoutMs
+                  ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+                  : signal,
+              );
               result = format(
                 typeof output === "string" ? output : output.text,
               );
@@ -3108,10 +3129,21 @@ export function createAgent(
                   filePath: relative(s.root, path),
                   projectPath: s.root,
                   errorsOnly: !settings.includeWarnings,
-                  timeout: 10000,
+                  timeout: settings.ideTimeoutMs,
                 },
                 `Verify ${relative(s.root, path)} with IDE problems`,
-                (raw) => fileProblemsResult(raw, s.root, path, settings),
+                (raw) => {
+                  const r = fileProblemsResult(
+                    raw,
+                    s.root,
+                    path,
+                    settings,
+                    diagnosticsLeft,
+                  );
+                  diagnosticsLeft -= r.reported ?? 0;
+                  return r;
+                },
+                settings.ideTimeoutMs + 2000,
               );
             }
             if (changedFiles.size > selected.length)

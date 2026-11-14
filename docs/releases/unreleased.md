@@ -27,6 +27,10 @@
 - Document ACP v2 readiness: client `fs/*` is optional with local fallback and
   `terminal/*` is unused. Other v2 shapes are deferred while the project
   targets stable ACP v1.
+- Verification reports when the IntelliJ MCP server is absent instead of skipping
+  silently, adds `verify.ideTimeoutMs` (enforced client-side) and
+  `verify.maxDiagnostics`, and documents enabling the server for the agent in
+  [IDE diagnostics](../ide-diagnostics.md). No new permissions.
 
 See [verification](../verification.md), [session modes](../sessions.md#session-modes),
 [ACP v2 readiness](../design.md#acp-v2-readiness) and the
