@@ -258,6 +258,34 @@ Whether a JetBrains client calls `session/resume` or `session/close` is also
 unverified. The steering client matrix in [session controls](sessions.md) comes
 from vendor documentation and earlier observation, not a test.
 
+## Compaction during corrected replies (unreleased)
+
+The recovery-order regression failed against unchanged main `27e6a9f`: the
+second request still carried coding tools instead of first requesting a summary.
+The follow-up shares the pre-request checks from PR #22 with the single recovery
+attempt. It retains that change's usable-input estimate, bounded summary requests
+and three-compaction limit; it does not replace the compaction algorithm.
+The follow-up is based on main `6be76dd`, including PR #23's session and steering
+changes. Steering received during a truncated reply joins before the recovery
+compaction check and remains in the corrected request.
+
+Fake-backend tests cover truncated and malformed tool replies, compaction before
+the correction, rebuilt instructions/plan/tool guidance, retained partial text
+and tool correlations, cancellation and interrupt during the summary, failed or
+disabled compaction, and blocking a corrected request that cannot fit. They also
+check that a context notice cannot split buffered reply text, does not repeat
+after compaction, and does not suppress measured ACP usage updates. No discarded
+tool call or historical edit executes.
+
+On macOS 27.0 with Node 26.11.1, `npm ci --ignore-scripts`, lint, typecheck,
+build, Prettier and `npm test` passed: **443 tests passed, six platform skips,
+zero failures**. `npm pack` and installation outside the checkout passed, including
+the installed ACP handshake and sandbox command. Both checkout and installed
+production audits found zero vulnerabilities. Documentation clarity audits found
+no issues. No live inference or interactive IDE acceptance was run for this
+revision. The context wheel still depends on
+subsequent provider usage; no estimated percentage or artificial reset is sent.
+
 ## Compatibility
 
 | Component                            | Scope                                                                                                |

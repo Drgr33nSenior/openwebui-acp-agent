@@ -35,7 +35,11 @@ const server = createServer(async (req, res) => {
   if (req.url === "/api/models") {
     res.setHeader("Content-Type", "application/json");
     return res.end(
-      JSON.stringify({ data: [{ id: "fixture", context_window: 10000 }] }),
+      JSON.stringify({
+        data: [
+          { id: "fixture", context_window: 10000, max_input_tokens: 10000 },
+        ],
+      }),
     );
   }
   if (req.url === "/mcp") {
@@ -56,6 +60,7 @@ const server = createServer(async (req, res) => {
     });
   }
   const calls = pending.shift();
+  if (typeof calls === "function") return calls(request, res);
   reply(
     res,
     calls
@@ -522,5 +527,362 @@ test("failed automatic compaction retains original context and is attempted only
     );
   } finally {
     await c.close();
+  }
+});
+
+function fullContextReply(
+  res,
+  { finish = "length", malformed = false, promptTokens = 9000 } = {},
+) {
+  res.setHeader("Content-Type", "application/json");
+  const attempted = call(
+    "write_file",
+    {
+      path: "a.txt",
+      before: "unchanged",
+      after: "must not execute",
+    },
+    "incomplete-edit",
+  );
+  if (malformed) attempted.function.arguments = "{";
+  res.end(
+    JSON.stringify({
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: "Writing the complete file:",
+            tool_calls: [attempted],
+          },
+          finish_reason: finish,
+        },
+      ],
+      usage: {
+        prompt_tokens: promptTokens,
+        completion_tokens: 10000 - promptTokens,
+      },
+    }),
+  );
+}
+
+test("full-context recovery compacts before the corrected request and keeps current guidance and paired history", async () => {
+  for (const malformed of [false, true]) {
+    const c = await client();
+    const start = requests.length;
+    const original = history();
+    c.state().messages = structuredClone(original);
+    c.state().plan = structuredClone(plan);
+    await writeFile(join(c.cwd, "AGENTS.md"), "Keep the fixture file small.");
+    pending = [
+      (_request, res) =>
+        fullContextReply(res, {
+          malformed,
+          finish: malformed ? "tool_calls" : "length",
+        }),
+      [
+        call(
+          "edit_file",
+          { path: "a.txt", old_string: "unchanged", new_string: "corrected" },
+          "corrected-edit",
+        ),
+      ],
+    ];
+    try {
+      assert.equal(
+        (await c.prompt("Continue the current fixture request")).stopReason,
+        "end_turn",
+      );
+      const turn = requests.slice(start);
+      assert(turn[0].tools.length > 0);
+      assert.deepEqual(
+        turn[1].tools,
+        [],
+        "compaction must precede the recovery request",
+      );
+      assert(turn[2].tools.some((t) => t.function.name === "edit_file"));
+      assert(
+        turn[2].messages.some((m) =>
+          m.content?.startsWith("Untrusted summary"),
+        ),
+      );
+      assert(
+        turn[2].messages.some((m) =>
+          m.content?.includes("Writing the complete file:"),
+        ),
+      );
+      assert(
+        turn[2].messages.some((m) => m.content?.startsWith("[Your last reply")),
+      );
+      assert(
+        turn[2].messages.some(
+          (m) => m.content === "Continue the current fixture request",
+        ),
+      );
+      assert(
+        turn[2].messages.some((m) =>
+          m.content?.includes("Keep the fixture file small."),
+        ),
+      );
+      assert(
+        turn[2].messages.some((m) => m.content?.includes(JSON.stringify(plan))),
+      );
+      assert(
+        turn[2].messages.some(
+          (m) =>
+            m.role === "system" &&
+            m.content?.includes("use edit_file for small changes"),
+        ),
+      );
+      assert(
+        !turn[2].messages.some((m) =>
+          m.tool_calls?.some(
+            (t) => t.id === "past-edit" || t.id === "incomplete-edit",
+          ),
+        ),
+      );
+      assert.deepEqual(c.state().messages.slice(0, original.length), original);
+      assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "corrected");
+      assert.equal(c.state().checkpoints.length, 1);
+      const displayed = events(c)
+        .filter((u) => u.sessionUpdate === "agent_message_chunk")
+        .map((u) => u.content.text)
+        .join("");
+      assert(
+        displayed.startsWith("Writing the complete file:"),
+        "the usage notice must follow the complete buffered reply, not split its text",
+      );
+      assert.equal(
+        c.approvals.filter((p) => p.toolCall.kind === "edit").length,
+        1,
+      );
+      assert.equal(c.executed.length, 0);
+    } finally {
+      await c.close();
+    }
+  }
+});
+
+test("steering received during a truncated reply joins the corrected request before its compaction check", async () => {
+  const c = await client();
+  c.state().messages = history();
+  await c.select("prompt_mode", "steer");
+  const arrived = Promise.withResolvers();
+  pending = [(_request, res) => arrived.resolve(res)];
+  try {
+    const first = c.prompt("Original request for recovery");
+    const response = await arrived.promise;
+    const steer = c.prompt("Also preserve the file's existing content");
+    for (let i = 0; i < 100 && c.state().turns.queued !== 1; i++)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(c.state().turns.queued, 1);
+    fullContextReply(response);
+    assert.deepEqual(await Promise.all([first, steer]), [
+      { stopReason: "end_turn" },
+      { stopReason: "end_turn" },
+    ]);
+    assert.equal(requests.length, 3);
+    assert.deepEqual(requests[1].tools, []);
+    assert.equal(c.state().compaction.count, 1);
+    for (const content of [
+      "Original request for recovery",
+      "Also preserve the file's existing content",
+      "Writing the complete file:",
+    ])
+      assert(requests[2].messages.some((m) => m.content?.includes(content)));
+    assert.equal(c.state().turns.queued, 0);
+    assert.equal(c.state().checkpoints.length, 0);
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "unchanged");
+  } finally {
+    await c.close();
+  }
+});
+
+test("cancel or interrupt during recovery compaction cannot start the old corrected request", async () => {
+  for (const interrupt of [false, true]) {
+    const c = await client();
+    const start = requests.length;
+    c.state().messages = history();
+    const checkpoint = structuredClone(c.state().compaction);
+    const arrived = Promise.withResolvers();
+    let summaries = 0;
+    summaryResponse = (_request, res) => {
+      if (++summaries === 1) return arrived.resolve();
+      reply(res, {
+        role: "assistant",
+        content:
+          "Earlier inspection completed; continue the user's latest request without repeating actions.",
+      });
+    };
+    pending = [(_request, res) => fullContextReply(res)];
+    try {
+      const old = c.prompt("Original fixture turn");
+      await arrived.promise;
+      let replacement;
+      if (interrupt) replacement = c.prompt("Replacement fixture request");
+      else
+        await c.connection.agent.notify("session/cancel", { sessionId: c.id });
+      assert.equal((await old).stopReason, "cancelled");
+      if (replacement) {
+        assert.equal((await replacement).stopReason, "end_turn");
+        assert.equal(c.state().compaction.count, 1);
+        assert(
+          requests
+            .at(-1)
+            .messages.some((m) => m.content === "Replacement fixture request"),
+        );
+      } else assert.deepEqual(c.state().compaction, checkpoint);
+      const coding = requests.slice(start).filter((r) => r.tools.length > 0);
+      assert.equal(coding.length, interrupt ? 2 : 1);
+      assert.equal(c.state().checkpoints.length, 0);
+      assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "unchanged");
+      assert(
+        c
+          .state()
+          .messages.some((m) => m.content?.startsWith("[Your last reply")),
+      );
+      assert(
+        !c
+          .state()
+          .messages.some((m) =>
+            m.tool_calls?.some((t) => t.id === "incomplete-edit"),
+          ),
+      );
+    } finally {
+      await c.close();
+    }
+  }
+});
+
+test("recovery compaction failure is bounded and never retries or executes the discarded tool", async () => {
+  const c = await client();
+  c.state().messages = history();
+  const original = structuredClone(c.state().messages);
+  summaryResponse = (_request, res) =>
+    reply(res, { role: "assistant", content: "" });
+  pending = [
+    (_request, res) => fullContextReply(res),
+    (_request, res) => fullContextReply(res),
+  ];
+  try {
+    await c.prompt("Continue within the recovery limit");
+    assert.equal(requests.length, 3);
+    assert.deepEqual(
+      requests.map((r) => r.tools.length === 0),
+      [false, true, false],
+    );
+    assert.equal(c.state().compaction.count, 0);
+    assert.deepEqual(c.state().messages.slice(0, original.length), original);
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "unchanged");
+    assert.equal(c.state().checkpoints.length, 0);
+    const text = events(c)
+      .filter((u) => u.sessionUpdate === "agent_message_chunk")
+      .map((u) => u.content.text)
+      .join("\n");
+    assert.match(text, /Model reply recovery failed after one re-ask/);
+    assert.match(text, /cut off by its output limit.*Asking once/);
+    assert.equal((text.match(/Reported context usage:/g) ?? []).length, 1);
+    assert.equal((text.match(/Automatic compaction failed/g) ?? []).length, 1);
+  } finally {
+    await c.close();
+  }
+});
+
+test("disabled automatic compaction stays disabled during recovery", async () => {
+  const c = await client();
+  c.state().messages = history();
+  await c.select("autocompact", "off");
+  pending = [(_request, res) => fullContextReply(res)];
+  try {
+    assert.equal(
+      (await c.prompt("Recover without automatic compaction")).stopReason,
+      "end_turn",
+    );
+    assert.equal(requests.length, 2);
+    assert(requests.every((r) => r.tools.length > 0));
+    assert.equal(c.state().compaction.count, 0);
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "unchanged");
+  } finally {
+    await c.close();
+  }
+});
+
+test("context notices do not repeat after compaction but measured usage still reaches the client", async () => {
+  const c = await client();
+  c.state().messages = history();
+  pending = [
+    (_request, res) => fullContextReply(res),
+    (_request, res) => {
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: { role: "assistant", content: "Done" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 9500, completion_tokens: 500 },
+        }),
+      );
+    },
+  ];
+  try {
+    await c.prompt("Keep provider usage accurate");
+    assert.equal(c.state().compaction.count, 1);
+    const notices = events(c).filter(
+      (u) =>
+        u.sessionUpdate === "agent_message_chunk" &&
+        /Reported context usage/.test(u.content.text),
+    );
+    assert.equal(notices.length, 1);
+    assert.deepEqual(
+      events(c)
+        .filter((u) => u.sessionUpdate === "usage_update")
+        .map((u) => ({ used: u.used, size: u.size })),
+      [
+        { used: 10000, size: 10000 },
+        { used: 10000, size: 10000 },
+      ],
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+test("an oversized corrected request is stopped when its context cannot be reduced or automatic compaction is off", async () => {
+  for (const automatic of [true, false]) {
+    const c = await client();
+    const start = requests.length;
+    if (!automatic) await c.select("autocompact", "off");
+    pending = [
+      (_request, res) => fullContextReply(res, { promptTokens: 10000 }),
+    ];
+    try {
+      // Keep the measured characters-per-token ratio above its plausibility
+      // floor; the recovery note then pushes the next request over the limit.
+      await c.prompt(
+        "Make a small change. " + "Fixture context. ".repeat(2000),
+      );
+      assert.equal(
+        requests.length - start,
+        1,
+        "do not send the oversized corrected request",
+      );
+      assert.equal(c.state().compaction.count, 0);
+      assert.equal(c.state().checkpoints.length, 0);
+      assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "unchanged");
+      assert.match(lastText(c), /Context is full/);
+      assert.match(
+        lastText(c),
+        automatic ? /no complete older history/ : /automatic compaction is off/,
+      );
+      assert(
+        c
+          .state()
+          .messages.some((m) => m.content?.startsWith("[Your last reply")),
+      );
+    } finally {
+      await c.close();
+    }
   }
 });
