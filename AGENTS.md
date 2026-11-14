@@ -22,7 +22,7 @@ other agents, installed configurations, credentials and sessions.
 
 | Modules                                                                           | Responsibility                                                               |
 | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `agent.ts`, `turns.ts`                                                            | ACP sessions, model/tool rounds, queue/interruption, selectors, verification |
+| `agent.ts`, `turns.ts`, `modes.ts`                                                | ACP sessions, model/tool rounds, queue/interruption, selectors, verification |
 | `backend.ts`, `harness.ts`, `reasoning.ts`, `usage.ts`                            | Inference parsing, safe recovery, workflow prompt, model controls and usage  |
 | `config.ts`, `auth.ts`, `setup.ts`, `cli.ts`                                      | Private state, secure-store authentication and executable routing            |
 | `workspace.ts`, `prompt.ts`, `instructions.ts`                                    | Canonical boundaries, editor context and scoped AGENTS.md                    |

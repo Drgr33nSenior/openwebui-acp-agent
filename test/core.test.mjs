@@ -27,7 +27,7 @@ const { root, target, files, atomicEdit, changeTrust, trust } =
   await import("../dist/workspace.js");
 const { Backend } = await import("../dist/backend.js");
 const { createAgent } = await import("../dist/agent.js");
-const { reasoningChoices, reasoningPayload } =
+const { reasoningChoices, reasoningPayload, defaultReasoning } =
   await import("../dist/reasoning.js");
 const { command } = await import("../dist/commands.js");
 const workspace = join(temp, "project");
@@ -206,11 +206,13 @@ test("provider reasoning uses only explicit supported options and custom control
     temperature: { options: { hot: { label: "Hot" } } },
   };
   const choices = reasoningChoices({ provider_model_controls });
+  // A declared default replaces "Model default"; declaration order is kept.
   assert.deepEqual(
     choices.map((c) => c.name),
-    ["Model default", "Reasoning effort: Off", "Reasoning effort: Low"],
+    ["Reasoning effort: Off", "Reasoning effort: Low"],
   );
-  assert.deepEqual(reasoningPayload("opaque-model", "default", choices), {});
+  assert.equal(defaultReasoning(choices), '["reasoning_effort","low"]');
+  assert.throws(() => reasoningPayload("opaque-model", "default", choices));
   assert.deepEqual(
     reasoningPayload("opaque-model", '["reasoning_effort","none"]', choices),
     {
@@ -1050,18 +1052,22 @@ test("ACP reasoning dropdown maps provider efforts, persists, clears defaults an
   const result = await select("model", "model-c");
   const option = result.configOptions.find((o) => o.id === "reasoning");
   assert.equal(option.category, "thought_level");
-  assert.equal(option.currentValue, "default");
-  assert.equal(option.options.length, 3);
+  // The server declares "low" as its default; it is selected and sent.
+  assert.equal(option.currentValue, '["reasoning_effort","low"]');
+  assert.deepEqual(
+    option.options.map((o) => o.name),
+    ["Reasoning effort: Off", "Reasoning effort: Low"],
+  );
   const prompt = () =>
     c.c.agent.request("session/prompt", {
       sessionId: c.s.sessionId,
       prompt: [{ type: "text", text: "synthetic arithmetic" }],
     });
   await prompt();
-  assert.equal(requests[0].reasoning_effort, undefined);
-  await select("reasoning", '["reasoning_effort","low"]');
+  assert.equal(requests[0].reasoning_effort, "low");
+  await select("reasoning", '["reasoning_effort","none"]');
   await prompt();
-  assert.equal(requests[1].reasoning_effort, "low");
+  assert.equal(requests[1].reasoning_effort, "none");
   assert.equal(requests[1].params, undefined);
   const a = createAgent();
   const app = new ClientApp().onNotification("session/update", () => {});
@@ -1075,16 +1081,18 @@ test("ACP reasoning dropdown maps provider efforts, persists, clears defaults an
     });
     assert.equal(
       restored.configOptions.find((o) => o.id === "reasoning").currentValue,
-      '["reasoning_effort","low"]',
+      '["reasoning_effort","none"]',
     );
     assert.equal(requests.length, 2, "restore must not replay inference");
   } finally {
     connection.close();
     await a.close();
   }
-  await select("reasoning", "default");
+  // "Model default" is not offered when the server declares a default.
+  await assert.rejects(select("reasoning", "default"));
+  await select("reasoning", '["reasoning_effort","low"]');
   await prompt();
-  assert.equal(requests[2].reasoning_effort, undefined);
+  assert.equal(requests[2].reasoning_effort, "low");
   await select("reasoning", '["reasoning_effort","none"]');
   const switched = await select("model", "model-b");
   assert.equal(

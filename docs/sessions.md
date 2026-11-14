@@ -9,6 +9,7 @@ fallbacks. Diagnostic commands do not make model inference requests.
 | `/status`, `/doctor`                                     | Inspect connection, model, tools, permissions and dependencies |
 | `/login`, `/logout`                                      | Request IDE setup or sign out                                  |
 | `/model MODEL_ID`, `/reasoning CHOICE`                   | Select discovered model and supported reasoning choice         |
+| `/mode ask\|plan\|code`                                  | Choose the session mode                                        |
 | `/permissions`                                           | Inspect permission mode, scopes and grants                     |
 | `/permissions mode MODE_ID`                              | Choose an approval mode                                        |
 | `/permissions sandbox workspace\|read_only\|full_access` | Choose OS isolation                                            |
@@ -24,6 +25,35 @@ fallbacks. Diagnostic commands do not make model inference requests.
 | `/fork [TITLE]`                                          | Create a separate saved conversation                           |
 | `/export PATH.md`, `/export PATH.json`                   | Propose an export into the workspace                           |
 | `/server-tools on\|off\|refresh`                         | Control optional Open WebUI-managed tools                      |
+
+## Session modes
+
+The **Mode** selector (ACP category `mode`) is a view over existing controls.
+It adds no separate permission system:
+
+| Mode | Maps to                                              | Effect                                                                                 |
+| ---- | ---------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Ask  | **Read only** permission mode, Code workflow         | File inspection only. No edits, commands, MCP processes/tools or server tasks          |
+| Plan | Plan workflow; permission mode unchanged             | Inspection and plan updates. Edits, commands, MCP startup and server tasks are blocked |
+| Code | Code workflow with the selected **Permissions** mode | Current behavior: approvals, Sandbox and administrator rules apply                     |
+
+Choosing Ask selects Read only and leaves YOLO. Choosing **Read only** in
+Permissions also shows Ask. Returning to Code restores an earlier **Ask each
+time** or **Use scoped approvals** choice from this connection; otherwise it
+selects the safe default. It never restores edits, development or YOLO modes;
+select those again explicitly. Plan keeps the Permissions value, so leaving Plan
+returns to it. Administrator `permissionModes` rules hide Ask without
+`read_only`, and hide Code when neither `scoped` nor `ask` is allowed.
+
+The session file stores the workflow and non-elevated permission mode, so the
+mode survives restore and fork. The model and reasoning choice are also saved per
+session. `/status` reports `mode` and the available modes.
+
+Clients that implement ACP v1 session modes, rather than config options, receive
+the same three modes in `modes`, can use `session/set_mode`, and receive
+`current_mode_update`. Config-option clients receive `config_option_update`.
+Both views stay in sync. The earlier `workflow` selector ID is still accepted
+but no longer advertised. `/plan on|off` remains available.
 
 ## YOLO permissions
 
@@ -41,9 +71,16 @@ also exits. Plan mode still blocks execution. See [the access scope](../README.m
 
 ## Models and context
 
-Reasoning choices come from structured Open WebUI metadata. **Model default**
-omits the override. Changing models refreshes choices and clears incompatible
-settings; restoration retains a still-supported choice. Metadata and HTTP
+The model selector lists the models Open WebUI returns for your account, with
+display names where provided. The configured model is selected for new sessions.
+
+Reasoning choices come from structured Open WebUI metadata, in the server's
+declared order. Only declared levels are offered; Off (`none`) appears only when
+the server declares it. If the only reasoning control declares a valid default,
+new sessions and model changes select that level and send it explicitly.
+Otherwise **Model default** is offered first and omits the override. Changing
+models refreshes choices and selects the new model's default. Restoration keeps
+a still-supported choice and otherwise uses the declared default. Metadata and HTTP
 acceptance alone do not establish that a provider applies the selected control.
 
 The context indicator uses latest-call prompt and completion tokens with the
@@ -117,7 +154,10 @@ root through the target directory, up to sixteen levels and 64 KB in total.
 Nested instructions apply to their subtree. Refreshed instructions are sent to
 the model before a new edit proposal if they changed. Siblings and ancestors
 outside the approved root are not loaded. Guidance cannot override permissions,
-load hooks, or activate project executable configuration.
+load hooks, or activate project executable configuration. `AGENTS.md` is the
+only instruction file name loaded. Other agents' files, such as `CLAUDE.md`, and
+project `skills/` or `.agents/skills/` directories are not loaded; the model can
+read them with file tools when the guidance points to them.
 
 ## History, forks and deletion
 
