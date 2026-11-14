@@ -48,8 +48,13 @@ prompt updates, cancellation, model/config selectors, slash commands, session
 listing and client-gated notices use stable v1 APIs. Load replays stored messages
 and recorded tool outcomes as updates. It never executes or approves them again.
 Steering and rewind have no stable v1 method; v2 drafts exist only as
-proposals. They use a session option and the `/rewind` command, respectively. Client filesystem capabilities take precedence for unsaved
-editor content; denial cannot trigger a local fallback. Commands use the owned
+proposals. They use a session option and the `/rewind` command, respectively.
+Session config options use the categories `model`,
+`thought_level` and `mode`. The same Ask/Plan/Code modes are also returned as
+v1 `modes`, with `session/set_mode` and `current_mode_update`, for clients
+without config-option support. See [session modes](sessions.md#session-modes).
+Client filesystem capabilities take precedence for unsaved editor content;
+denial cannot trigger a local fallback. Commands use the owned
 runner because an ACP terminal capability does not guarantee OS isolation.
 
 Incoming requests pass through a per-session turn scheduler. Interrupt mode
@@ -149,16 +154,46 @@ This minimum applies to optional server tasks, not core coding or direct MCP.
 
 Saved reasoning/thinking controls in `info.params.model_controls` supply explicit
 options and map to `params.model_controls[modelId][controlId]`.
-**Model default** omits the override. If saved controls are absent, the agent can
-also consume explicit `provider_model_controls.reasoning_effort` options and
+When the only reasoning control declares a `default` naming one of its options,
+that option is the initial selection and is sent explicitly. A server can
+resolve an omitted override differently from its declared default. Otherwise
+**Model default** is offered and omits the override. Options keep the server's
+declaration order; the agent adds, removes or sorts no levels. If saved controls
+are absent, the agent can also consume explicit
+`provider_model_controls.reasoning_effort` options and
 map them to top-level `reasoning_effort`. That optional deployment metadata is
 not present in the upstream Open WebUI 0.13.3 tag and is not a core requirement.
 No values are inferred from a name, description or default effort alone.
 
-Model changes refresh metadata and reset incompatible choices. Restore keeps
-valid choices. The selector uses ACP category `thought_level`; `/reasoning` is
+Model changes refresh metadata and select the new model's default choice.
+Restore keeps valid choices and otherwise uses the default choice. The selector uses ACP category `thought_level`; `/reasoning` is
 the fallback. Acceptance of a parameter is not evidence of a behavioral effect:
 that requires validation against the actual provider.
+
+## ACP v2 readiness
+
+The agent speaks ACP v1 and answers `protocolVersion: 1` to any request,
+including v2 (the migration guide permits a v1-only agent to do so). The audit
+below covers the v1 surfaces that ACP v2 removes or reshapes. The SDK's v2 and
+unstable v1 entrypoints are drafts, and this project advertises stable v1 only.
+Shapes that exist only there are deferred.
+
+| API                                     | Current use                                                                    | v2 status                                     | Change                                                                                             |
+| --------------------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `fs/read_text_file`                     | Reads unsaved editor text when the client advertises it; otherwise local reads | Removed                                       | None needed: local workspace reads are the fallback. Tested with a v2-shaped client                |
+| `fs/write_text_file`                    | Writes through the editor when advertised; otherwise atomic local writes       | Removed                                       | None needed. Client denial never falls back. Created-file undo then uses the Linux-only local path |
+| `terminal/*`                            | Not used; commands always use the owned sandboxed runner                       | Removed; agent-owned `terminal_update` added  | None. Display through `terminal_update` deferred to a v2 implementation                            |
+| `session/set_mode`, `modes`             | Added: Ask/Plan/Code mirrored from the `mode` config option                    | Removed; `mode` config option replaces it     | Config option is canonical; v1 mode fields kept for v1 clients                                     |
+| `current_mode_update`                   | Sent when the derived mode changes                                             | Replaced by `config_option_update`            | `config_option_update` is also sent                                                                |
+| `session/set_config_option`             | String `value` select options                                                  | Requires `type: "id"` or `"boolean"`          | Deferred; v1 handler unchanged                                                                     |
+| `plan` update                           | Full plan entries after `update_plan` and on restore                           | `plan_update` with `planId`; `cancelled`      | Deferred: stable v1 has no plan ID                                                                 |
+| `session/request_permission`            | Prompt text in `toolCall.title`; diff/command details in tool content          | Required `title`; `subject` tool call/command | Deferred: stable v1 has no `title`/`subject`                                                       |
+| `tool_call`                             | Creates tool calls before updates                                              | Removed; first `tool_call_update` creates     | Deferred                                                                                           |
+| `diff` content (`oldText`/`newText`)    | Full before/after text for approvals and results                               | Replaced by `changes`/`patch`                 | Deferred                                                                                           |
+| `session/load`, `loadSession`           | Restores history without replaying tools                                       | Replaced by `session/resume`                  | Deferred                                                                                           |
+| `authenticate`, `logout`, `auth.logout` | Terminal setup check and sign-out                                              | `auth/login`, `auth/logout`                   | Deferred; terminal-auth compatibility unchanged                                                    |
+| `mcpCapabilities.sse`                   | SSE MCP accepted                                                               | SSE transport removed                         | Kept for v1 clients                                                                                |
+| `session/prompt` response               | Returns the turn's stop reason                                                 | Acknowledges insertion; `state_update` ends   | Deferred                                                                                           |
 
 ## Context and verification
 

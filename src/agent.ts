@@ -20,6 +20,7 @@ import { mcpSecrets, ideFileProblemsArguments } from "./ide-mcp.js";
 import {
   verificationCommands,
   fileProblemsResult,
+  IDE_DIAGNOSTICS_ABSENT,
   projectCheckResult,
   boundedVerificationText,
   unavailableVerification,
@@ -166,7 +167,16 @@ import {
   permissionModes,
   parsePermissionMode,
   type Grant,
+  type PermissionMode,
 } from "./permissions.js";
+import {
+  availableSessionModes,
+  codePermissionMode,
+  currentSessionMode,
+  parseSessionMode,
+  sessionModes,
+  type SessionModeId,
+} from "./modes.js";
 import { Mcp } from "./mcp.js";
 import {
   serverCatalog,
@@ -180,6 +190,7 @@ import {
   type ServerRun,
 } from "./server-tools.js";
 import {
+  defaultReasoning,
   reasoningChoices,
   reasoningPayload,
   type ReasoningChoice,
@@ -310,6 +321,10 @@ type Session = {
   messages: Message[];
   compaction: CompactionState;
   workflow: "code" | "plan";
+  // In-memory permission choice that Code restores after Ask; never persisted.
+  codePermissions?: PermissionMode;
+  // Last mode sent through ACP v1 session modes.
+  announcedMode?: SessionModeId;
   plan: z.infer<typeof planSchema>;
   contextUsage?: ContextUsage;
   active: boolean;
@@ -457,6 +472,7 @@ export function createAgent(
               "compact",
               "autocompact",
               "queue",
+              "mode",
               "plan",
               "status",
               "doctor",
@@ -472,6 +488,52 @@ export function createAgent(
         })),
       ],
     });
+  const modelName = (s: Session, id: string) => {
+    const name = s.metadata.find((m) => m.id === id)?.name;
+    return typeof name === "string" && name.trim() && name !== id
+      ? `${name.trim().slice(0, 200)} (${id})`
+      : id;
+  };
+  const sessionMode = (s: Session) =>
+    currentSessionMode(s.workflow, s.permissions.currentMode);
+  const modeChoices = (s: Session) => {
+    const available = availableSessionModes(
+      s.administrator.rules.permissionModes,
+    );
+    // Always list the active mode so the selector can render it.
+    return sessionModes.filter(
+      (m) => m.id === sessionMode(s) || available.includes(m),
+    );
+  };
+  // ACP v1 session modes, kept in sync with the "mode" config option for
+  // clients that do not implement session config options.
+  const modeState = (s: Session) =>
+    s.accessError
+      ? undefined
+      : {
+          currentModeId: sessionMode(s),
+          availableModes: modeChoices(s).map((m) => ({
+            id: m.id,
+            name: m.name,
+            description: m.description,
+          })),
+        };
+  const announceMode = async (client: AgentContext, s: Session) => {
+    const mode = sessionMode(s);
+    if (s.accessError || mode === s.announcedMode) return;
+    s.announcedMode = mode;
+    await update(client, s, {
+      sessionUpdate: "current_mode_update",
+      currentModeId: mode,
+    });
+  };
+  const configChanged = async (client: AgentContext, s: Session) => {
+    await update(client, s, {
+      sessionUpdate: "config_option_update",
+      configOptions: options(s),
+    });
+    await announceMode(client, s);
+  };
   const options = (s: Session): SessionConfigOption[] =>
     s.accessError
       ? []
@@ -482,7 +544,7 @@ export function createAgent(
             category: "model",
             type: "select",
             currentValue: s.config.model,
-            options: s.models.map((m) => ({ value: m, name: m })),
+            options: s.models.map((m) => ({ value: m, name: modelName(s, m) })),
           },
           {
             id: "reasoning",
@@ -493,9 +555,22 @@ export function createAgent(
             options: s.choices.map((c) => ({ value: c.value, name: c.name })),
           },
           {
+            id: "mode",
+            name: "Mode",
+            category: "mode",
+            type: "select",
+            currentValue: sessionMode(s),
+            description:
+              "Ask uses the Read only permission mode; Plan blocks edits, commands and MCP; Code uses the Permissions and Sandbox settings.",
+            options: modeChoices(s).map((m) => ({
+              value: m.id,
+              name: m.name,
+              description: m.description,
+            })),
+          },
+          {
             id: "permissions",
             name: "Permissions",
-            category: "mode",
             type: "select",
             currentValue: s.permissions.currentMode,
             description:
@@ -552,16 +627,6 @@ export function createAgent(
               ...(s.administrator.rules.allowServerTools === false
                 ? []
                 : [{ value: "on", name: "Available with scoped approvals" }]),
-            ],
-          },
-          {
-            id: "workflow",
-            name: "Workflow",
-            type: "select",
-            currentValue: s.workflow,
-            options: [
-              { value: "code", name: "Code" },
-              { value: "plan", name: "Plan (read-only inspection)" },
             ],
           },
           {
@@ -1008,10 +1073,7 @@ export function createAgent(
         toolCallId: id,
         status: "completed",
       });
-      await update(client, s, {
-        sessionUpdate: "config_option_update",
-        configOptions: options(s),
-      });
+      await configChanged(client, s);
     } catch (error) {
       await leaveYolo(s);
       await update(client, s, {
@@ -1019,10 +1081,7 @@ export function createAgent(
         toolCallId: id,
         status: "failed",
       });
-      await update(client, s, {
-        sessionUpdate: "config_option_update",
-        configOptions: options(s),
-      });
+      await configChanged(client, s);
       throw error;
     }
   };
@@ -2230,7 +2289,9 @@ export function createAgent(
       accessError,
       models: metadata.map((m) => m.id),
       metadata,
-      reasoning: "default",
+      reasoning: defaultReasoning(
+        reasoningChoices(metadata.find((m) => m.id === c.model)),
+      ),
       sandbox: initialSandbox(administrator),
       administrator,
       reviewer: "off",
@@ -2263,7 +2324,8 @@ export function createAgent(
     await advertiseCommands(client, s);
     await save(s);
     await checkAuthentication(authEpoch);
-    return { sessionId: s.id, configOptions: options(s) };
+    s.announcedMode = sessionMode(s);
+    return { sessionId: s.id, configOptions: options(s), modes: modeState(s) };
   });
   // session/load replays history; session/resume restores the same state for a
   // client that kept its own transcript. Neither re-runs tools or jobs.
@@ -2385,7 +2447,7 @@ export function createAgent(
       reasoning:
         accessError || choices.some((x) => x.value === saved.reasoning)
           ? saved.reasoning
-          : "default",
+          : defaultReasoning(choices),
       choices,
       sandbox:
         saved.sandboxMode !== "full_access" &&
@@ -2475,7 +2537,8 @@ export function createAgent(
         "An earlier agent version redacted this session's workspace path. The original workspace cannot be verified. Your next coding prompt will ask you to attach this history to the current workspace; remembered workspace trust will not bypass that approval.",
       );
     await checkAuthentication(authEpoch);
-    return { configOptions: options(s) };
+    s.announcedMode = sessionMode(s);
+    return { configOptions: options(s), modes: modeState(s) };
   };
   app.onRequest("session/load", ({ params, client, signal }) =>
     restoreSession(params, client, signal, true),
@@ -2506,7 +2569,7 @@ export function createAgent(
     signal.throwIfAborted();
     if (s.accessError)
       throw RequestError.invalidParams(undefined, s.accessError);
-    if (["workflow", "permissions", "sandbox", "model"].includes(id))
+    if (["mode", "workflow", "permissions", "sandbox", "model"].includes(id))
       await s.jobs.stopAll();
     if (id === "prompt_mode") {
       const mode = promptModes.find((m) => m === value);
@@ -2516,7 +2579,32 @@ export function createAgent(
           "Unknown incoming prompt mode; choose interrupt, queue or steer",
         );
       s.promptMode = mode;
+    } else if (id === "mode") {
+      const mode = parseSessionMode(value);
+      const allowed = s.administrator.rules.permissionModes;
+      if (!availableSessionModes(allowed).some((m) => m.id === mode))
+        throw new PolicyError(
+          `Administrator permission rules do not allow ${mode} mode`,
+        );
+      if (mode === "plan") s.workflow = "plan";
+      else if (mode === "ask") {
+        enforcePermissionMode(s.administrator, "read_only");
+        const previous = s.permissions.currentMode;
+        if (previous !== "read_only") s.codePermissions = previous;
+        await leaveYolo(s);
+        await s.permissions.selectMode("read_only", signal);
+        s.workflow = "code";
+      } else {
+        if (s.permissions.currentMode === "read_only") {
+          const next = codePermissionMode(s.codePermissions, allowed)!;
+          enforcePermissionMode(s.administrator, next);
+          await s.permissions.selectMode(next, signal);
+        }
+        s.codePermissions = undefined;
+        s.workflow = "code";
+      }
     } else if (id === "workflow") {
+      // Retained for /plan and earlier clients; "mode" is the advertised option.
       if (value !== "code" && value !== "plan")
         throw new Error("Unknown workflow; choose code or plan");
       s.workflow = value;
@@ -2544,7 +2632,7 @@ export function createAgent(
       s.backend = new Backend(s.config, credential);
       s.backend.addSecrets(mcpSecrets(s.servers));
       s.choices = reasoningChoices(s.metadata.find((m) => m.id === value));
-      s.reasoning = "default";
+      s.reasoning = defaultReasoning(s.choices);
       s.contextUsage = undefined;
       s.serverTools = false;
       s.serverCatalog = undefined;
@@ -2608,7 +2696,8 @@ export function createAgent(
     await save(s);
     return { configOptions: options(s) };
   };
-  app.onRequest("session/set_config_option", async ({ params, signal }) => {
+  app.onRequest("session/set_config_option", async (context) => {
+    const { params, signal } = context;
     const s = get(params.sessionId);
     if (s.turns.busy)
       throw RequestError.invalidParams(
@@ -2616,7 +2705,7 @@ export function createAgent(
         "Turn in progress; finish or cancel it before changing session settings",
       );
     if (typeof params.value !== "string") throw RequestError.invalidParams();
-    return select(
+    const result = await select(
       s,
       params.configId,
       params.value,
@@ -2633,6 +2722,30 @@ export function createAgent(
         );
       return rethrowAuthentication(error, caps);
     });
+    // The response carries the options; v1 mode-only clients need the update.
+    await announceMode(context.client, s);
+    return result;
+  });
+  app.onRequest("session/set_mode", async ({ params, client, signal }) => {
+    const s = get(params.sessionId);
+    if (s.turns.busy)
+      throw RequestError.invalidParams(
+        undefined,
+        "Turn in progress; finish or cancel it before changing session settings",
+      );
+    if (!sessionModes.some((m) => m.id === params.modeId))
+      throw RequestError.invalidParams(
+        undefined,
+        "Unknown mode; choose ask, plan or code",
+      );
+    await select(
+      s,
+      "mode",
+      params.modeId,
+      AbortSignal.any([signal, authentication.signal]),
+    ).catch((error) => rethrowAuthentication(error, caps));
+    await configChanged(client, s);
+    return {};
   });
   app.onNotification("session/cancel", ({ params }) => {
     const s = get(params.sessionId);
@@ -2779,10 +2892,7 @@ export function createAgent(
           previousMode !== s.permissions.currentMode ||
           previousSandbox !== s.sandbox
         )
-          await update(client, s, {
-            sessionUpdate: "config_option_update",
-            configOptions: options(s),
-          });
+          await configChanged(client, s);
         const normalized = input;
         const prompt = normalized.text;
         const compactRequested = prompt.trim() === "/compact";
@@ -2911,6 +3021,7 @@ export function createAgent(
               "/reasoning",
               "/reviewer",
               "/server-tools",
+              "/mode",
               "/plan",
               "/autocompact",
               "/queue",
@@ -2922,7 +3033,7 @@ export function createAgent(
               (cmd === "/help"
                 ? ""
                 : "Unknown command or invalid arguments. ") +
-                "Commands: /sessions [cursor], /title [text], /fork [title], /export <workspace-file.json|.md>, /jobs [poll|stop <id>], /checkpoints [clear], /undo [id], /rewind [turn [--keep-files]], /help, /status, /doctor, /login, /logout, /permissions, /model, /reasoning, /reviewer, /server-tools, /compact, /autocompact on|off, /plan on|off, /queue on|off|steer. Plan mode permits file inspection and plan updates only; Code mode retains your permission policy.",
+                "Commands: /sessions [cursor], /title [text], /fork [title], /export <workspace-file.json|.md>, /jobs [poll|stop <id>], /checkpoints [clear], /undo [id], /rewind [turn [--keep-files]], /help, /status, /doctor, /login, /logout, /permissions, /model, /reasoning, /reviewer, /server-tools, /compact, /autocompact on|off, /mode ask|plan|code, /plan on|off, /queue on|off|steer. Ask mode uses the Read only permission mode; Plan mode permits file inspection and plan updates only; Code mode retains your permission policy.",
             );
             return { stopReason: "end_turn" };
           }
@@ -2943,10 +3054,12 @@ export function createAgent(
                     : "interrupt",
                 signal,
               );
-            await update(client, s, {
-              sessionUpdate: "config_option_update",
-              configOptions: options(s),
-            });
+            await configChanged(client, s);
+          }
+          if (cmd === "/mode") {
+            if (rest.length > 1) throw new Error("Use /mode ask|plan|code");
+            if (rest[0]) await select(s, "mode", rest[0], signal);
+            await configChanged(client, s);
           }
           if (cmd === "/plan" || cmd === "/autocompact") {
             if (
@@ -2962,10 +3075,7 @@ export function createAgent(
                 signal,
               );
             else if (rest[0]) await select(s, "autocompact", rest[0], signal);
-            await update(client, s, {
-              sessionUpdate: "config_option_update",
-              configOptions: options(s),
-            });
+            await configChanged(client, s);
           }
           if (cmd === "/permissions" && rest[0] === "revoke") {
             s.turns.cancelWaiting();
@@ -3020,10 +3130,7 @@ export function createAgent(
               rest.length) ||
             cmd === "/permissions"
           )
-            await update(client, s, {
-              sessionUpdate: "config_option_update",
-              configOptions: options(s),
-            });
+            await configChanged(client, s);
           if (cmd === "/doctor") {
             const checks = await sandboxDiagnostics(true);
             await text(client, s, JSON.stringify({ sandbox: checks }));
@@ -3047,6 +3154,8 @@ export function createAgent(
                 backend: s.config.url,
                 model: s.config.model,
                 reasoning: s.reasoning,
+                mode: sessionMode(s),
+                modes: modeChoices(s).map((m) => m.id),
                 workflow: s.workflow,
                 promptQueue: {
                   mode: s.promptMode,
@@ -3323,14 +3432,26 @@ export function createAgent(
             ([, tool]) => tool.ideFileProblems,
           );
           const commands = await verificationCommands(settings, s.root);
-          if (!diagnostic && !commands.length) return undefined;
           const results: VerificationResult[] = [];
+          // Say so when the IntelliJ MCP server is absent; never imply a check.
+          if (!diagnostic)
+            results.push(
+              commands.length
+                ? {
+                    text: IDE_DIAGNOSTICS_ABSENT,
+                    failures: false,
+                    unavailable: false,
+                  }
+                : unavailableVerification(IDE_DIAGNOSTICS_ABSENT),
+            );
+          let diagnosticsLeft = settings.maxDiagnostics;
           let remaining = settings.maxOutputChars;
           const check = async (
             name: string,
             args: Record<string, unknown>,
             title: string,
             format: (raw: string) => VerificationResult,
+            timeoutMs?: number,
           ) => {
             await permitted(s, signal);
             const identity = JSON.stringify([name, args]);
@@ -3395,7 +3516,15 @@ export function createAgent(
                 throw new SandboxError(
                   "Select an OS sandbox to run automatic project checks",
                 );
-              const output = await execute(client, s, c, signal);
+              // The IDE-side timeout is advisory; also bound the call itself.
+              const output = await execute(
+                client,
+                s,
+                c,
+                timeoutMs
+                  ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+                  : signal,
+              );
               result = format(
                 typeof output === "string" ? output : output.text,
               );
@@ -3458,10 +3587,21 @@ export function createAgent(
                   filePath: relative(s.root, path),
                   projectPath: s.root,
                   errorsOnly: !settings.includeWarnings,
-                  timeout: 10000,
+                  timeout: settings.ideTimeoutMs,
                 },
                 `Verify ${relative(s.root, path)} with IDE problems`,
-                (raw) => fileProblemsResult(raw, s.root, path, settings),
+                (raw) => {
+                  const r = fileProblemsResult(
+                    raw,
+                    s.root,
+                    path,
+                    settings,
+                    diagnosticsLeft,
+                  );
+                  diagnosticsLeft -= r.reported ?? 0;
+                  return r;
+                },
+                settings.ideTimeoutMs + 2000,
               );
             }
             if (changedFiles.size > selected.length)
@@ -3537,7 +3677,7 @@ export function createAgent(
             {
               role: "system",
               content:
-                planningInstruction(s.workflow) +
+                planningInstruction(sessionMode(s)) +
                 " Current scoped project instructions are refreshed from files. Use the current snapshot, including an empty snapshot if instructions were removed, rather than historical instruction excerpts in conversation or tool output.",
             },
             ...(s.plan.length

@@ -867,7 +867,12 @@ test("Permissions selector exposes six modes and rejects invalid values without 
     const before = requests.length;
     const result = await setMode(c, "ask");
     const option = result.configOptions.find((o) => o.id === "permissions");
-    assert.equal(option.category, "mode");
+    // The session-mode category belongs to the Ask/Plan/Code selector.
+    assert.equal(option.category, undefined);
+    assert.equal(
+      result.configOptions.find((o) => o.id === "mode").category,
+      "mode",
+    );
     assert.equal(option.currentValue, "ask");
     assert.deepEqual(
       option.options.map((o) => o.value),

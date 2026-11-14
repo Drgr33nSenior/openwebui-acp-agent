@@ -488,6 +488,7 @@ test("resume restores state without replaying history, and close frees the sessi
   });
   try {
     assert(resumed.response.configOptions.length > 0);
+    assert.equal(resumed.response.modes.currentModeId, "code");
     assert(
       !resumed.updates.some((u) =>
         ["user_message_chunk", "agent_message_chunk", "tool_call"].includes(
@@ -649,7 +650,12 @@ test("/rewind lists turns and restores agent edits from discarded turns", async 
     assert.equal(approval.toolCall.content[0].oldText, "two");
     assert.equal(approval.toolCall.content[0].newText, "one");
     const s = c.state();
-    assert.equal(s.messages.at(-1).content, "done first edit");
+    // Turn 1 is kept whole, including any verification note after its reply.
+    assert.equal(
+      s.messages.findLast((m) => m.role === "user").content,
+      "first edit",
+    );
+    assert(s.messages.some((m) => m.content === "done first edit"));
     assert(!JSON.stringify(s.messages).includes("second edit"));
     assert.equal(s.checkpoints.length, 1);
     assert.match(texts(c.updates), /Rewound to before turn 2/);
