@@ -212,6 +212,34 @@ with Off, low, medium and Max levels and a declared default. No live Open WebUI,
 JetBrains or Zed session was run. Selector rendering, `session/set_mode` use by a real
 client and provider reasoning effects remain unverified.
 
+## Sessions, rewind, steering and job status (unreleased)
+
+`test/sessions.test.mjs` covers advertised `resume`/`close` capabilities. Load
+replays text and tool calls with completed or failed outcomes and makes no
+inference request, re-read or approval. Resume returns options and modes without
+replay. Close stops a running job and frees the slot; it is idempotent and keeps
+the saved transcript. Steering tests cover joining after a tool group, continuing
+after a final reply, arrival order, withdrawal, Stop, and queued fallback.
+Commands never join. Rewind tests cover turn listing, one diff approval, restore
+and truncation, the next request's context, and refusal after a later user edit.
+They also cover `--keep-files`, read-only mode, running jobs, bad arguments,
+checkpoint chain gaps and the compaction reset. Created files are removed on
+Linux; elsewhere the test deletes them manually, then rewinds. Job tests cover
+coalesced progress, output size and tail, completion updates, notices only
+with the client capability, and one model report per finished job.
+
+On macOS 27.0 with Node 26.11.1, after merging main at `defb929`,
+`npm ci --ignore-scripts`, lint, typecheck, `npm test`, build and Prettier passed:
+**432 tests, 426 passed, six platform skips, zero failures**. `npm pack`,
+installation into a fresh temporary prefix and `test/package-install.mjs` passed.
+Checkout and installed production audits found zero vulnerabilities.
+
+No live Open WebUI, JetBrains or Zed session was run. Client rendering of
+replayed tool calls, of updates after a turn ends and of notices is unverified.
+Whether a JetBrains client calls `session/resume` or `session/close` is also
+unverified. The steering client matrix in [session controls](sessions.md) comes
+from vendor documentation and earlier observation, not a test.
+
 ## Compatibility
 
 | Component                            | Scope                                                                                                |
