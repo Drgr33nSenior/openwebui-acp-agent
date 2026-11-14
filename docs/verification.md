@@ -307,6 +307,28 @@ skips, zero failures**. `npm pack`, installation into a fresh prefix and
 found zero vulnerabilities. No live Open WebUI or IDE session was run: whether
 the gateway honours `max_tokens` and `low` for summaries, and the summary quality
 at that level, are unverified.
+## YOLO in the Mode selector (unreleased)
+
+JetBrains reported "Mode: yolo (the agent rejected the value)" on new sessions
+after PR #21 moved ACP category `mode` from Permissions to the new Mode
+selector. The cause is inferred from that message and JetBrains' per-category
+memory of the last choice; the exact replay request (`session/set_config_option`
+or `session/set_mode`) was not captured, so tests cover both.
+
+Fake-backend tests replay `yolo` through both requests. Each is accepted, shows
+YOLO in both views and approves nothing. The next prompt asks for confirmation
+before any model request or command; declining leaves YOLO, and accepting runs
+the command unsandboxed. Other tests cover the other Permissions IDs, rejection
+of unknown values, administrator rules that hide and refuse YOLO, and leaving
+YOLO through Code and Plan. Three PR #21 assertions changed only because YOLO is
+now a mode: the mode lists, `/status` modes and the helper results.
+
+On macOS 27.0 with Node 26.11.1, `npm ci`, lint, typecheck, build, Prettier and
+`npm test` passed: **449 tests passed, six platform skips, zero failures**.
+`npm pack` and installation outside the checkout passed, including the installed
+ACP handshake and sandbox command. Both checkout and installed production audits
+found zero vulnerabilities. No live Open WebUI or JetBrains session was run, so
+JetBrains rendering of the fourth mode and removal of the warning are unverified.
 
 ## Compatibility
 

@@ -179,21 +179,46 @@ const operationApprovals = (c) =>
 
 test("mode helpers map onto existing permission and workflow controls", () => {
   assert.equal(currentSessionMode("code", "scoped"), "code");
-  assert.equal(currentSessionMode("code", "yolo"), "code");
+  assert.equal(currentSessionMode("code", "yolo"), "yolo");
+  assert.equal(currentSessionMode("code", "development"), "code");
   assert.equal(currentSessionMode("code", "read_only"), "ask");
   assert.equal(currentSessionMode("plan", "read_only"), "plan");
   assert.equal(currentSessionMode("plan", "development"), "plan");
+  assert.equal(currentSessionMode("plan", "yolo"), "plan");
   assert.throws(() => parseSessionMode("architect"), /Unknown mode/);
+  assert.throws(() => parseSessionMode("full_access"), /Unknown mode/);
+  for (const id of ["ask", "plan", "code", "yolo"])
+    assert.deepEqual(parseSessionMode(id), { mode: id });
+  // Permission-mode IDs from before the Mode selector (category "mode").
+  // "ask" is also the Ask mode ID and keeps that meaning.
+  assert.deepEqual(parseSessionMode("read_only"), { mode: "ask" });
+  for (const id of ["scoped", "edits", "development"])
+    assert.deepEqual(parseSessionMode(id), {
+      mode: "code",
+      permissionMode: id,
+    });
   assert.deepEqual(
-    availableSessionModes(undefined).map((m) => m.id),
+    availableSessionModes(undefined, true).map((m) => m.id),
+    ["ask", "plan", "code", "yolo"],
+  );
+  assert.deepEqual(
+    availableSessionModes(undefined, false).map((m) => m.id),
     ["ask", "plan", "code"],
   );
   assert.deepEqual(
-    availableSessionModes(["read_only"]).map((m) => m.id),
+    availableSessionModes(["read_only"], true).map((m) => m.id),
     ["ask", "plan"],
   );
   assert.deepEqual(
-    availableSessionModes(["scoped", "edits"]).map((m) => m.id),
+    availableSessionModes(["scoped", "edits"], true).map((m) => m.id),
+    ["plan", "code"],
+  );
+  assert.deepEqual(
+    availableSessionModes(["scoped", "yolo"], true).map((m) => m.id),
+    ["plan", "code", "yolo"],
+  );
+  assert.deepEqual(
+    availableSessionModes(["scoped", "yolo"], false).map((m) => m.id),
     ["plan", "code"],
   );
   // Code never restores an elevated mode or one the administrator denies.
@@ -313,12 +338,12 @@ test("new sessions expose mode, model and thought level options plus v1 modes", 
     assert.equal(mode.currentValue, "code");
     assert.deepEqual(
       mode.options.map((o) => o.value),
-      ["ask", "plan", "code"],
+      ["ask", "plan", "code", "yolo"],
     );
     assert.equal(c.s.modes.currentModeId, "code");
     assert.deepEqual(
       c.s.modes.availableModes.map((m) => m.id),
-      ["ask", "plan", "code"],
+      ["ask", "plan", "code", "yolo"],
     );
     // The declared default is sent explicitly rather than omitted.
     requests = [];
@@ -439,7 +464,7 @@ test("mode changes from config options and slash commands announce v1 mode updat
     await c.prompt("/mode");
     const status = JSON.parse(c.updates.at(-1).content.text);
     assert.equal(status.mode, "code");
-    assert.deepEqual(status.modes, ["ask", "plan", "code"]);
+    assert.deepEqual(status.modes, ["ask", "plan", "code", "yolo"]);
     await c.prompt("/mode architect");
     assert.match(c.updates.at(-1).content.text, /Unknown mode/);
     assert.equal(
@@ -480,6 +505,84 @@ test("mode, model and thought level persist per session and restore", async () =
     assert.equal(option(b.s, "reasoning").currentValue, "default");
   } finally {
     await b.close();
+  }
+});
+
+test("permission-mode IDs replayed onto the Mode selector map to modes", async () => {
+  // Before the Mode selector, Permissions carried ACP category "mode" and
+  // clients remember those IDs per category.
+  const c = await client(await workspace());
+  try {
+    for (const [value, mode, permissions] of [
+      ["development", "code", "development"],
+      ["read_only", "ask", "read_only"],
+      ["edits", "code", "edits"],
+      ["scoped", "code", "scoped"],
+      // "ask" is also the Ask mode ID and keeps that meaning.
+      ["ask", "ask", "read_only"],
+      ["yolo", "yolo", "yolo"],
+    ]) {
+      const result = await c.set("mode", value);
+      assert.equal(option(result, "mode").currentValue, mode, value);
+      assert.equal(
+        option(result, "permissions").currentValue,
+        permissions,
+        value,
+      );
+    }
+    for (const [value, mode, permissions] of [
+      ["development", "code", "development"],
+      ["read_only", "ask", "read_only"],
+      ["scoped", "code", "scoped"],
+    ]) {
+      assert.deepEqual(await c.setMode(value), {});
+      const config = c.updates.findLast(
+        (u) => u.sessionUpdate === "config_option_update",
+      );
+      assert.equal(option(config, "mode").currentValue, mode, value);
+      assert.equal(
+        option(config, "permissions").currentValue,
+        permissions,
+        value,
+      );
+      assert.equal(
+        c.updates.findLast((u) => u.sessionUpdate === "current_mode_update")
+          .currentModeId,
+        mode,
+      );
+    }
+    for (const value of ["architect", "full_access", "workspace", "YOLO"]) {
+      await assert.rejects(
+        c.set("mode", value),
+        /Unknown mode; choose ask, plan, code or yolo/,
+      );
+      await assert.rejects(
+        c.setMode(value),
+        /Unknown mode; choose ask, plan, code or yolo/,
+      );
+    }
+    // Rejected values leave the session unchanged.
+    const unchanged = await c.set("autocompact", "on");
+    assert.equal(option(unchanged, "mode").currentValue, "code");
+    assert.equal(option(unchanged, "permissions").currentValue, "scoped");
+    assert.deepEqual(c.executed, []);
+    assert.deepEqual(c.approvals, []);
+  } finally {
+    await c.close();
+  }
+  // A replayed permission-mode ID is subject to the administrator's rules.
+  const limited = await client(await workspace(), {
+    policy: snapshotPolicy({ version: 1, permissionModes: ["scoped", "ask"] }),
+  });
+  try {
+    await assert.rejects(
+      limited.set("mode", "development"),
+      /Administrator policy denies/,
+    );
+    await assert.rejects(limited.setMode("read_only"), /do not allow ask mode/);
+    assert.equal(option(limited.s, "permissions").currentValue, "scoped");
+  } finally {
+    await limited.close();
   }
 });
 

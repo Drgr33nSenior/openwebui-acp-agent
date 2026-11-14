@@ -9,7 +9,7 @@ fallbacks. Diagnostic commands do not make model inference requests.
 | `/status`, `/doctor`                                     | Inspect connection, model, tools, permissions and dependencies |
 | `/login`, `/logout`                                      | Request IDE setup or sign out                                  |
 | `/model MODEL_ID`, `/reasoning CHOICE`                   | Select discovered model and supported reasoning choice         |
-| `/mode ask\|plan\|code`                                  | Choose the session mode                                        |
+| `/mode ask\|plan\|code\|yolo`                            | Choose the session mode                                        |
 | `/permissions`                                           | Inspect permission mode, scopes and grants                     |
 | `/permissions mode MODE_ID`                              | Choose an approval mode                                        |
 | `/permissions sandbox workspace\|read_only\|full_access` | Choose OS isolation                                            |
@@ -37,29 +37,49 @@ It adds no separate permission system:
 | Ask  | **Read only** permission mode, Code workflow         | File inspection only. No edits, commands, MCP processes/tools or server tasks          |
 | Plan | Plan workflow; permission mode unchanged             | Inspection and plan updates. Edits, commands, MCP startup and server tasks are blocked |
 | Code | Code workflow with the selected **Permissions** mode | Current behavior: approvals, Sandbox and administrator rules apply                     |
+| YOLO | Code workflow, **YOLO — full access (session)** mode | Same as choosing YOLO in Permissions: confirmation at the next workspace prompt        |
 
 Choosing Ask selects Read only and leaves YOLO. Choosing **Read only** in
-Permissions also shows Ask. Returning to Code restores an earlier **Ask each
-time** or **Use scoped approvals** choice from this connection; otherwise it
-selects the safe default. It never restores edits, development or YOLO modes;
-select those again explicitly. Plan keeps the Permissions value, so leaving Plan
-returns to it. Administrator `permissionModes` rules hide Ask without
-`read_only`, and hide Code when neither `scoped` nor `ask` is allowed.
+Permissions also shows Ask, and choosing YOLO there shows YOLO. Returning to
+Code from Ask or YOLO restores an earlier **Ask each time** or **Use scoped
+approvals** choice from this connection; otherwise it selects the safe default.
+It never restores edits, development or YOLO modes; select those again
+explicitly. Plan keeps the Permissions value, so leaving Plan for YOLO keeps a
+YOLO selection and its confirmation, while leaving it for Code exits YOLO.
+Administrator `permissionModes` rules hide Ask without `read_only`, and hide
+Code when neither `scoped` nor `ask` is allowed. YOLO is hidden and refused
+unless both `yolo` and the `full_access` sandbox are allowed.
+
+The YOLO mode follows [YOLO permissions](#yolo-permissions) exactly. Selecting
+it is not consent: the mode shows **YOLO** as soon as it is selected, while
+`/status` reports `yolo.confirmed: false` and commands stay sandboxed. The next
+workspace prompt asks for confirmation before any model request or tool runs.
+Declining or cancelling it returns to Code with the default approval mode. YOLO
+is never saved, so a restored session shows Code.
+
+Earlier releases gave the Permissions selector the ACP `mode` category, and
+clients such as JetBrains remember the last value per category for new
+sessions. The Mode selector and `session/set_mode` therefore also accept the
+Permissions IDs: `yolo` selects YOLO (with confirmation), `read_only` selects
+Ask, and `scoped`, `edits` or `development` select Code with that permission
+mode, subject to administrator rules. `ask` keeps its Mode meaning (Ask). Other
+values are rejected as invalid parameters.
 
 The session file stores the workflow and non-elevated permission mode, so the
 mode survives restore and fork. The model and reasoning choice are also saved per
 session. `/status` reports `mode` and the available modes.
 
 Clients that implement ACP v1 session modes, rather than config options, receive
-the same three modes in `modes`, can use `session/set_mode`, and receive
+the same modes in `modes`, can use `session/set_mode`, and receive
 `current_mode_update`. Config-option clients receive `config_option_update`.
 Both views stay in sync. The earlier `workflow` selector ID is still accepted
 but no longer advertised. `/plan on|off` remains available.
 
 ## YOLO permissions
 
-Choose **YOLO — full access (session)** or `/permissions mode yolo`. The next
-workspace prompt asks for one explicit confirmation after workspace activation.
+Choose the **YOLO** mode, **YOLO — full access (session)** in Permissions,
+`/mode yolo` or `/permissions mode yolo`. The next workspace prompt asks for one
+explicit confirmation after workspace activation.
 A denied, invalid or cancelled reply returns to the administrator-compatible
 default approval mode. No model inference or configured process starts while
 that confirmation is pending. `/status` shows `yolo.confirmed`.
@@ -67,8 +87,9 @@ that confirmation is pending. `/status` shows `yolo.confirmed`.
 Confirmation skips routine approvals and selects unsandboxed commands/local
 MCP for this session. Administrator rules and resource limits still apply.
 Restore, fork, logout and revocation do not preserve confirmation. Use
-`/permissions mode scoped` to exit; changing Sandbox or enabling Approval advice
-also exits. Plan mode still blocks execution. See [the access scope](../README.md#permissions).
+`/permissions mode scoped` or the Code or Ask mode to exit; changing Sandbox or
+enabling Approval advice also exits. Plan mode still blocks execution. See
+[the access scope](../README.md#permissions).
 
 ## Models and context
 

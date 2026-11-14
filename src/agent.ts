@@ -513,6 +513,7 @@ export function createAgent(
   const modeChoices = (s: Session) => {
     const available = availableSessionModes(
       s.administrator.rules.permissionModes,
+      allowedSandbox(s.administrator, "full_access"),
     );
     // Always list the active mode so the selector can render it.
     return sessionModes.filter(
@@ -575,7 +576,7 @@ export function createAgent(
             type: "select",
             currentValue: sessionMode(s),
             description:
-              "Ask uses the Read only permission mode; Plan blocks edits, commands and MCP; Code uses the Permissions and Sandbox settings.",
+              "Ask uses the Read only permission mode; Plan blocks edits, commands and MCP; Code uses the Permissions and Sandbox settings; YOLO is Code with the YOLO permission mode and asks for confirmation at the next workspace prompt.",
             options: modeChoices(s).map((m) => ({
               value: m.id,
               name: m.name,
@@ -2616,6 +2617,14 @@ export function createAgent(
     await leaveYolo(s);
     return {};
   });
+  // Unknown mode values are a clear invalid-params rejection for both APIs.
+  const sessionModeChoice = (value: string) => {
+    try {
+      return parseSessionMode(value);
+    } catch (error) {
+      throw RequestError.invalidParams(undefined, (error as Error).message);
+    }
+  };
   const select = async (
     s: Session,
     id: string,
@@ -2637,9 +2646,16 @@ export function createAgent(
         );
       s.promptMode = mode;
     } else if (id === "mode") {
-      const mode = parseSessionMode(value);
+      const { mode, permissionMode } = sessionModeChoice(value);
       const allowed = s.administrator.rules.permissionModes;
-      if (!availableSessionModes(allowed).some((m) => m.id === mode))
+      // A replayed permission-mode ID is checked against that mode's rules.
+      if (
+        !permissionMode &&
+        !availableSessionModes(
+          allowed,
+          allowedSandbox(s.administrator, "full_access"),
+        ).some((m) => m.id === mode)
+      )
         throw new PolicyError(
           `Administrator permission rules do not allow ${mode} mode`,
         );
@@ -2651,10 +2667,29 @@ export function createAgent(
         await leaveYolo(s);
         await s.permissions.selectMode("read_only", signal);
         s.workflow = "code";
+      } else if (mode === "yolo") {
+        // Same path as Permissions -> YOLO: this only selects the mode.
+        // confirmYolo still asks at the next workspace prompt before any
+        // unsandboxed execution or automatic approval.
+        enforcePermissionMode(s.administrator, "yolo");
+        enforceSandbox(s.administrator, "full_access");
+        const previous = s.permissions.currentMode;
+        if (previous !== "read_only" && previous !== "yolo")
+          s.codePermissions = previous;
+        if (previous !== "yolo") await s.permissions.selectMode("yolo", signal);
+        s.workflow = "code";
       } else {
-        if (s.permissions.currentMode === "read_only") {
-          const next = codePermissionMode(s.codePermissions, allowed)!;
+        // Code leaves Ask and YOLO for the earlier non-elevated choice or the
+        // safe default; a replayed permission-mode ID selects that mode.
+        const current = s.permissions.currentMode;
+        const next =
+          permissionMode ??
+          (current === "read_only" || current === "yolo"
+            ? codePermissionMode(s.codePermissions, allowed)!
+            : undefined);
+        if (next) {
           enforcePermissionMode(s.administrator, next);
+          await leaveYolo(s);
           await s.permissions.selectMode(next, signal);
         }
         s.codePermissions = undefined;
@@ -2791,11 +2826,7 @@ export function createAgent(
         undefined,
         "Turn in progress; finish or cancel it before changing session settings",
       );
-    if (!sessionModes.some((m) => m.id === params.modeId))
-      throw RequestError.invalidParams(
-        undefined,
-        "Unknown mode; choose ask, plan or code",
-      );
+    sessionModeChoice(params.modeId);
     await select(
       s,
       "mode",
@@ -3091,7 +3122,7 @@ export function createAgent(
               (cmd === "/help"
                 ? ""
                 : "Unknown command or invalid arguments. ") +
-                "Commands: /sessions [cursor], /title [text], /fork [title], /export <workspace-file.json|.md>, /jobs [poll|stop <id>], /checkpoints [clear], /undo [id], /rewind [turn [--keep-files]], /help, /status, /doctor, /login, /logout, /permissions, /model, /reasoning, /reviewer, /server-tools, /compact, /autocompact on|off, /mode ask|plan|code, /plan on|off, /queue on|off|steer. Ask mode uses the Read only permission mode; Plan mode permits file inspection and plan updates only; Code mode retains your permission policy.",
+                "Commands: /sessions [cursor], /title [text], /fork [title], /export <workspace-file.json|.md>, /jobs [poll|stop <id>], /checkpoints [clear], /undo [id], /rewind [turn [--keep-files]], /help, /status, /doctor, /login, /logout, /permissions, /model, /reasoning, /reviewer, /server-tools, /compact, /autocompact on|off, /mode ask|plan|code|yolo, /plan on|off, /queue on|off|steer. Ask mode uses the Read only permission mode; Plan mode permits file inspection and plan updates only; Code mode retains your permission policy; YOLO mode selects the YOLO permission mode and asks for confirmation at the next workspace prompt.",
             );
             return { stopReason: "end_turn" };
           }
@@ -3115,7 +3146,8 @@ export function createAgent(
             await configChanged(client, s);
           }
           if (cmd === "/mode") {
-            if (rest.length > 1) throw new Error("Use /mode ask|plan|code");
+            if (rest.length > 1)
+              throw new Error("Use /mode ask|plan|code|yolo");
             if (rest[0]) await select(s, "mode", rest[0], signal);
             await configChanged(client, s);
           }
@@ -3708,6 +3740,9 @@ export function createAgent(
         // Everything one model request carries, rebuilt after a compaction so the
         // size check below measures what would actually be sent.
         const requestContext = () => {
+          // YOLO is the Code workflow; the model sees the same guidance.
+          const mode = sessionMode(s);
+          const guidanceMode = mode === "yolo" ? "code" : mode;
           const historicalGuidance = s.messages.find((m) => m.role === "user");
           const modelContext = contextMessages(s.messages, s.compaction).filter(
             (m) =>
@@ -3730,7 +3765,7 @@ export function createAgent(
             {
               role: "system",
               content:
-                planningInstruction(sessionMode(s)) +
+                planningInstruction(guidanceMode) +
                 " Current scoped project instructions are refreshed from files. Use the current snapshot, including an empty snapshot if instructions were removed, rather than historical instruction excerpts in conversation or tool output.",
             },
             ...(s.plan.length

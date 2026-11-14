@@ -50,7 +50,7 @@ and recorded tool outcomes as updates. It never executes or approves them again.
 Steering and rewind have no stable v1 method; v2 drafts exist only as
 proposals. They use a session option and the `/rewind` command, respectively.
 Session config options use the categories `model`,
-`thought_level` and `mode`. The same Ask/Plan/Code modes are also returned as
+`thought_level` and `mode`. The same Ask/Plan/Code/YOLO modes are also returned as
 v1 `modes`, with `session/set_mode` and `current_mode_update`, for clients
 without config-option support. See [session modes](sessions.md#session-modes).
 Client filesystem capabilities take precedence for unsaved editor content;
