@@ -269,7 +269,38 @@ Workspace activation is an ordinary ACP permission-gated operation at first prom
 
 Trust updates validate the complete store, acquire an exclusive lock file, reread records, write a same-directory 0600 temporary file, flush and rename. A crash can leave a lock requiring manual inspection. Files and directory must already be private; permissive existing state is rejected. Windows storage is deliberately unavailable until equivalent ACL enforcement exists.
 
-History is written before executing returned calls and after results. Restore inserts an unknown-outcome marker for incomplete calls and never replays them. A new prompt interrupts the active turn and waits for its process/MCP cleanup and transcript writes before starting. The latest waiting prompt wins; superseded requests return `cancelled`. Stop cancels both the active turn and a waiting replacement. Emitted partial text and paired tool results are retained, followed by an assistant-role interruption note so compaction still pins the actual user request. Abort signals stop inference and prevent late permission replies from starting work. One-use approvals remain bound to the old operation; deliberate session and remembered grants keep their documented scope. Local process groups are killed on POSIX. Commands use the owned runner; client terminals do not bypass the boundary. Remote cancellation is cooperative.
+History is written before executing returned calls and after results. Restore inserts an unknown-outcome marker for incomplete calls and never replays them. By default, a new prompt interrupts the active turn and waits for its process/MCP cleanup and transcript writes before starting. The latest waiting prompt wins; superseded requests return `cancelled`. The optional queue mode instead serializes prompts in arrival order. Stop cancels the active turn and all waiting requests. Emitted partial text and paired tool results are retained, followed by an assistant-role interruption note so compaction still pins the actual user request. Abort signals stop inference and prevent late permission replies from starting work. One-use approvals remain bound to the old operation; deliberate session and remembered grants keep their documented scope. Local process groups are killed on POSIX. Commands use the owned runner; client terminals do not bypass the boundary. Remote cancellation is cooperative.
+
+### Queued prompts
+
+`src/turns.ts` owns a scheduler per session. A reservation occupies the active
+slot before any asynchronous work. It remains occupied through tool cleanup and
+transcript persistence, including failure paths. Queue mode accepts at most ten
+waiting requests; normalization validates the existing 100 kB input bound before
+reserving a slot and does not access the workspace. Waiting requests have
+independent cancellation signals. Removing a waiter cannot release the active
+slot or let a later request overtake it. Neither the queue nor its prompt contents
+are persisted. Only the `promptMode` preference is restored; old transcripts
+without that field retain interrupt behavior.
+
+Each started turn rechecks authentication, policy and workspace access. Queuing
+does not change permission scope. Stop, logout, disconnect and revocation of a
+matching session's grants cancel waiting work. Request-scoped cancellation
+removes that request; it does not cancel unrelated prompts. Login and logout
+keep their immediate authentication behavior. Other slash commands follow the
+selected scheduling mode; configure it while idle.
+
+The [ACP v1 prompt contract](https://agentclientprotocol.com/protocol/v1/prompt-turn)
+and installed SDK 2.6.0 keep one result with a stop reason for each
+`session/prompt`. The stable schema has no queue or Send now RPC or advertised
+queue UI capability. This implementation schedules received requests locally and
+exposes a normal select option under
+[session configuration](https://agentclientprotocol.com/protocol/v1/session-config-options),
+with `/queue on|off` as a fallback. It does not inject messages between model
+rounds or require experimental protocol features. Rechecked on 2026-11-14;
+current documentation calls the former prompt-lifecycle page **Prompt Turn**.
+The recorded PyCharm client requires Stop before it can send another prompt;
+local scheduling cannot enable controls that its UI does not expose.
 
 ## IDE MCP compatibility
 

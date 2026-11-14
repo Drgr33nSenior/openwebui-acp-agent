@@ -38,6 +38,7 @@ import {
 import { normalizePrompt } from "./prompt.js";
 import { contextSize, contextUsageSchema, type ContextUsage } from "./usage.js";
 import { abortable } from "./cancel.js";
+import { Turns, MAX_QUEUED_PROMPTS, type PromptMode } from "./turns.js";
 import {
   loadPolicy,
   enforceDestination,
@@ -205,8 +206,8 @@ type Session = {
   sandbox: SandboxMode;
   sandboxEpoch?: string;
   abort?: AbortController;
-  running?: Promise<void>;
-  pending?: AbortController;
+  turns: Turns;
+  promptMode: PromptMode;
   mcp: Mcp;
   servers: McpServer[];
   ideServers: McpServer[];
@@ -270,8 +271,7 @@ export function createAgent(
       throw authRequired(caps);
   };
   const cancelTurn = (s: Session) => {
-    s.pending?.abort();
-    s.abort?.abort();
+    s.turns.cancel();
   };
   const signOut = async () => {
     authentication.abort();
@@ -327,6 +327,7 @@ export function createAgent(
               "help",
               "compact",
               "autocompact",
+              "queue",
               "plan",
               "status",
               "doctor",
@@ -433,6 +434,18 @@ export function createAgent(
             ],
           },
           {
+            id: "prompt_mode",
+            name: "Incoming prompts",
+            type: "select",
+            currentValue: s.promptMode,
+            description:
+              "For prompts delivered while busy. Stop cancels active and queued work. The client controls whether sending while busy is available.",
+            options: [
+              { value: "interrupt", name: "Interrupt current turn" },
+              { value: "queue", name: "Queue after current turn" },
+            ],
+          },
+          {
             id: "autocompact",
             name: "Automatic compaction",
             type: "select",
@@ -461,6 +474,7 @@ export function createAgent(
         summary: s.backend.redact(s.compaction.summary),
       }),
       workflow: s.workflow,
+      promptMode: s.promptMode,
       plan: planSchema.parse(
         s.plan.map((entry) => ({
           ...entry,
@@ -1198,6 +1212,8 @@ export function createAgent(
       messages: [],
       compaction: compactionStateSchema.parse({}),
       workflow: "code",
+      promptMode: "interrupt",
+      turns: new Turns(),
       plan: [],
       active: false,
       authEpoch,
@@ -1241,6 +1257,7 @@ export function createAgent(
           compactionStateSchema.parse({}),
         ),
         workflow: z.enum(["code", "plan"]).default("code"),
+        promptMode: z.enum(["interrupt", "queue"]).default("interrupt"),
         plan: planSchema.default([]),
         sandboxMode: z
           .string()
@@ -1341,6 +1358,8 @@ export function createAgent(
       messages: restoreHistory(saved.messages),
       compaction: saved.compaction,
       workflow: saved.workflow,
+      promptMode: saved.promptMode,
+      turns: new Turns(),
       plan: saved.plan,
       contextUsage:
         !accessError &&
@@ -1408,7 +1427,14 @@ export function createAgent(
     signal.throwIfAborted();
     if (s.accessError)
       throw RequestError.invalidParams(undefined, s.accessError);
-    if (id === "workflow") {
+    if (id === "prompt_mode") {
+      if (value !== "interrupt" && value !== "queue")
+        throw RequestError.invalidParams(
+          undefined,
+          "Unknown incoming prompt mode; choose interrupt or queue",
+        );
+      s.promptMode = value;
+    } else if (id === "workflow") {
       if (value !== "code" && value !== "plan")
         throw new Error("Unknown workflow; choose code or plan");
       s.workflow = value;
@@ -1497,7 +1523,7 @@ export function createAgent(
   };
   app.onRequest("session/set_config_option", async ({ params, signal }) => {
     const s = get(params.sessionId);
-    if (s.abort)
+    if (s.turns.busy)
       throw RequestError.invalidParams(
         undefined,
         "Turn in progress; finish or cancel it before changing session settings",
@@ -1529,74 +1555,48 @@ export function createAgent(
     client: AgentContext;
     signal: AbortSignal;
   }) => Promise<PromptResponse>;
-  const interruptAndReplace =
+  const schedulePrompt =
     (run: PromptHandler): PromptHandler =>
     async (context) => {
       const s = get(context.params.sessionId);
-      // Validate before interrupting. Authentication controls retain their existing
-      // discovery/logout behavior, including logout's cancellation of every session.
+      // Validate bounded input without accessing the workspace. Authentication
+      // controls remain immediate, so logout also cancels queued requests.
       const input = normalizePrompt(context.params.prompt);
       const command = input.text.trim().split(/\s+/)[0];
       if (command === "/login" || command === "/logout") return run(context);
       if (authentication.signal.aborted) throw authRequired(caps);
-      if (context.signal.aborted) return { stopReason: "cancelled" };
-      // Record arrival order before any await. A separate running barrier is vital:
-      // a superseded waiter can finish while the actual turn is still cleaning up.
-      const previous = s.running;
-      cancelTurn(s);
-      const pending = new AbortController();
-      s.pending = pending;
-      const signal = AbortSignal.any([
-        context.signal,
-        authentication.signal,
-        pending.signal,
-      ]);
-      try {
-        if (previous) await abortable(previous, signal);
-        signal.throwIfAborted();
-        if (s.pending !== pending) return { stopReason: "cancelled" };
-      } catch (error) {
-        if (signal.aborted) return { stopReason: "cancelled" };
-        throw error;
-      } finally {
-        if (s.pending === pending) s.pending = undefined;
-      }
-      let release!: () => void;
-      const running = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      s.running = running;
-      s.abort = pending;
-      const historyStart = s.messages.length;
-      try {
-        const result = await run({ ...context, signal });
-        // Stop can arrive after the handler chose end_turn but during its finally.
-        return signal.aborted ? { stopReason: "cancelled" } : result;
-      } finally {
-        try {
-          // This also covers cancellation during the handler's final save, after
-          // it has already chosen its response. No replacement can append yet.
-          if (signal.aborted && s.messages.length > historyStart) {
-            restoreHistory(s.messages);
-            s.messages.push({
-              // A housekeeping note must not replace the actual user request
-              // that compaction preserves verbatim.
-              role: "assistant",
-              content:
-                "[Previous turn interrupted before completion. Completed tool results are retained; inspect them before retrying any action. Follow the next user request.]",
-            });
-            await save(s);
+      return s.turns.run(
+        s.promptMode,
+        AbortSignal.any([context.signal, authentication.signal]),
+        async (turnAbort, signal) => {
+          s.abort = turnAbort;
+          const historyStart = s.messages.length;
+          try {
+            return await run({ ...context, signal });
+          } finally {
+            try {
+              // This also covers cancellation during the handler's final save.
+              // No later turn can append until this callback's cleanup finishes.
+              if (signal.aborted && s.messages.length > historyStart) {
+                restoreHistory(s.messages);
+                s.messages.push({
+                  // Keep compaction's pinned user request separate from this note.
+                  role: "assistant",
+                  content:
+                    "[Previous turn interrupted before completion. Completed tool results are retained; inspect them before retrying any action. Follow the next user request.]",
+                });
+                await save(s);
+              }
+            } finally {
+              if (s.abort === turnAbort) s.abort = undefined;
+            }
           }
-        } finally {
-          if (s.abort === pending) s.abort = undefined;
-          if (s.running === running) s.running = undefined;
-          release();
-        }
-      }
+        },
+      );
     };
   app.onRequest(
     "session/prompt",
-    interruptAndReplace(async (context) => {
+    schedulePrompt(async (context) => {
       const { params, client, signal: connectionSignal } = context;
       const s = get(params.sessionId);
       const input = normalizePrompt(params.prompt);
@@ -1710,6 +1710,7 @@ export function createAgent(
               "/server-tools",
               "/plan",
               "/autocompact",
+              "/queue",
             ].includes(cmd!)
           ) {
             await text(
@@ -1718,9 +1719,27 @@ export function createAgent(
               (cmd === "/help"
                 ? ""
                 : "Unknown command or invalid arguments. ") +
-                "Commands: /help, /status, /doctor, /login, /logout, /permissions, /model, /reasoning, /reviewer, /server-tools, /compact, /autocompact on|off, /plan on|off. Plan mode permits file inspection and plan updates only; Code mode retains your permission policy.",
+                "Commands: /help, /status, /doctor, /login, /logout, /permissions, /model, /reasoning, /reviewer, /server-tools, /compact, /autocompact on|off, /plan on|off, /queue on|off. Plan mode permits file inspection and plan updates only; Code mode retains your permission policy.",
             );
             return { stopReason: "end_turn" };
+          }
+          if (cmd === "/queue") {
+            if (
+              rest.length > 1 ||
+              (rest.length && !["on", "off"].includes(rest[0]!))
+            )
+              throw new Error("Use /queue on|off, or /queue to inspect");
+            if (rest[0])
+              await select(
+                s,
+                "prompt_mode",
+                rest[0] === "on" ? "queue" : "interrupt",
+                signal,
+              );
+            await update(client, s, {
+              sessionUpdate: "config_option_update",
+              configOptions: options(s),
+            });
           }
           if (cmd === "/plan" || cmd === "/autocompact") {
             if (
@@ -1742,22 +1761,24 @@ export function createAgent(
             });
           }
           if (cmd === "/permissions" && rest[0] === "revoke") {
+            s.turns.cancelWaiting();
             await s.permissions.revoke();
             await changeTrust(s.root, s.config.url, false);
             for (const other of sessions.values())
               if (other.root === s.root) {
                 other.active = false;
-                if (other !== s) other.abort?.abort();
+                if (other !== s) cancelTurn(other);
                 await other.mcp.close();
               }
           } else if (cmd === "/permissions" && rest[0] === "revoke-tools") {
+            s.turns.cancelWaiting();
             await s.permissions.revoke();
             for (const other of sessions.values())
               if (
                 other !== s &&
                 other.permissions.scope === s.permissions.scope
               )
-                other.abort?.abort();
+                cancelTurn(other);
           } else if (cmd === "/permissions" && rest[0] === "mode") {
             if (rest.length !== 2)
               throw new Error(
@@ -1816,6 +1837,12 @@ export function createAgent(
                 model: s.config.model,
                 reasoning: s.reasoning,
                 workflow: s.workflow,
+                promptQueue: {
+                  mode: s.promptMode,
+                  waiting: s.turns.queued,
+                  limit: MAX_QUEUED_PROMPTS,
+                  stopCancelsWaiting: true,
+                },
                 plan: s.plan,
                 compaction: {
                   automatic: s.compaction.automatic,

@@ -2,6 +2,45 @@
 
 Date: 2026-11-13. This is a tested preview, not completed replacement acceptance. Raw sanitized automated output is in [test-output.txt](test-output.txt).
 
+## Queued prompts (unreleased)
+
+Implemented from `main` at `a3ca4cb` on 2026-11-14. The **Incoming prompts**
+selector adds opt-in FIFO scheduling; `/queue on|off` is the fallback. Existing
+interrupt-and-replace behavior remains the default. Each delivered prompt keeps
+its own ACP response. Stop cancels active and waiting work; there is no Send now
+action. The queue holds at most ten waiting prompts under the existing input
+bounds. Session restore retains the mode but never restarts pending work.
+
+On macOS 27.0, Node 26.11.1 and npm 11.20.0, `npm ci`, typecheck, lint,
+the required Prettier scope and build passed. The final full
+`node --test test/*.test.mjs` run passed **288 tests, zero failures or skips**.
+The 12 added regressions cover FIFO cleanup/history ordering, independent waiter
+cancellation, Stop followed immediately by another prompt, input and queue bounds,
+no access before workspace consent, late approval, saved mode without queue replay,
+operation approvals, real owned-command cleanup, disconnect, authentication at
+dequeue, independent sessions, grant revocation and IDE logout. The prior 14
+interrupt regressions still pass. Each full run supplied a fresh external
+`OPENWEBUI_ACP_HOME` before starting Node and verified that it remained empty.
+`npm ci` audited 193 packages with zero vulnerabilities. `npm pack` passed with
+a separate writable npm cache; the default IDE-managed cache was not writable
+and was left unchanged. The tarball includes the built queue module and agent.
+Sanitized output is in
+[test-output-prompt-queue.txt](test-output-prompt-queue.txt).
+
+The first focused run required loopback access outside the execution harness's
+filesystem sandbox. Two new assertions initially checked ACP's generic error
+message instead of its error data; they were corrected, and an invalid prompt-mode
+selection now returns an actionable Invalid params error. No permission or sandbox
+check was disabled. Review also added cancellation of messages queued behind a
+revocation in the same session before the final full run.
+
+This proves agent scheduling with an ACP test client and fake inference, plus the
+existing real macOS process-boundary fixtures. It does not establish a native IDE
+queue UI. The earlier PyCharm 2026.3/AI Assistant 263.7307.206 observation still
+applies: the client shows Stop while busy and cannot deliver another prompt until
+stopped. No newer live JetBrains queue test, Linux/Windows run, installation,
+publication or hosted CI was performed for this change.
+
 ## Browser schema compatibility (unreleased)
 
 The installation check found that Playwright MCP 0.0.85 declares JSON Schema

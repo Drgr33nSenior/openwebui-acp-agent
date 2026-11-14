@@ -347,11 +347,29 @@ required.
 
 Transcripts are local `session-UUID.json` files. They retain model selection, reasoning and message/tool history. Loading rechecks the workspace and destination and never executes saved tool calls. Interrupted outcomes are marked unknown. The ordinary coding loop creates no Open WebUI chat records. Approved Open WebUI-managed tasks create retained server chats as disclosed in their approval; the agent does not delete them.
 
-A new prompt interrupts a running turn and waits for cleanup before starting.
-If several prompts arrive while cleanup is pending, only the latest starts.
-Partial streamed text and completed tool results remain in history. Stop also
-cancels a waiting replacement. The client controls whether you can send while
-the agent is busy; the tested PyCharm AI Assistant requires Stop first.
+Incoming prompts use **Interrupt current turn** by default: a new prompt stops
+the running turn, waits for cleanup, and starts the latest waiting request.
+Select **Incoming prompts → Queue after current turn**, or send `/queue on`
+while idle, to process delivered prompts in arrival order. `/queue off` restores
+the default; `/queue` and `/status` show the setting and waiting count. The mode
+is saved with the session. There is no Send now action.
+
+The queue holds at most ten waiting prompts, each subject to the normal 100 kB
+prompt limit. Each waits for the previous turn's tool cleanup and transcript
+writes; it sees completed results and uses the normal operation permission policy.
+One-use approvals do not transfer between turns.
+Waiting messages do not enter model context or saved transcripts until their
+turn starts. Stop cancels the active turn and **all** waiting prompts. A new
+message sent after Stop waits for cleanup, then starts normally. Cancelling one
+request removes only that request. Logout and disconnect discard waiting work;
+loading a saved session never restarts a queue. Partial output and completed tool
+results from an interrupted active turn remain in history.
+
+The client controls whether you can send while the agent is busy. The tested
+PyCharm 2026.3 AI Assistant kept the Stop button and could not send another
+message during a turn. This selector cannot add a queue UI to that client;
+queuing is available to ACP clients that deliver overlapping `session/prompt`
+requests. Live IDE queue display and delivery remain unverified.
 
 Limits include 32 sessions per process, 64 calls per turn, 1 MB response/context budget, 2 MB per transcript, 1000 transcripts and a 64 MB aggregate storage budget. Quota exhaustion stops work; automatic history truncation and deletion are not implemented. Stop the agent and delete selected `session-UUID.json` files to remove history. Preserve configuration and trust unless you also intend to remove them. Transcripts can contain project content; known configured credentials are redacted, but arbitrary secrets embedded in user text cannot be identified reliably.
 
