@@ -1226,7 +1226,7 @@ async function runProbes({
   }
   return {
     ...judged,
-    // Per probe: outcome and, for a refusal, the first line of the agent's
+    // Per probe: outcome and, for a failure, the first line of the agent's
     // error with local paths replaced. Output that holds the marker is dropped.
     results: Object.fromEntries(
       plan.map((p) => {
@@ -1242,10 +1242,7 @@ async function runProbes({
           {
             kind: p.kind,
             ok: o?.ok ?? null,
-            ...(p.kind === "deny" &&
-            o &&
-            !o.ok &&
-            !line.includes(setup.source.script.marker)
+            ...(o && !o.ok && !line.includes(setup.source.script.marker)
               ? { reason: line }
               : {}),
           },

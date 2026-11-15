@@ -509,7 +509,14 @@ test(
     assert.equal(
       report.isolation.established,
       true,
-      report.isolation.findings.join("; "),
+      JSON.stringify({
+        findings: report.isolation.findings,
+        controls: Object.fromEntries(
+          Object.entries(report.isolation.results).filter(
+            ([, result]) => result.kind === "control",
+          ),
+        ),
+      }),
     );
     assert.deepEqual(
       report.preconditions.map((p) => p.split(" ")[0]),
