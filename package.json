@@ -1,6 +1,6 @@
 {
   "name": "openwebui-acp-agent",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Unofficial Open WebUI coding agent for JetBrains and compatible ACP clients",
   "repository": {
     "type": "git",
