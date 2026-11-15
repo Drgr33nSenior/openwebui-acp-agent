@@ -84,6 +84,87 @@ Open WebUI 0.13.3 (public version endpoint checked). Browser versions were
 Private model IDs and deployment addresses are intentionally omitted. The same
 configured model was used throughout. No IDE UI was driven in these runs.
 
+## Play-testing interactive apps
+
+On 15 November 2026 the agent built a pygame platformer and ran 14 commands in
+one turn. They were headless scripted play-throughs under SDL's dummy video
+driver that asserted internal state. They passed while the real game was
+unplayable, because the agent could not see the screen. `view_image` and the
+[interactive-app rule](tools.md#interactive-apps) address this. The model must
+look at what the app draws after real input, and say what it did not see.
+
+opencode's current prompts only add emphatic verification wording. Plain-text
+references (anomalyco/opencode, `packages/core/src/plugin/system-prompt/`):
+
+```text
+meta.txt: "Verify the correctness of your solution through execution whenever possible ... Evidence before synthesis."
+kimi.txt: "test what you build, verify what you change"
+```
+
+The rule here is original prose. It adds what those lines lack: the evidence
+for an interactive app is a viewed screenshot taken after real input.
+
+A pygame play-test without a display:
+
+1. Set `SDL_VIDEODRIVER=dummy` (and `SDL_AUDIODRIVER=dummy`) before importing
+   pygame. Drawing, `pygame.image.save` and the event queue all work.
+2. Run the game's own main loop. Do not reimplement it. Wrap
+   `pygame.display.flip` (or `update`) to count frames, post input at chosen
+   frames with `pygame.event.post`, save the display surface at key moments and
+   post `QUIT` at the end.
+3. Posted events do not change `pygame.key.get_pressed()`. If the game polls
+   held keys, wrap `get_pressed` so that it also reports the keys the script holds.
+4. Keep screenshots at most 1280×1280. Scale larger windows with
+   `pygame.transform.smoothscale` before saving. Then call `view_image` on each
+   screenshot and compare it with what a player should see.
+
+```python
+import os
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+import pygame
+import game  # the real game; game.main() runs its own loop
+
+held, frame = set(), 0
+real_flip, real_pressed = pygame.display.flip, pygame.key.get_pressed
+
+def flip():
+    global frame
+    real_flip()
+    frame += 1
+    if frame == 10:  # press and hold right
+        held.add(pygame.K_RIGHT)
+        pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RIGHT))
+    if frame in (5, 60):
+        pygame.image.save(pygame.display.get_surface(), f"shots/frame{frame:03}.png")
+    if frame == 61:
+        pygame.event.post(pygame.event.Event(pygame.QUIT))
+
+class Keys:
+    def __init__(self, real):
+        self.real = real
+    def __getitem__(self, key):
+        return key in held or self.real[key]
+
+pygame.display.flip = flip
+pygame.key.get_pressed = lambda: Keys(real_pressed())
+game.main()
+```
+
+This recipe was run against a minimal 320×240 game that polls held keys, with
+pygame-ce 2.5.8 and SDL 2.32.10 on macOS. The frame-5 screenshot showed the
+player at the left. The frame-60 screenshot showed it moved right after the held
+input. For web UIs, the browser tools drive clicks and keys but take no
+screenshots. A rendering check needs a headless browser the project already
+has, saving into the workspace, followed by `view_image`.
+
+`test/manual-image-check.mjs --live AGENT_DIRECTORY` sends one 640×480
+two-colour PNG through `view_image` and the real inference path, and prints what
+the model said it saw. It authenticates like the runtime benchmark, except that
+it copies only the named connection settings, not the sign-in epoch. It approves
+only the scratch workspace activation and runs one turn: the `view_image` call
+and the answer, two model requests.
+
 ## Changes and threat model
 
 See [recorded runs and trimmed transcripts](runtime-verification-results.md) for

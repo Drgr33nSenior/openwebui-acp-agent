@@ -7,6 +7,21 @@ export type Message = {
   tool_calls?: Call[];
   tool_call_id?: string;
 };
+// What a request sends. Only the outgoing copy carries content parts: the
+// transcript keeps text, and an image message becomes text plus an image_url
+// part when the request is built (images.ts).
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+export type WireMessage = Omit<Message, "content"> & {
+  content: string | null | ContentPart[];
+};
+// Serialized request size without inline image data. Images are bounded and
+// counted separately (by pixel size), not by their base64 length.
+export const textChars = (value: unknown) =>
+  JSON.stringify(value, (key, v) =>
+    key === "url" && typeof v === "string" && v.startsWith("data:") ? "" : v,
+  ).length;
 export type Call = {
   id: string;
   type: "function";
@@ -180,7 +195,7 @@ export class Backend {
     );
   }
   async complete(
-    messages: Message[],
+    messages: WireMessage[],
     tools: unknown[],
     signal: AbortSignal,
     onText: (s: string) => Promise<void>,
@@ -188,7 +203,7 @@ export class Backend {
     maxResponseChars = MAX,
     onUsage?: (used: number, prompt?: number) => Promise<void>,
   ): Promise<Message> {
-    if (JSON.stringify(messages).length > MAX)
+    if (textChars(messages) > MAX)
       throw new Error(
         "Context budget exceeded; start a new session. History retained.",
       );
@@ -244,7 +259,7 @@ export class Backend {
     }
   }
   private async stream(
-    messages: Message[],
+    messages: WireMessage[],
     tools: unknown[],
     signal: AbortSignal,
     onText: (s: string) => Promise<void>,

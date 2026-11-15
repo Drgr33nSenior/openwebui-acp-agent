@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Message } from "./backend.js";
 import { CheckpointError, type Checkpoint } from "./checkpoints.js";
+import { isImageMessage } from "./images.js";
 import {
   compactionStateSchema,
   PROJECT_GUIDANCE_PREFIX,
@@ -20,11 +21,16 @@ export const checkpointTurnsSchema = z
 export type CheckpointTurns = z.infer<typeof checkpointTurnsSchema>;
 
 // Indices of user messages that start a rewindable point, in order. Legacy
-// project guidance stored as a user message is not a turn.
+// project guidance stored as a user message is not a turn, and neither is a
+// view_image attachment (tool output in a user-role message).
 export function userTurns(messages: Message[]): number[] {
   const result: number[] = [];
   messages.forEach((m, index) => {
-    if (m.role === "user" && !m.content?.startsWith(PROJECT_GUIDANCE_PREFIX))
+    if (
+      m.role === "user" &&
+      !m.content?.startsWith(PROJECT_GUIDANCE_PREFIX) &&
+      !isImageMessage(m)
+    )
       result.push(index);
   });
   return result;

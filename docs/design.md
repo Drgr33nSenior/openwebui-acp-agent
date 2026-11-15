@@ -96,6 +96,18 @@ do not add `tool_ids`, `features`, chat IDs or session IDs. Deployment filters
 and providers can affect behavior, so fake-server contract tests do not prove
 a live provider's semantics.
 
+The only array `content` a coding request sends is a `view_image` attachment.
+It is a user-role message with a text part and an `image_url` `data:` URI part,
+placed after all tool results of its round. Open WebUI 0.13.3 source
+(`convert_url_images_to_base64`) passes `data:image/` URIs through unchanged. Its
+OpenAI router flattens image parts in `tool` messages to text, so images never go
+there. Its tool-pair sanitizer drops tool results that do not directly follow
+their call. The capability check `strip_tool_images` applies only to replayed
+server-side chat output, not to client messages. Open WebUI sets no body limit.
+A gateway in front of the model can. The one used for the live check caps a
+chat body at 64 MB and passes still images unchanged. A live check through that path is described in
+[runtime verification](runtime-verification.md#play-testing-interactive-apps).
+
 SSE parsing preserves fragmented UTF-8, text and tool arguments. Non-streaming
 replies are also supported. Argument normalization accepts only harmless forms
 permitted by the declared schema; validation precedes execution. Multiple tool

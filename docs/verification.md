@@ -427,6 +427,44 @@ skips, zero failures**. `npm pack`, installation into a fresh temporary prefix
 and `test/package-install.mjs` passed. Checkout and installed production audits
 found zero vulnerabilities. No live Open WebUI or IDE session was run.
 
+## Image viewing and interactive definition of done (unreleased)
+
+`test/view-image.test.mjs` covers the following:
+
+- format and size detection for PNG, GIF, JPEG and the three WebP chunk types;
+- refusal of non-images, images over 1280 pixels on a side and files over 1 MB;
+- refusal of outside, sensitive, symlinked and missing paths through the agent;
+- the request shape: tool results stay contiguous, then a user message with a
+  text part and an `image_url` `data:` URI equal to the file;
+- a saved session that holds the path, size and SHA-256 but no image data, and
+  that sends the stub after `session/load` without replaying the attachment as
+  a user message;
+- batch clearing: requests carry 1, 2, 3 and 4 images, then 2 after the fifth;
+- capability gating on `info.meta.capabilities.vision` and the `viewImage`
+  override;
+- token estimates, text-size accounting that excludes inline image data, and a
+  near-1 MB image that is still sent;
+- image messages excluded from user turns and pinned requests;
+- the interactive rule shown only with `run_command` and `view_image`, and the
+  browser addition only with both;
+- one visual reminder per turn for a pygame file changed after the last viewed
+  screenshot, none after a later `view_image`, and none for non-GUI code.
+
+The Plan and read-only tool lists in `permissions.test.mjs` and
+`workflow.test.mjs` now include `view_image`, an inspection tool.
+
+On macOS 27.0 with Node 26.11.1, lint, typecheck, Prettier, build and `npm test`
+passed: **522 tests, 516 passed, six platform skips, zero failures**. `npm pack`,
+installation into a fresh temporary prefix and `test/package-install.mjs`
+passed. Checkout and installed production audits found zero vulnerabilities.
+
+One live turn ran `test/manual-image-check.mjs` through Open WebUI 0.13.3, the
+deployment gateway and the served model. The model called `view_image` on a
+640×480 PNG and answered "The left half is red and the right half is blue."
+Reported usage rose from 4,733 to 5,153 tokens between the two requests. That
+fits the 302-token estimate plus the call, result, label and answer. No IDE UI
+was driven, and no model play-test of a real game was run.
+
 ## 0.6.0 release candidate
 
 This candidate includes main `b945e39` and updates package, lockfile, ACP/MCP

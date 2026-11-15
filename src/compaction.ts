@@ -7,6 +7,7 @@ import {
   OUTPUT_LIMIT_NOTICE,
   type Message,
 } from "./backend.js";
+import { isImageMessage } from "./images.js";
 import { reasoningPayload, type ReasoningChoice } from "./reasoning.js";
 import { contextLimits, outputAllowance, type ContextUsage } from "./usage.js";
 
@@ -41,14 +42,16 @@ export const STEERING_PREFIX =
   "[Steering message sent while this turn was running; it adds to the current request]\n";
 const MAX_PINNED_STEERING = 10;
 
-// The latest user request before `end`, ignoring guidance and steering
-// messages, plus the steering messages that followed it (most recent last).
+// The latest user request before `end`, ignoring guidance, image attachments
+// and steering messages, plus the steering messages that followed it (most recent last).
 export function pinnedRequest(messages: Message[], end: number) {
   const guidanceIndex = projectGuidanceIndex(messages);
   const steering: number[] = [];
   for (let index = end - 1; index >= 0; index--) {
     const m = messages[index]!;
-    if (m.role !== "user" || index === guidanceIndex) continue;
+    // A view_image attachment is tool output in a user-role message.
+    if (m.role !== "user" || index === guidanceIndex || isImageMessage(m))
+      continue;
     if (m.content?.startsWith(STEERING_PREFIX)) steering.unshift(index);
     else
       return { request: index, steering: steering.slice(-MAX_PINNED_STEERING) };
