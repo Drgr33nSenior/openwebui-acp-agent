@@ -1428,7 +1428,24 @@ export function createAgent(
       throw new SandboxError(
         "File writes are disabled by the read-only sandbox setting",
       );
-    await refreshInstructions(client, s, proposal.path, signal);
+    const editing = "old_string" in proposal;
+    const missing = (e: unknown) => {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      return null;
+    };
+    // A missing folder fails path checks with ENOENT (instruction discovery
+    // and target() both check every existing component): say what is missing.
+    const missingPath = (e: unknown): never => {
+      missing(e);
+      throw new Error(
+        editing
+          ? missingEditTarget(proposal.path)
+          : missingParentFolder(proposal.path),
+      );
+    };
+    await refreshInstructions(client, s, proposal.path, signal).catch(
+      missingPath,
+    );
     if (s.instructionReviewRequired && !forceOnce)
       return {
         failed: true,
@@ -1436,20 +1453,7 @@ export function createAgent(
           "Project instructions changed or were newly discovered. Read and follow these scoped instructions, then propose the edit again; nothing was written.\n" +
           instructionContext(s.instructions),
       };
-    const editing = "old_string" in proposal;
-    const missing = (e: unknown) => {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-      return null;
-    };
-    // A missing folder fails here: target() checks every existing component.
-    const path = await target(s.root, proposal.path, true).catch((e) => {
-      missing(e);
-      throw new Error(
-        editing
-          ? missingEditTarget(proposal.path)
-          : missingParentFolder(proposal.path),
-      );
-    });
+    const path = await target(s.root, proposal.path, true).catch(missingPath);
     const key = viewKey(s, proposal.path);
     const before = await read(client, s, proposal.path).catch(missing);
     let after: string;
