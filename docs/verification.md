@@ -883,6 +883,45 @@ failures**. `npm pack`, installation into a fresh prefix,
 zero vulnerabilities. The Linux `/proc` path ran only in CI. The JetBrains
 prompt rendering of the new option was not checked in a live IDE.
 
+## T3 desktop compatibility (unreleased)
+
+On macOS 27.0, T3 Code Beta 0.1.6 and Node 26.11.1, published 0.6.0 launched
+and completed `/status` in a dedicated scratch project. Its first coding prompt
+then failed while connecting the client-supplied T3 stdio MCP bridge. The
+bridge's public `ELECTRON_RUN_AS_NODE=1` flag was also treated as a secret and
+replaced digits in diagnostic JSON.
+
+The local compatibility build maps the verified client-supplied desktop bridge
+to its original loopback HTTP endpoint, with the original MCP authorization.
+Fake-server tests cover exact descriptor matching, changed destinations,
+malformed and duplicate fields, header injection, client provenance, approval
+before traffic, credential separation and absence of diagnostic exemptions.
+See [the inspected T3 contract](t3.md). No process runs unsandboxed as a fallback.
+
+`npm ci --ignore-scripts`, build, lint, typecheck and the standard Prettier check
+passed. The full suite passed **514 tests: 508 passed, six platform skips, zero
+failures**. An earlier run used a dependency symlink and failed three sandboxed
+stdio fixtures because their dependencies were outside the permitted directory.
+A normal local dependency installation resolved those failures without changing
+the sandbox or tests. Package installation, the installed handshake, a real
+sandbox command and the installed production audit passed; the audit found zero
+vulnerabilities. Documentation clarity audits passed.
+
+Through the running T3 server, the patched provider completed `/status` with
+valid JSON, then connected its configured MCP catalogs and returned the requested
+marker from live inference. Existing sign-in was used through the agent; no key
+was inspected or exported. The smoke prompt requested no tool execution or file
+access. Interactive approval rendering, edits, commands, terminal login and
+session restoration in T3 were not tested. Other T3 platforms and versions remain
+unverified. This is an installed local preview, not part of public 0.6.0.
+
+For the PR, the same adapter was applied to current main `f219d6e` and the
+required checks were repeated: lint, typecheck, build and Prettier passed; the
+full suite reported **565 tests, 557 passed, eight skips, zero failures**.
+The packed installation and installed production audit passed with zero
+vulnerabilities. The earlier live result applies to the 0.6.0-based preview;
+live inference was not repeated against the newer source.
+
 ## Compatibility
 
 | Component                            | Scope                                                                                                |
