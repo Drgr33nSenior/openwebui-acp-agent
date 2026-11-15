@@ -56,7 +56,9 @@ line, 1-based) and `limit` (at most 2,000 lines) to read another range:
 { "path": "src/app.py", "offset": 401, "limit": 100 }
 ```
 
-An offset past the last line is an error that states the line count. A page also
+An offset past the last line is not an error: the result is the last page (the last `limit` lines, 400 by default) with a note before the footer, for example
+`[offset 400 is past the end; the file has 351 lines; showing lines 1–351; lines 1–351 of 351; end of file]`.
+An empty file keeps `[empty file: 0 lines]`. A page also
 stops at about 24,000 characters, and a line longer than 2,000 characters is cut
 with a marker giving its length. For a file with CRLF line endings, lines are
 shown without the carriage return and the footer says so; a multi-line
@@ -111,8 +113,11 @@ and then reports a lower bound:
 [13 more matches in 7 files not shown; narrow with path or glob, or search for longer text]
 ```
 
-`path` limits the search to a workspace directory, with the same checks as
-`list_files`. `glob` filters file paths: a pattern without `/`, such as `*.py`
+`path` limits the search to a subdirectory or a single file, with the same
+checks as `list_files` (outside, sensitive, symlinked and missing paths fail as
+before). A single named file is searched even when a default ignore such as
+`build/` would hide it from a directory search, and `glob` does not filter it;
+output is unchanged. `glob` filters file paths: a pattern without `/`, such as `*.py`
 or `*.{ts,tsx}`, matches file names at any depth; one with `/`, such as
 `src/**/*.ts`, matches the workspace-relative path.
 
@@ -151,6 +156,12 @@ The `edit_file` description carries one example call with `old_string` and
 program, each argument as a separate `args` item, and an explicit `sh -c` for
 shell syntax: the [edit comparison](edit-verification.md) recorded an exit 127
 when a whole command line was sent as `executable`.
+
+A whitespace-containing `executable`, such as `python3 -m unittest`, is refused
+before any process starts: `executable must be the program only; use executable:
+"python3", args: ["-m", "unittest"]. ... Nothing was run.` The suggestion comes
+from a plain whitespace split and is never executed, because quoting could change
+its meaning. An existing absolute path that contains a space is still allowed.
 
 A call that omits a required argument and adds undeclared ones, such as
 `edit_file` with `write_file`'s `before` and `after`, is rejected with those

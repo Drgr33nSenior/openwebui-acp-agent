@@ -327,6 +327,18 @@ export async function files(r: string, path?: string) {
   await walk(start, rules);
   return out;
 }
+// Files for search_text: like files(), or just the named file when `path` is a
+// single file. target() still refuses sensitive, outside and symlinked paths,
+// and default ignores do not hide a file the model named explicitly.
+export async function searchFiles(r: string, path?: string) {
+  const requested = path?.replaceAll("\\", "/").replace(/\/+$/, "");
+  if (requested && requested !== ".") {
+    const p = await target(r, requested);
+    if ((await lstat(p)).isFile())
+      return { files: [relative(r, p).replaceAll("\\", "/")], single: true };
+  }
+  return { files: await files(r, path), single: false };
+}
 // list_files output bounds. The full set stays available to search_text.
 export const LISTING_ENTRIES = 500;
 export const LISTING_BYTES = 16_000;

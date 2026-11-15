@@ -151,8 +151,8 @@ import {
   type PromptResponse,
 } from "@agentclientprotocol/sdk";
 import { randomUUID } from "node:crypto";
-import { lstat } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { lstat, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
 import { z } from "zod";
 import {
   config,
@@ -178,6 +178,7 @@ import {
   target,
   readText,
   files,
+  searchFiles,
   listing,
   atomicEdit,
 } from "./workspace.js";
@@ -239,6 +240,25 @@ import {
   NO_MASK,
   type ContextMask,
 } from "./context-mask.js";
+// A whole command line in `executable` fails only at spawn ("No such file or
+// directory"). Refuse it first, unless it is an existing absolute path that
+// contains a space. The split is for the message only: quoting could change
+// what the command means, so it is never executed.
+async function rejectCommandLine(executable: string, args: string[]) {
+  if (!/\s/.test(executable)) return;
+  if (
+    isAbsolute(executable) &&
+    (await stat(executable).then(
+      (s) => s.isFile(),
+      () => false,
+    ))
+  )
+    return;
+  const [program = "", ...rest] = executable.trim().split(/\s+/);
+  throw new Error(
+    `executable must be the program only; use executable: ${JSON.stringify(program)}, args: [${[...rest, ...args].map((x) => JSON.stringify(x)).join(", ")}]. If the command needs quoting or shell syntax, use executable: "sh", args: ["-c", "..."]. Nothing was run.`,
+  );
+}
 function restoreHistory(messages: Message[]) {
   for (let i = 0; i < messages.length; i++) {
     const calls = messages[i]?.tool_calls;
@@ -332,7 +352,7 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
       list_files:
         "List workspace files, honouring .gitignore and skipping generated environments, caches and build output (for example .venv, __pycache__, dist, build, target). Large listings are capped and report how many entries were omitted; pass path, a workspace-relative directory, to list a subtree.",
       read_file: `Read a text file as numbered lines "N${LINE_MARK}text"; the "N${LINE_MARK}" prefix is not file content. Files up to ${READ_WHOLE_BYTES / 1024} KB return whole; larger files return ${READ_PAGE_LINES} lines per page. offset is the 1-based first line, limit the number of lines; the footer gives the range and the next offset.`,
-      search_text: `Search for literal, case-sensitive text in the files list_files would return. Returns up to max_results (default ${SEARCH_RESULTS}) "path:line: text" lines and counts the rest. Narrow with path (a workspace directory) or glob ("*.py" matches names anywhere, "src/**/*.ts" matches paths).`,
+      search_text: `Search for literal, case-sensitive text in the files list_files would return. Returns up to max_results (default ${SEARCH_RESULTS}) "path:line: text" lines and counts the rest. Narrow with path (a subdirectory or a single file) or glob ("*.py" matches names anywhere, "src/**/*.ts" matches paths).`,
       write_file:
         "Create a file with before=null or deliberately rewrite a whole file. before must be the entire current file, including whitespace and the final newline, without read_file's line-number prefixes; after is the entire replacement. Read first. Prefer edit_file for changes to existing files. Create large files as a small skeleton, then extend with small edits.",
       edit_file: `Replace literal text in an existing file; read it first. old_string must occur exactly once (include surrounding lines) unless replace_all=true. Copy it from the file text without read_file's "N${LINE_MARK}" prefixes, keeping indentation and line endings. Example: {"path":"src/app.py","old_string":"    return total - bonus\\n","new_string":"    return total + bonus\\n"}. The resulting file must stay within 100,000 characters.`,
@@ -1993,9 +2013,10 @@ export function createAgent(
       return pageText(await read(client, s, a.path), a.offset, a.limit);
     if (name === "search_text") {
       const found = new SearchResults(a.text, a.max_results);
-      for (const p of (await files(s.root, a.path)).sort()) {
+      const searched = await searchFiles(s.root, a.path);
+      for (const p of searched.files.sort()) {
         if (found.done) break;
-        if (a.glob && !globMatch(p, a.glob)) continue;
+        if (!searched.single && a.glob && !globMatch(p, a.glob)) continue;
         await permitted(s, signal);
         try {
           found.add(p, await read(client, s, p));
@@ -2015,6 +2036,7 @@ export function createAgent(
       return applyFileEdit(client, s, a, signal, c.id, changedFiles, forceOnce);
     }
     if (name === "run_command") {
+      await rejectCommandLine(a.executable, a.args);
       const selectedSandbox = await sandboxMode(s);
       const escalation = a.sandbox_permissions === "require_escalated";
       const unsandboxed = selectedSandbox === "full_access" || escalation;
