@@ -128,7 +128,10 @@ Another project or Air worktree needs its own decision.
 Where supported, approvals offer one operation, the current session, or a
 remembered workspace/backend scope. Command grants match exact arguments, not
 prefixes. Unsandboxed commands, background launches and local HTTP MCP tools
-require fresh approval outside confirmed YOLO mode. The narrow IDE file-problems
+require fresh approval outside confirmed YOLO mode. Sandboxed connections to
+servers this session started need no prompt, and the network prompt can allow
+localhost for the session; reserved service ports still ask (see
+[local development servers](docs/sandbox.md#local-development-servers)). The narrow IDE file-problems
 exception is described in
 [verification after edits](docs/ide-diagnostics.md). Optional approval advice
 also forces a human decision.

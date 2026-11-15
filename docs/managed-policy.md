@@ -31,6 +31,7 @@ sandboxed execution, and always asks for commands and edits:
   "allowStdioMcp": false,
   "allowServerTools": false,
   "allowPreviews": false,
+  "allowLoopbackShortcuts": false,
   "allowScopeExpansion": false,
   "networkDestinations": [],
   "alwaysAsk": ["command", "edit", "mcp-server", "mcp-tool", "network"],
@@ -51,12 +52,20 @@ Preview hosting does not grant socket access to workspace commands or proxy
 requests to a backend. Its loopback listener is separate from the outbound
 `networkDestinations` policy.
 
+`allowLoopbackShortcuts: false` disables both
+[loopback shortcuts](sandbox.md#local-development-servers): sandboxed connections
+to this session's own listeners prompt again, and the network prompt no longer
+offers **Allow localhost (any port) for this session**. `alwaysAsk: ["network"]`
+also disables them. Administrator rules apply first in every case.
+
 `networkDestinations` contains exact `{ "host": "example.org", "port": 443 }`
 entries. It restricts connections from sandboxed commands and local MCP
 processes. When present, it also forbids unsandboxed execution, which could
 bypass the proxy. It does not control inference traffic, HTTP MCP destinations,
 or a remote server's own network; those have separate destination rules.
 An allowed server can receive data and can perform its own downstream actions.
+Loopback shortcuts never extend this list: an unlisted loopback port is denied
+without a prompt.
 
 `allowScopeExpansion: false` refuses command filesystem exceptions and explicit
 command escalation. Local MCP installation read scopes still need startup

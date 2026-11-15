@@ -111,6 +111,16 @@ No changes after [0.6.0](0.6.0.md).
   asks for a visual check when an interactive-app file changed after the last
   viewed screenshot. See the
   [pygame recipe](../runtime-verification.md#play-testing-interactive-apps).
+- Stop repeated "Allow sandbox network connection" prompts for local servers.
+  A sandboxed connection to a loopback port served by this session's own
+  unsandboxed background job (or its static preview) is approved without a
+  prompt, and the network prompt for other loopback destinations adds **Allow
+  localhost (any port) for this session**. Reserved service ports (JetBrains
+  IDE, Docker API, debuggers, common databases, local model servers) and the
+  agent's own local Open WebUI/MCP ports still prompt each time. Remote
+  destinations, YOLO and administrator rules are unchanged; the new
+  `allowLoopbackShortcuts: false` policy field disables both shortcuts. See
+  [local development servers](../sandbox.md#local-development-servers).
 
 See [verification](../verification.md), [session modes](../sessions.md#session-modes),
 [ACP v2 readiness](../design.md#acp-v2-readiness) and the

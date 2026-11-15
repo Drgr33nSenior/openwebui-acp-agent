@@ -60,9 +60,59 @@ Network approval does not provide credentials.
 
 Each invocation has a separate runtime broker and proxy. HTTP/HTTPS and SOCKS
 connections request exact hostname/port approval. Loopback and LAN destinations
-also need approval. Grants can cover one decision, this session or the remembered
-workspace/backend scope. Ask each time ignores saved grants; revocation clears
-them. Approving a host does not distinguish reads from remote mutations.
+also need approval, except for the loopback shortcuts below. Grants can cover
+one decision, this session or the remembered workspace/backend scope. Ask each
+time ignores saved grants; revocation clears them. Approving a host does not
+distinguish reads from remote mutations.
+
+### Local development servers
+
+Sandboxed commands cannot bind host ports, so a development or game server
+runs as an approved unsandboxed background job (`require_escalated` or the
+Unsandboxed sandbox mode). Two shortcuts stop repeated prompts when sandboxed
+clients such as curl, Playwright or a test runner connect to it:
+
+- **Own listeners.** A connection to a loopback destination needs no prompt
+  when every listener that could answer it belongs to this session: a running
+  unsandboxed background job, its descendants or process-group members, or the
+  session's static preview. The tool call is still recorded as approved.
+- **Session choice.** For other loopback destinations, the network prompt adds
+  **Allow localhost (any port) for this session**. It is never remembered and
+  revocation clears it.
+
+Only literal loopback addresses (`127.0.0.0/8`, `::1`) and the exact name
+`localhost` qualify, and `localhost` only when every locally resolved address
+is loopback. Other names, including `*.localhost` and shorthand such as `127.1`,
+keep the per-host prompt; the runtime also refuses non-loopback answers for
+`localhost`. Remote and LAN destinations are unchanged.
+
+Neither shortcut covers reserved local service ports: the JetBrains built-in
+server (63342–63361) and MCP server (64342), the Docker API (2375–2376), browser
+and Node.js debuggers (9222, 9229), common databases (1433, 1521, 3306, 5432,
+6379, 9200, 11211, 27017) and local model servers (11434, 1234). The configured
+Open WebUI port and the ports of configured MCP and IDE MCP URLs are also
+excluded when they are local. These keep a per-port prompt, as before. The
+reviewed list is `SENSITIVE_PORTS` in `src/loopback.ts`.
+
+Ownership is checked when the connection is requested, within two seconds,
+and a positive answer is cached for 1.5 seconds. On Linux the agent reads
+`/proc/net/tcp`, `/proc/net/tcp6`, `/proc/<pid>/stat` and the owned processes'
+socket descriptors. On macOS it runs `/usr/sbin/lsof -iTCP:<port> -sTCP:LISTEN`
+and `/bin/ps`. A timeout, an error or an unsupported platform falls back to the
+prompt. Native Windows has no command sandbox, so nothing changes there.
+
+Threat model: a prompt-injected sandboxed command can now reach, without a
+prompt, servers this session started, and with the session choice any loopback
+port outside the reserved list. A local service without authentication on
+such a port (an admin console, a dev database on an unusual port, a job's own
+debug endpoint) can therefore be read or changed by sandboxed code, and an
+unsandboxed job's server can act with that job's full access. The reserved list
+covers well-known services that hold credentials, data or code execution; it
+cannot cover every local service. On macOS, `lsof` cannot see other OS
+accounts' processes, so a foreign listener on another loopback address of the
+same port is not detected. Ask each time, approval advice, administrator
+`alwaysAsk: ["network"]` and `allowLoopbackShortcuts: false` disable both
+shortcuts; see [administrator rules](managed-policy.md).
 
 Programs must honor the supplied proxy settings; direct-only clients fail
 closed. No TLS interception, insecure TLS switch or wildcard destination grant

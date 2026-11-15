@@ -180,7 +180,10 @@ The default macOS command sandbox blocks local socket binding. A development
 server can therefore fail with `Operation not permitted` even after command
 approval. Use static preview for frontend files. Running an arbitrary server
 process remains a separate hosting problem; the agent must report that blocker
-without changing execution routes or isolation. Linux sandbox loopback also
+without changing execution routes or isolation. A server the user approves as an
+unsandboxed background job is reachable from sandboxed commands without further
+prompts; see [local development servers](sandbox.md#local-development-servers).
+Browser tool approvals are unaffected. Linux sandbox loopback also
 belongs to its own network namespace. Docker Desktop host routing was verified
 on macOS; Linux host-to-container routing requires separate acceptance.
 
