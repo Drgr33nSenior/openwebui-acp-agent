@@ -265,10 +265,14 @@ test("edit/output guidance and recovery hints name only available tools", () => 
   assert.match(both, /4096 output tokens/);
   assert.match(both, /small skeleton with write_file.*small edit_file calls/);
   assert.match(both, /unique literal old_string/);
+  assert.match(
+    both,
+    /Existing files over 8 KB are refused: change them with edit_file/,
+  );
   assert.match(both, /under 100 lines/);
   assert.doesNotMatch(
     runtimeInstruction(offered("write_file"), new Map(), false),
-    /edit_file/,
+    /edit_file|refused/,
   );
   assert.doesNotMatch(
     runtimeInstruction(offered("edit_file"), new Map(), false),

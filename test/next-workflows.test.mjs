@@ -415,7 +415,16 @@ test("a transcript beyond the session storage limit no longer blocks an edit or 
       automatic: false,
     };
     const approvals = c.approvals.length;
-    pending = [[call("write_file", { path: "a.txt", before, after }, "quota")]];
+    // edit_file: write_file now refuses to rewrite an existing file this large.
+    pending = [
+      [
+        call(
+          "edit_file",
+          { path: "a.txt", old_string: before, new_string: after },
+          "quota",
+        ),
+      ],
+    ];
     await c.prompt("Apply the proposed change");
     assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), after);
     assert.equal(c.approvals.length, approvals + 1);

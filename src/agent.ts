@@ -17,7 +17,12 @@ import {
   checkReminder,
   needsRuntimeCheck,
 } from "./harness.js";
-import { firstChangedLine, replaceText } from "./edits.js";
+import {
+  WRITE_FILE_MAX_EXISTING_BYTES,
+  firstChangedLine,
+  largeRewriteRefusal,
+  replaceText,
+} from "./edits.js";
 import {
   LINE_MARK,
   LINE_NUMBER_HINT,
@@ -353,8 +358,7 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
         "List workspace files, honouring .gitignore and skipping generated environments, caches and build output (for example .venv, __pycache__, dist, build, target). Large listings are capped and report how many entries were omitted; pass path, a workspace-relative directory, to list a subtree.",
       read_file: `Read a text file as numbered lines "N${LINE_MARK}text"; the "N${LINE_MARK}" prefix is not file content. Files up to ${READ_WHOLE_BYTES / 1024} KB return whole; larger files return ${READ_PAGE_LINES} lines per page. offset is the 1-based first line, limit the number of lines; the footer gives the range and the next offset.`,
       search_text: `Search for literal, case-sensitive text in the files list_files would return. Returns up to max_results (default ${SEARCH_RESULTS}) "path:line: text" lines and counts the rest. Narrow with path (a subdirectory or a single file) or glob ("*.py" matches names anywhere, "src/**/*.ts" matches paths).`,
-      write_file:
-        "Create a file with before=null or deliberately rewrite a whole file. before must be the entire current file, including whitespace and the final newline, without read_file's line-number prefixes; after is the entire replacement. Read first. Prefer edit_file for changes to existing files. Create large files as a small skeleton, then extend with small edits.",
+      write_file: `Create a file with before=null or rewrite a small existing file (up to ${WRITE_FILE_MAX_EXISTING_BYTES / 1024} KB; larger files are refused, use edit_file). before must be the entire current file, including whitespace and the final newline, without read_file's line-number prefixes; after is the entire replacement. Read first. Prefer edit_file for changes to existing files. Create large files as a small skeleton, then extend with small edits.`,
       edit_file: `Replace literal text in an existing file; read it first. old_string must occur exactly once (include surrounding lines) unless replace_all=true. Copy it from the file text without read_file's "N${LINE_MARK}" prefixes, keeping indentation and line endings. Example: {"path":"src/app.py","old_string":"    return total - bonus\\n","new_string":"    return total + bonus\\n"}. The resulting file must stay within 100,000 characters.`,
       list_jobs:
         "List this session's bounded command jobs; jobs are not restarted on restore",
@@ -1407,6 +1411,8 @@ export function createAgent(
         throw error;
       }
     } else {
+      const refusal = before === null ? undefined : largeRewriteRefusal(before);
+      if (refusal) throw new Error(refusal);
       if (before !== proposal.before) {
         if (
           before !== null &&

@@ -638,6 +638,10 @@ test("edit_file and run_command descriptions each carry valid example calls", as
       },
     ]);
     assert.match(description("edit_file"), /without read_file's "N→" prefixes/);
+    assert.match(
+      description("write_file"),
+      /small existing file \(up to 8 KB; larger files are refused, use edit_file\)/,
+    );
     assert.deepEqual(examples("run_command"), [
       { executable: "python3", args: ["-m", "pytest"] },
       { executable: "sh", args: ["-c", "make | tail"] },

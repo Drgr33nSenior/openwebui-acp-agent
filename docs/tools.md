@@ -169,8 +169,14 @@ field names. Nothing runs and no alias is applied.
 
 Use `write_file` with `before: null` to create a file. For a deliberate whole-file
 rewrite, supply the complete current text in `before` and replacement in `after`.
-Build large files as a small skeleton, then extend them through small `edit_file`
-calls. Both tools show the full proposed diff and use the same workspace rules,
+An existing file larger than 8 KB (8,192 bytes) is refused before approval:
+`write_file replaces whole files; this file is N KB, so a full rewrite risks being
+cut off by the output limit. Use edit_file for targeted changes ...`. Nothing is
+written and no approval is requested. `write_file` sends the file twice (`before`
+and `after`), so 8 KB is about 16 KB or 4-5k tokens, well inside the default
+12,288-token reply. There is no opt-out: several `edit_file` calls can make any
+change. New files and files up to 8 KB are unaffected. Build large files as a
+small skeleton, then extend them through small `edit_file` calls. Both tools show the full proposed diff and use the same workspace rules,
 approvals, checkpoints and undo support. A full undo history drops its oldest
 checkpoints instead of refusing the edit (see
 [checkpoints](sessions.md#checkpoints-and-instructions)). A file changed during
