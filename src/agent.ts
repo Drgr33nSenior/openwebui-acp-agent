@@ -2444,7 +2444,7 @@ export function createAgent(
       agentInfo: {
         name: "openwebui-acp-agent",
         title: "Open WebUI Agent (unofficial)",
-        version: "0.5.0",
+        version: "0.6.0",
       },
       agentCapabilities: {
         auth: { logout: {} },

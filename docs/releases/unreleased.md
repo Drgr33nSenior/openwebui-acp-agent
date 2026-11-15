@@ -1,5 +1,6 @@
 # Unreleased
 
+No changes after [0.6.0](0.6.0.md).
 - Recover from common tool misuse without a wasted round: `search_text` `path`
   may be a single file; `read_file` with an offset past the end returns the last
   page with a note; `run_command` refuses a command line in `executable` with a

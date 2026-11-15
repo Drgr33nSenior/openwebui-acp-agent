@@ -27,7 +27,7 @@ public release, first download the `.tgz` and verify it against `SHA256SUMS` fro
 GitHub Releases:
 
 ```sh
-npm install --prefix /path/to/isolated-install --ignore-scripts ./openwebui-acp-agent-0.5.0.tgz
+npm install --prefix /path/to/isolated-install --ignore-scripts ./openwebui-acp-agent-0.6.0.tgz
 npm audit --prefix /path/to/isolated-install --omit=dev --audit-level=high
 node test/package-install.mjs /path/to/isolated-install
 ```
@@ -160,7 +160,7 @@ The merged feature revision `60ae33cc` also passed CI on macOS, Ubuntu 24.04 and
 The Windows check does not establish native Windows support. Publication and
 public-download verification are separate results in the GitHub release workflow.
 
-## Targeted file edits (unreleased)
+## Targeted file edits (included in 0.6.0)
 
 `edit_file` shares the full protected application path with `write_file`.
 Tests cover zero/unique/multiple matches, explicit replacement of all matches,
@@ -197,7 +197,7 @@ edit and one malformed command. This small sample does not establish a general
 efficiency improvement. The default 40 rounds and 64-call budget are unchanged;
 schema failures still count toward both.
 
-## Session modes, model controls and ACP v2 readiness (unreleased)
+## Session modes, model controls and ACP v2 readiness (included in 0.6.0)
 
 `test/session-modes.test.mjs` covers the Ask/Plan/Code mapping, administrator
 mode limits, v1 `session/set_mode` and `current_mode_update`, slash commands,
@@ -221,7 +221,7 @@ with Off, low, medium and Max levels and a declared default. No live Open WebUI,
 JetBrains or Zed session was run. Selector rendering, `session/set_mode` use by a real
 client and provider reasoning effects remain unverified.
 
-## Pre-request compaction and edit locations (unreleased)
+## Pre-request compaction and edit locations (included in 0.6.0)
 
 `test/auto-compaction.test.mjs` uses a fake service that reports four serialized
 characters per prompt token. It covers the usable-input calculation, the
@@ -235,7 +235,7 @@ error naming undeclared fields when a required argument is missing.
 Results for this revision are in its pull request. Live client rendering of
 diffs, locations and the context indicator was not checked.
 
-## Sessions, rewind, steering and job status (unreleased)
+## Sessions, rewind, steering and job status (included in 0.6.0)
 
 `test/sessions.test.mjs` covers advertised `resume`/`close` capabilities. Load
 replays text and tool calls with completed or failed outcomes and makes no
@@ -273,7 +273,7 @@ Whether a JetBrains client calls `session/resume` or `session/close` is also
 unverified. The steering client matrix in [session controls](sessions.md) comes
 from vendor documentation and earlier observation, not a test.
 
-## Compaction during corrected replies (unreleased)
+## Compaction during corrected replies (included in 0.6.0)
 
 The recovery-order regression failed against unchanged main `27e6a9f`: the
 second request still carried coding tools instead of first requesting a summary.
@@ -301,7 +301,7 @@ no issues. No live inference or interactive IDE acceptance was run for this
 revision. The context wheel still depends on
 subsequent provider usage; no estimated percentage or artificial reset is sent.
 
-## Saved session size and file listings (unreleased)
+## Saved session size and file listings (included in 0.6.0)
 
 `test/session-store.test.mjs` covers the trimming function: an unchanged record
 within the limit, oldest-first excerpts with intact tool-call pairing, IDs,
@@ -337,7 +337,7 @@ skips, zero failures**. `npm pack`, installation into a fresh temporary prefix
 and `test/package-install.mjs` passed. Checkout and installed production audits
 found zero vulnerabilities. No live Open WebUI or IDE session was run; how a
 client renders the notice and replayed markers is unverified.
-## Compaction summary requests (unreleased)
+## Compaction summary requests (included in 0.6.0)
 
 `test/auto-compaction.test.mjs` sets the session to `xhigh` with levels declared
 out of order. The summary request carries `low` and `max_tokens` 6,000, and the
@@ -358,7 +358,7 @@ skips, zero failures**. `npm pack`, installation into a fresh prefix and
 found zero vulnerabilities. No live Open WebUI or IDE session was run: whether
 the gateway honours `max_tokens` and `low` for summaries, and the summary quality
 at that level, are unverified.
-## YOLO in the Mode selector (unreleased)
+## YOLO in the Mode selector (included in 0.6.0)
 
 JetBrains reported "Mode: yolo (the agent rejected the value)" on new sessions
 after PR #21 moved ACP category `mode` from Permissions to the new Mode
@@ -381,7 +381,7 @@ ACP handshake and sandbox command. Both checkout and installed production audits
 found zero vulnerabilities. No live Open WebUI or JetBrains session was run, so
 JetBrains rendering of the fourth mode and removal of the warning are unverified.
 
-## Paged reads, capped search and definition of done (unreleased)
+## Paged reads, capped search and definition of done (included in 0.6.0)
 
 `test/reading.test.mjs` covers numbered whole reads of small files, files without
 a final newline and empty files; default 400-line pages, `offset`/`limit`, the
@@ -426,6 +426,22 @@ Prettier, build and `npm test` passed: **488 tests, 482 passed, six platform
 skips, zero failures**. `npm pack`, installation into a fresh temporary prefix
 and `test/package-install.mjs` passed. Checkout and installed production audits
 found zero vulnerabilities. No live Open WebUI or IDE session was run.
+
+## 0.6.0 release candidate
+
+This candidate includes main `b945e39` and updates package, lockfile, ACP/MCP
+metadata and registry pins to 0.6.0 without dependency changes.
+On macOS 27.0 with Node 26.11.1, `npm ci --ignore-scripts`, lint, typecheck,
+Prettier, build and `npm test` passed: **508 tests, 502 passed, six platform
+skips, zero failures**. The browser wrapper passed all 17 tests. Its pinned
+Playwright catalog also passed the agent integration check without launching a
+browser. Production audits of the checkout and wrapper found zero vulnerabilities.
+
+Package installation, platform CI and public-download results are recorded in
+the release PR and publication workflow. No live inference or interactive IDE
+acceptance was repeated for this candidate. The existing browser container was
+not changed; the CI browser job tests its own disposable container. Windows CI
+checks unsupported-platform behavior, not native Windows support.
 
 ## Compatibility
 

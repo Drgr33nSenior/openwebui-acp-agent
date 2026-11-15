@@ -69,7 +69,7 @@ try {
     .map((line) => JSON.parse(line));
   const response = messages.find((m) => m.id === 1);
   assert.equal(response.result.protocolVersion, 1);
-  assert.equal(response.result.agentInfo.version, "0.5.0");
+  assert.equal(response.result.agentInfo.version, "0.6.0");
   assert.equal(response.result.authMethods[0].type, "terminal");
   assert.deepEqual(response.result.agentCapabilities.auth.logout, {});
   assert.deepEqual(
@@ -188,5 +188,5 @@ assert.equal(
   fixtureText,
 );
 console.log(
-  "Installed 0.5.0: clean ACP v1 handshake, terminal authentication and logout discovery, context usage module, static preview lifecycle, and real sandbox command passed outside the checkout",
+  "Installed 0.6.0: clean ACP v1 handshake, terminal authentication and logout discovery, context usage module, static preview lifecycle, and real sandbox command passed outside the checkout",
 );
