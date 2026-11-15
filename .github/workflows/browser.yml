@@ -48,6 +48,13 @@ jobs:
           docker compose exec -T --workdir /opt/openwebui-browser browser \
             node --input-type=module - --url http://127.0.0.1:8931/mcp \
             --fixture-host 127.0.0.1 < smoke.mjs
+      # The long-benchmark game evaluator plays its sealed reference and
+      # known-bug games in this container's Chromium; no model is involved.
+      - name: Play the benchmark game's reference and known bugs in the container
+        working-directory: .
+        run: |
+          container=$(docker compose -f browser/compose.yaml ps -q browser)
+          node test/manual-long-benchmark-game.mjs --check-browser "container:$container"
       - name: Stop the owned test container
         if: always()
         run: docker compose down --timeout 5

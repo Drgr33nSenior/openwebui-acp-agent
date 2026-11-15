@@ -14,13 +14,17 @@
 //
 // Site settings have no defaults. Over ssh it only reads: `kubectl get svc` and
 // `get endpointslices`, SGLang /metrics, and service-tools /health and
-// /metrics. A sample that is unavailable, incomplete or ambiguous never counts
-// as idle. The run starts only between 20:00 and 07:00 local time, when it can
-// finish before 07:00, and after every sample for the whole quiet period shows
-// no SGLang request running or queued, no service-tools work in flight and no
-// change in the service-tools counters. Exit status 3 means the window closed
-// without a start. The process environment, including the agent's normal
-// authentication, is passed to the runner.
+// /metrics. service-tools must report its request lifecycle (PLAN-01:
+// requests in flight and started per work route, and its process start); a
+// service without it is unavailable, never idle. A sample that is
+// unavailable, incomplete or ambiguous never counts as idle. The run starts
+// only between 20:00 and 07:00 local time, when it can finish before 07:00,
+// and after every sample for the whole quiet period shows no SGLang request
+// running or queued, no service-tools request or background work in flight,
+// and the same service-tools process with no request started since the
+// previous sample. Exit status 3 means the window closed without a start. The
+// process environment, including the agent's normal authentication, is passed
+// to the runner.
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -208,17 +212,29 @@ export function parseMetrics(text) {
   return { running, queued, counters, lines: used.map((s) => s.line) };
 }
 
-// service-tools /health: in-flight media, research and KV-tail work. Returns
-// the reasons it is busy (empty when idle), or null when any field is missing
-// or has an unexpected type: an ambiguous answer is never read as idle.
+// Work routes of service-tools whose requests the request lifecycle counts
+// (PLAN-01: /mcp, the picture adapter, web search and fetch).
+export const TOOLS_ROUTES = ["image", "mcp", "web"];
+const count = (v) => Number.isSafeInteger(v) && v >= 0;
+const routeCounts = (o) =>
+  o !== null &&
+  typeof o === "object" &&
+  !Array.isArray(o) &&
+  JSON.stringify(Object.keys(o).sort()) === JSON.stringify(TOOLS_ROUTES) &&
+  TOOLS_ROUTES.every((route) => count(o[route]));
+
+// service-tools /health. Busy reasons come from the request lifecycle
+// (requests in flight on the work routes, for their whole response) and from
+// background media, research and KV-tail work. Returns { error } when any
+// field is missing or has an unexpected type: an ambiguous answer, or a
+// service without the request lifecycle, is never read as idle.
 export function parseToolsHealth(text) {
   let h;
   try {
     h = JSON.parse(text);
   } catch {
-    return null;
+    return { error: "service-tools /health is not JSON" };
   }
-  const count = (v) => Number.isSafeInteger(v) && v >= 0;
   const flag = (v) => typeof v === "boolean";
   const optional = (o, field) =>
     o !== null &&
@@ -235,8 +251,30 @@ export function parseToolsHealth(text) {
     !optional(h.deep_research, "active") ||
     !optional(h.kv_tail, "jobs")
   )
-    return null;
+    return { error: "service-tools /health ambiguous" };
+  const r = h.requests;
+  if (
+    !r ||
+    typeof r !== "object" ||
+    !count(r.active) ||
+    !routeCounts(r.active_by_route) ||
+    !routeCounts(r.started_total) ||
+    typeof h.process_started_unix_seconds !== "number" ||
+    !Number.isFinite(h.process_started_unix_seconds) ||
+    h.process_started_unix_seconds <= 0
+  )
+    return {
+      error:
+        "service-tools /health lacks the request lifecycle (requests, process_started_unix_seconds)",
+    };
+  const sum = TOOLS_ROUTES.reduce((n, k) => n + r.active_by_route[k], 0);
+  if (sum !== r.active)
+    return { error: "service-tools request counts do not add up" };
   const busy = [];
+  if (r.active > 0)
+    busy.push(
+      `requests.active=${r.active} (${TOOLS_ROUTES.map((k) => `${k}=${r.active_by_route[k]}`).join(" ")})`,
+    );
   if (h.image_active > 0) busy.push(`image_active=${h.image_active}`);
   if (h.image_busy) busy.push("image_busy");
   if (h.image_recovery_required) busy.push("image_recovery_required");
@@ -244,19 +282,40 @@ export function parseToolsHealth(text) {
   if (h.deep_research.active > 0)
     busy.push(`deep_research.active=${h.deep_research.active}`);
   if (h.kv_tail.jobs > 0) busy.push(`kv_tail.jobs=${h.kv_tail.jobs}`);
-  return busy;
+  return {
+    busy,
+    started: r.started_total,
+    processStarted: h.process_started_unix_seconds,
+  };
 }
 
-// service-tools /metrics has outcome counters and histograms but no in-flight
-// gauge; all series start at zero. Their total only grows while the process
-// runs, so a change between samples means calls finished (or a restart).
-// Returns null for a page without these families.
+// service-tools /metrics: the seeded outcome counters and histograms, whose
+// total only grows within one process, and the lifecycle series
+// workstation_assistant_active_requests{route},
+// workstation_assistant_requests_started_total{route} and
+// workstation_assistant_process_start_time_seconds. Returns null for a page
+// without the outcome families, and lifecycle null when its series are absent.
 export function parseToolsCounters(text) {
   if (!/^# TYPE workstation_assistant_\w+ (counter|histogram)$/m.test(text))
     return null;
   let total = 0,
-    series = 0;
+    series = 0,
+    processStarted = null;
+  const active = {},
+    started = {};
   for (const line of text.split("\n")) {
+    const life = line.match(
+      /^workstation_assistant_(active_requests|requests_started_total)\{route="([a-z]+)"\} (\S+)$/,
+    );
+    if (life) {
+      const value = Number(life[3]);
+      if (!count(value)) return null;
+      (life[1] === "active_requests" ? active : started)[life[2]] = value;
+    }
+    const start = line.match(
+      /^workstation_assistant_process_start_time_seconds (\S+)$/,
+    );
+    if (start) processStarted = Number(start[1]);
     const m = line.match(
       /^workstation_assistant_\w+?(?:_total|_count)\{[^}]*\} (\S+)$/,
     );
@@ -266,7 +325,15 @@ export function parseToolsCounters(text) {
     total += value;
     series++;
   }
-  return series ? { total, series } : null;
+  if (!series) return null;
+  const lifecycle =
+    routeCounts(active) &&
+    routeCounts(started) &&
+    Number.isFinite(processStarted) &&
+    processStarted > 0
+      ? { active, started, processStarted }
+      : null;
+  return { total, series, lifecycle };
 }
 
 // One combined sample from the remote command's output. Returns
@@ -297,14 +364,38 @@ export function parseSample(text, exitCode = 0) {
         "service-tools must have exactly one ready endpoint, got " +
         JSON.stringify(endpoints.split("\n")),
     };
-  const busy = parseToolsHealth(parts["tools-health"].join("\n"));
-  if (!busy) return { unavailable: "service-tools /health ambiguous" };
+  const health = parseToolsHealth(parts["tools-health"].join("\n"));
+  if (health.error) return { unavailable: health.error };
   const counters = parseToolsCounters(parts["tools-metrics"].join("\n"));
   if (!counters) return { unavailable: "service-tools /metrics unreadable" };
+  if (!counters.lifecycle)
+    return {
+      unavailable: "service-tools /metrics lacks the request lifecycle series",
+    };
+  // /health and /metrics are two reads of one process. A different process
+  // identity is ambiguous; a different count means requests in between.
+  if (
+    Math.abs(counters.lifecycle.processStarted - health.processStarted) >= 0.01
+  )
+    return {
+      unavailable:
+        "service-tools /health and /metrics come from different processes",
+    };
+  const busy = [...health.busy];
+  if (
+    TOOLS_ROUTES.some(
+      (k) =>
+        counters.lifecycle.active[k] > 0 ||
+        counters.lifecycle.started[k] !== health.started[k],
+    )
+  )
+    busy.push("/metrics shows requests in flight or started after /health");
   return {
     ...sglang,
     tools: {
       busy,
+      started: health.started,
+      processStarted: health.processStarted,
       counterTotal: counters.total,
       health: parts["tools-health"].join("\n").trim(),
     },
@@ -312,8 +403,10 @@ export function parseSample(text, exitCode = 0) {
 }
 
 // Whether a sample shows the shared services idle. `previous` is the last
-// readable sample; a change in the service-tools counter total since then is
-// activity. `ownRequests` is 1 during our own run, 0 before it.
+// readable sample. Against it, service-tools must show the same process, the
+// same number of started requests on every route and the same outcome-counter
+// total: with no request in flight at either read, no request ran between
+// them. `ownRequests` is 1 during our own run, 0 before it.
 export function activity(sample, previous, ownRequests = 0) {
   if (!sample || sample.unavailable)
     return {
@@ -325,14 +418,25 @@ export function activity(sample, previous, ownRequests = 0) {
     reasons.push(`sglang running=${sample.running} queued=${sample.queued}`);
   for (const reason of sample.tools.busy)
     reasons.push(`service-tools ${reason}`);
-  if (
-    previous &&
-    !previous.unavailable &&
-    previous.tools.counterTotal !== sample.tools.counterTotal
-  )
-    reasons.push(
-      `service-tools counters ${previous.tools.counterTotal} -> ${sample.tools.counterTotal}`,
-    );
+  if (previous && !previous.unavailable) {
+    const before = previous.tools,
+      now = sample.tools;
+    if (before.processStarted !== now.processStarted)
+      reasons.push("service-tools process changed");
+    else {
+      const changed = TOOLS_ROUTES.filter(
+        (k) => before.started[k] !== now.started[k],
+      );
+      if (changed.length)
+        reasons.push(
+          `service-tools requests started (${changed.map((k) => `${k} ${before.started[k]} -> ${now.started[k]}`).join(", ")})`,
+        );
+      if (before.counterTotal !== now.counterTotal)
+        reasons.push(
+          `service-tools counters ${before.counterTotal} -> ${now.counterTotal}`,
+        );
+    }
+  }
   return { state: reasons.length ? "busy" : "idle", reasons };
 }
 
@@ -431,14 +535,19 @@ export function contention(samples, before = null) {
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.length < 2 || args.length > 3) {
+  if (
+    args.length < 2 ||
+    args.length > 4 ||
+    !["long", "game", undefined].includes(args[3])
+  ) {
     console.error(
-      "Usage: node test/manual-long-benchmark-wait.mjs LABEL AGENT_DIRECTORY [TIMEOUT_MINUTES]",
+      "Usage: node test/manual-long-benchmark-wait.mjs LABEL AGENT_DIRECTORY [TIMEOUT_MINUTES] [long|game]",
     );
     return 2;
   }
   const [label, agent] = [args[0], resolve(args[1])];
   const minutes = Number(args[2] ?? 30);
+  const task = args[3] ?? "long";
   if (!/^[a-z0-9-]{1,40}$/.test(label)) {
     console.error("LABEL: a-z, 0-9 and -, 1-40 characters");
     return 2;
@@ -562,6 +671,8 @@ async function main() {
       agent,
       label,
       String(minutes),
+      "--task",
+      task,
     ],
     {
       stdio: ["ignore", "pipe", "pipe"],
@@ -616,6 +727,15 @@ async function main() {
     toolsCounterTotal: {
       before: before.tools.counterTotal,
       after: after?.tools.counterTotal ?? null,
+    },
+    // Observation identity: one ready endpoint and the one process it reached.
+    // Requests that another process or replica serves are not observed.
+    serviceTools: {
+      readyEndpoints: 1,
+      processStartedBefore: before.tools.processStarted,
+      processStartedAfter: after?.tools.processStarted ?? null,
+      requestsStartedBefore: before.tools.started,
+      requestsStartedAfter: after?.tools.started ?? null,
     },
     sglangDelta: delta,
   };

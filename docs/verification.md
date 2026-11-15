@@ -53,17 +53,22 @@ pinned Node release, once per build to compare:
 
 ## Long-session benchmark
 
-The long-session benchmark gives a built agent a synthetic Python project and
-records how the session went. It uses a real model, so it is excluded from
-ordinary tests and runs only when started explicitly.
+The long-session benchmark gives a built agent a task and records how the
+session went. It has two tasks: `long`, a synthetic Python project, and `game`,
+a browser game with hidden acceptance checks. It uses a real model, so it is
+excluded from ordinary tests and runs only when started explicitly.
 
-| File                                     | Purpose                                                                    |
-| ---------------------------------------- | -------------------------------------------------------------------------- |
-| `test/manual-long-benchmark-fixture.mjs` | Deterministic project: 14 modules, 28 seeded bugs, 126 unittest tests      |
-| `test/manual-long-benchmark.mjs`         | Runner: one ACP session against the agent built in a checkout              |
-| `test/manual-long-benchmark-wait.mjs`    | Wrapper for a shared server: overnight window and idle check, then runner  |
-| `test/manual-long-benchmark-summary.mjs` | Markdown table of runs, with a mean row per build                          |
-| `test/long-benchmark.test.mjs`           | Offline self-test, part of `npm test`; uses a scripted fake Open WebUI     |
+| File                                         | Purpose                                                                       |
+| -------------------------------------------- | ----------------------------------------------------------------------------- |
+| `test/manual-long-benchmark-fixture.mjs`     | `long` task: 14 modules, 28 seeded bugs, 126 unittest tests                   |
+| `test/fixtures/long-benchmark-game/`         | `game` task: sealed acceptance source (brief, hidden play-through, references) |
+| `test/manual-long-benchmark-game.mjs`        | `game` evaluator: seal, play-through, judge, PLAN-04 checker, play-test, probes |
+| `test/manual-long-benchmark-game-driver.mjs` | Browser driver that the evaluator runs in the browser container               |
+| `test/manual-long-benchmark.mjs`             | Runner: one ACP session against the agent built in a checkout                 |
+| `test/manual-long-benchmark-wait.mjs`        | Wrapper for a shared server: overnight window and idle check, then runner     |
+| `test/manual-long-benchmark-summary.mjs`     | Markdown table of runs, with a mean row per build                             |
+| `test/long-benchmark.test.mjs`               | Offline self-test of the kit and the `long` task, part of `npm test`          |
+| `test/long-benchmark-game.test.mjs`          | Offline self-test of the `game` task, part of `npm test`                      |
 
 ### Offline self-test
 
@@ -74,6 +79,9 @@ passes all 126. It also runs the runner against a loopback fake model that
 plays a fixed sequence of tool calls, and checks the report, the summary,
 wrapper settings validation, metrics parsing and the start rules. It contacts
 no model or remote host. It uses a synthetic key and temporary state.
+
+`node --test test/long-benchmark-game.test.mjs` covers the `game` task; see
+[interactive game task](#interactive-game-task).
 
 ### Live run
 
@@ -114,7 +122,7 @@ LONG_BENCHMARK_METRICS_PORT=... LONG_BENCHMARK_TOOLS_NAMESPACE=... \
 LONG_BENCHMARK_TOOLS_SERVICE=... LONG_BENCHMARK_TOOLS_PORT=... \
 LONG_BENCHMARK_RESULTS=/absolute/results \
 LONG_BENCHMARK_NOT_BEFORE=2026-11-16T20:00:00Z \
-  node test/manual-long-benchmark-wait.mjs new-1 /path/to/agent-checkout 30
+  node test/manual-long-benchmark-wait.mjs new-1 /path/to/agent-checkout 30 [long|game]
 ```
 
 Each sample is one ssh command that only reads. It runs `kubectl get svc` for
@@ -122,18 +130,25 @@ both service addresses and `kubectl get endpointslices` for service-tools. It
 then reads SGLang `/metrics` and service-tools `/health` and `/metrics` with
 `curl`. A sample is idle only when all of the following hold:
 
-| Source                     | Idle when                                                                                                                                                                    |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| SGLang `/metrics`          | `num_running_reqs` and `num_queue_reqs` are both zero (rank 0 when ranks are labelled)                                                                                       |
-| service-tools endpoints    | exactly one endpoint, and it is ready, so every read reaches the same process                                                                                                |
-| service-tools `/health`    | `status` is `process-ready`; `image_active` is 0; `image_busy`, `image_recovery_required` and `video_active` are false; `deep_research.active` and `kv_tail.jobs` are 0 or the feature is disabled |
-| service-tools `/metrics`   | the total of all `workstation_assistant_*` counters and histogram counts has not changed since the previous sample                                                          |
+| Source                  | Idle when                                                                                                                                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SGLang `/metrics`       | `num_running_reqs` and `num_queue_reqs` are both zero (rank 0 when ranks are labelled)                                                                                                             |
+| service-tools endpoints | exactly one endpoint, and it is ready                                                                                                                                                              |
+| service-tools `/health` | `requests.active` is 0; `status` is `process-ready`; `image_active` is 0; `image_busy`, `image_recovery_required` and `video_active` are false; `deep_research.active` and `kv_tail.jobs` are 0 or the feature is disabled |
+| service-tools `/metrics` | every `workstation_assistant_active_requests{route}` is 0, and `workstation_assistant_requests_started_total{route}` equals `requests.started_total` from `/health`                               |
+| previous sample         | the same service-tools process (`process_started_unix_seconds`), the same `requests.started_total` on every route, and the same total of the `workstation_assistant_*` counters and histogram counts |
 
-service-tools reports no in-flight gauge for short calls such as web search,
-memory, retrieval and handoffs. Its counters start at zero and only grow while
-the process runs. A changed total therefore means calls finished, or the
-process restarted, since the last sample. Calls still in progress at both
-samples are not visible. The gateway's active-request gauge belongs to a
+**The wrapper requires the service-tools request lifecycle.** The lifecycle
+counts every request on the work routes (`/mcp`, the picture adapter, web search
+and fetch) from its start until its response ends, including a streamed answer.
+It reports the count in flight and the count started per route (`image`, `mcp`,
+`web`), and the process start time. `/health` and `/metrics` are not counted.
+With no request in flight at two samples and no start between them, no request
+ran in between. The outcome counters alone cannot show that: a call that is
+still running has not been counted yet. The lifecycle comes from PLAN-01. It is
+not in the deployed service-tools as of this change, so every sample is
+unavailable and the wrapper does not start until a service-tools with the
+lifecycle is deployed. The gateway's active-request gauge belongs to a
 different service and is not used.
 
 A sample is unavailable, never idle, if:
@@ -142,7 +157,23 @@ A sample is unavailable, never idle, if:
 - a request gauge is missing;
 - there is not exactly one ready service-tools endpoint;
 - a `/health` field is missing or has an unexpected type;
+- the lifecycle is missing from `/health` or `/metrics`, its route set is not
+  exactly `image`, `mcp` and `web`, or the per-route counts do not add up to
+  `requests.active`;
+- `/health` and `/metrics` report different process start times (the metric
+  has a 12-digit precision, so the wrapper allows 0.01 s);
 - the service-tools `/metrics` page lacks its families.
+
+A different process between two samples, a started request or a counter change
+makes the sample busy. The remaining limits of this observation:
+
+- One ready endpoint means one pod. If that pod runs more than one service-tools
+  process, each process reports only its own requests; the wrapper cannot see
+  the others.
+- Work that is not on a work route and not in the `/health` media, research and
+  KV-tail fields is not observed.
+- The observation ends at the last sample. A request that starts after it is
+  not prevented; the samples during the run report it as other load.
 
 An unavailable or busy sample restarts the quiet period. The wrapper starts the
 runner only when:
@@ -165,15 +196,19 @@ done
 During the run the wrapper samples both services every 15 seconds
 (`running-samples.txt`). It saves service-tools `/health` before and after the
 run (`tools-health-*.json`) and SGLang counter changes (`sglang-delta.json`).
-It writes `wrapper.json` with the runner's exit status and whether other load
-was seen. Other load means:
+It writes `wrapper.json` with the runner's exit status, whether other load was
+seen and the service-tools observation identity: one ready endpoint, and the
+process start time and started-request counts before and after the run. Other
+load means:
 
 - on SGLang, more than one running request or any queued request;
-- on service-tools, any in-flight work or counter change, since the
-  benchmarked agent does not call service-tools.
+- on service-tools, any request or background work in flight, a started
+  request, a counter change or a different process, since the benchmarked agent
+  does not call service-tools.
 
 The self-test covers the parsing, the idle, busy and unavailable decisions and
-the start rules with synthetic metrics, health and endpoint output. It also
+the start rules with synthetic metrics, health and endpoint output. This
+includes a service-tools without the lifecycle that never starts a run. It also
 checks that the remote command passes `sh -n` and uses only read operations.
 The ssh, `kubectl` and `curl` reads have not been run against a real cluster.
 If a network policy blocks the ssh host from service-tools, every sample is
@@ -183,9 +218,12 @@ unavailable and the wrapper never starts.
 
 `report.json` records, per run:
 
-- **Hidden checks**: `null` (not applicable) for this task, whose tests are
-  visible to the agent. After the session the runner runs the suite itself
-  (`finalSuite`) and checks that the data tables and tests are unchanged.
+- **Hidden checks**: for `game`, the PLAN-04 verdict (`accepted`, `rejected`
+  or `unavailable`) with the number of hidden checks passed, failed and
+  unavailable, the reasons, and the checker, specification and seal digests.
+  `null` (not applicable) for `long`, whose tests are visible to the agent;
+  there the runner runs the suite itself after the session (`finalSuite`) and
+  checks that the data tables and tests are unchanged.
 - **Rounds**: coding requests minus single recoveries (`logicalRounds`), plus
   summary requests and turns.
 - **Failed tool calls**: total, by tool (`toolFailuresByTool`), by tool and
@@ -199,9 +237,13 @@ unavailable and the wrapper never starts.
 - **Wall time** (`elapsedMs`), peak and latest context usage, compactions and
   mask batches.
 - **`view_image`**: calls and failed calls.
-- **Unprompted play-test**: `null` (not applicable) for this task.
-- Reads, repeat reads, edits, test runs and whether the full suite ran after
-  the last edit.
+- **Unprompted play-test**: for `game`, whether the agent played its game
+  without being asked (`observed`), and whether it did so after its last edit
+  (`afterLastEdit`); `null` (not applicable) for `long`.
+- For `long`: reads, repeat reads, edits, test runs and whether the full suite
+  ran after the last edit. For `game`: the isolation probe results, the
+  evaluator identity and reference outcomes, denied operations and MCP tool
+  names.
 
 ```sh
 node test/manual-long-benchmark-summary.mjs /absolute/results/base-1 /absolute/results/new-1
@@ -214,8 +256,145 @@ coverage is shown as a lower bound. Means use only known values and state how
 many runs they cover. Reports from earlier versions of the runner can be
 summarised; their new fields show as `unknown`.
 
-The interactive game task with hidden acceptance checks is not part of this
-kit yet. It depends on the shared acceptance contract.
+### Interactive game task
+
+The `game` task gives the agent a brief for a browser game, Lights Out, and
+judges the result with hidden acceptance checks. It measures whether the agent
+plays its game without being asked and whether the game meets the brief.
+
+**Acceptance source.** `test/fixtures/long-benchmark-game/` is a task
+acceptance source in the PLAN-04 contract, schema 1. It holds the
+specification (`acceptance.json`), the agent-visible fixture (`fixture/BRIEF.md`
+only), the hidden play-through script (`playthrough.json`), a trusted reference
+game (`reference/`) and six known-bug games (`mutants/`). Its seal is pinned in
+`GAME_SEAL` in `test/manual-long-benchmark-game.mjs`, outside the source and
+every workspace. A changed byte changes the seal, and the runner then refuses
+the source. The specification declares the oracle not applicable: the
+play-through runs in the evaluator, which writes its observation as the
+external-state file. The external-state checks require each hidden check to be
+`true`. The deliverable is `index.html`, and the linkage check requires the
+observation's `entry_sha256` to equal the checker's own digest of that file.
+
+**Brief.** The prompt asks the agent to build the game described in
+`BRIEF.md` and to summarise what it built. Neither the prompt nor the brief
+asks the agent to test, preview, play or screenshot the game; the self-test
+checks this. The brief states the rules and the page structure that the
+play-through reads (element ids, `data-row`, `data-col`, `aria-pressed`).
+
+**Play-through.** The evaluator sends the produced files, from memory, to
+`test/manual-long-benchmark-game-driver.mjs` in a real Chromium. The driver
+serves them on one fixed origin and aborts and counts every other request. It
+reads the page only through Playwright locator methods (attributes, text,
+disabled state); it runs no script of its own in the page. It takes PNG
+screenshots at four steps. The evaluator compares the
+observations with the hidden expectations: board layout, start state,
+distinct lit colour, corner and edge moves, undo, solve, the lock after
+solving, restart, page errors, external requests and screenshots. Before it
+judges an attempt, it plays the reference (which must pass every check) and
+each mutant (which must fail the checks it was built to break). If they do not
+behave as declared, the play-through is unproven and the verdict is
+`unavailable`.
+
+The results directory receives `playthrough-state.json` (the observation),
+`screenshots/*.png` and `acceptance-result.json` (the PLAN-04 result). Each
+screenshot entry holds its SHA-256 and the digest of the exact files played
+(`served_tree_sha256`). The runner then runs the PLAN-04 checker's `check` and
+`validate` commands.
+
+**Isolation.** The hidden source is in the scratch directory next to the
+workspace and in the harness checkout. Before the evaluated session, the runner
+proves that the agent cannot read or change it. A scripted fake model sends
+tool calls through the same agent build, child process, permission policy,
+sandbox and browser configuration as the evaluated session, from a sibling
+workspace. The calls are:
+
+- controls that must work: write, read and `cat` a workspace file;
+- `read_file`, `view_image`, `edit_file` and `write_file` on the hidden source,
+  by absolute and relative path;
+- `list_files` and `search_text` on the parent directory;
+- `run_command` with `cat`, `ls`, a symbolic link, a copy, an append and a new
+  file, on the scratch copy and on the checkout copy;
+- `start_preview` of a hidden file;
+- `browser_navigate` to a `file://` URL of the hidden file, when the browser is
+  configured.
+
+Every probe other than the controls must fail without revealing the hidden
+marker or file names, and the source seal must be unchanged afterwards. The
+report keeps only the outcome and the first line of each refusal. The
+boundary that this demonstrates:
+
+- the file tools refuse paths outside the workspace;
+- the command sandbox denies reads of the home directory, `/tmp`, `$TMPDIR` and
+  the agent state, except the workspace;
+- the runner approves no extra read or write paths and no escalation;
+- the runner approves browser navigation only to a preview that the agent
+  started;
+- the preview serves only listed workspace files;
+- the browser container mounts no host directory.
+
+The evaluator plays the reference and mutants before the session and the
+attempt after it ends, from memory; neither play-through uses the agent's tools
+or leaves files in the browser container.
+
+**Unprompted play-testing.** From the saved transcript, the runner counts a
+play-test when the agent wrote a game file and then started a preview, opened
+that preview in the browser, interacted with the page (click, key press, typing
+or form input) and read it (snapshot, find or wait), all successfully.
+`afterLastEdit` shows whether a complete play-test followed the last game-file
+edit. Without the browser the behaviour cannot be measured and the run does not
+start.
+
+**Preconditions.** For `--task game` the runner checks the following before it
+starts a session. If any of them fails, it writes the report with the reasons,
+starts no session and exits with status 4:
+
+| Variable                                   | Meaning                                                                                 |
+| ------------------------------------------ | --------------------------------------------------------------------------------------- |
+| `LONG_BENCHMARK_GAME_BROWSER`              | Evaluator browser: `container:NAME` (the browser container) or `local:/abs/chromium` (needs `npm ci --ignore-scripts` in `browser/`) |
+| `LONG_BENCHMARK_ACCEPTANCE_CHECKER`        | Absolute path of `lib/workstation/task_acceptance.py` in a stack checkout               |
+| `LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256` | Optional. SHA-256 that `task_acceptance.py` must have                                   |
+| `LONG_BENCHMARK_BROWSER_MCP_URL`           | The agent's browser: `http://127.0.0.1:PORT/mcp` of the browser container               |
+
+The checker's own `seal` of the copied source must equal the pinned seal, the
+reference and mutants must give their declared outcomes, and the isolation
+probes must pass. The report records the evaluator transport, the SHA-256 of the
+checker files, the reference outcomes and every probe result.
+
+To check the evaluator browser without a model:
+
+```sh
+node test/manual-long-benchmark-game.mjs --check-browser container:NAME
+```
+
+The browser container workflow runs this check in CI. On macOS 27.0 with Node
+26.11.1, a local Chromium run gave the declared outcomes: the reference passed
+all 12 checks, and each mutant failed its declared check (`diagonal`:
+`edge-move`, `solve`, `solved-locked`; `wraps`: `corner-move`, `edge-move`,
+`solve`, `solved-locked`; `no-lock`: `solved-locked`; `undo-count`: `undo`,
+`solve`, `solved-locked`; `restart-moves`: `restart`; `solved-text`: `solve`,
+`solved-locked`).
+
+**Self-test.** `test/long-benchmark-game.test.mjs` checks the seal, the brief,
+the judge against a rule simulator of every mutant, play-test detection and
+probe judging. It also runs the runner without an evaluator: the probes pass on
+the platform and the run stops before a session. One test needs the checker
+and an evaluator browser and is skipped in CI. With both set, it runs the full
+`--task game` flow twice with a scripted model and a fake browser server:
+
+- a model that writes the reference and plays it is `accepted` (13 passed) and
+  the play-test is observed;
+- a model that writes the `no-lock` mutant without playing it is `rejected`
+  with `external_state:solved-locked`, and no play-test is observed.
+
+**Limits.**
+
+- The play-through checks the rules in the brief through the page structure
+  that the brief requires; a game that draws without those elements fails.
+- The checker is the merged PLAN-04 contract. Its protection corrections are
+  in progress separately; re-pin the seal and rerun the self-test with the
+  corrected checker.
+- The probes demonstrate the boundary on the platform where they run. The
+  runner repeats them before every evaluated session, on that machine.
 
 ## YOLO permissions
 

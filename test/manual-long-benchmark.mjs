@@ -5,7 +5,12 @@
 // which enforces the overnight window and an idle inference server.
 //
 //   LONG_BENCHMARK_RESULTS=/absolute/results/dir \
-//     node test/manual-long-benchmark.mjs --live AGENT_DIRECTORY LABEL [TIMEOUT_MINUTES]
+//     node test/manual-long-benchmark.mjs --live AGENT_DIRECTORY LABEL [TIMEOUT_MINUTES] [--task long|game]
+//
+// --task game (manual-long-benchmark-game.mjs) builds a browser game from a
+// brief and is judged by hidden checks through the PLAN-04 contract. It
+// starts a session only after proving the hidden source is out of the
+// agent's reach; see prepareGame() for its settings.
 //
 // The child uses the agent's normal authentication: the OS credential store,
 // or OPENWEBUI_API_KEY when that variable is already set for this process. The
@@ -29,12 +34,92 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { longTask } from "./manual-long-benchmark-fixture.mjs";
+import * as GAME from "./manual-long-benchmark-game.mjs";
 
 const MAX_CONTINUATIONS = 8;
 const CONTINUE_PROMPT = "Continue with the remaining work.";
 const USAGE_WAIT_MS = 2000;
 const args = process.argv.slice(2);
+
+// The browser tools an evaluated agent may use: the wrapper's allowlist.
+const BROWSER_TOOLS = new Set(
+  JSON.parse(
+    await readFile(
+      new URL("../browser/allowed-tools.json", import.meta.url),
+      "utf8",
+    ),
+  ),
+);
+const originOf = (url) => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+};
+const updateText = (u) =>
+  (u.content ?? [])
+    .filter((c) => c.type === "content" && c.content?.type === "text")
+    .map((c) => c.content.text)
+    .join("\n");
+
+// One permission decision for the evaluated session and the isolation probes.
+// Allowed: workspace activation, edits (the agent refuses paths outside the
+// workspace before asking), commands in the workspace sandbox without extra
+// paths or escalation. For the game task also a static preview and the
+// allowlisted browser tools, with navigation only to a preview this session
+// started. Everything else is denied.
+function decide(params, { game, previewOrigins, browserUrl }) {
+  const title = params.toolCall.title ?? "",
+    input = params.toolCall.rawInput ?? {};
+  if (title.startsWith("Activate exact workspace ")) return true;
+  if (params.toolCall.kind === "edit") return true;
+  if (
+    title.startsWith("Run ") &&
+    title.includes("OS sandbox: workspace") &&
+    !/extra reads|extra writes/.test(title) &&
+    !input.additional_read_paths?.length &&
+    !input.additional_write_paths?.length &&
+    input.sandbox_permissions !== "require_escalated"
+  )
+    return true;
+  if (!game) return false;
+  if (title.startsWith("Start static preview of ")) return true;
+  // Connecting the configured browser server, and no other MCP server.
+  if (browserUrl && title.startsWith(`MCP browser: http ${browserUrl};`))
+    return true;
+  // The agent marks every HTTP MCP server as running outside its sandbox.
+  const call = title.match(
+    /^Call browser\/(browser_[a-z_]+)(?: \(runs on this machine outside the sandbox\))?: (.*)$/s,
+  );
+  if (!call || !BROWSER_TOOLS.has(call[1])) return false;
+  if (call[1] !== "browser_navigate") return true;
+  try {
+    return previewOrigins.has(originOf(JSON.parse(call[2]).url));
+  } catch {
+    return false;
+  }
+}
+
+// Records the origins of a preview the agent started, from its result.
+function trackPreview(u, tools, previewOrigins) {
+  if (
+    u.sessionUpdate !== "tool_call_update" ||
+    u.status !== "completed" ||
+    tools.get(u.toolCallId) !== "start_preview"
+  )
+    return;
+  try {
+    const info = JSON.parse(updateText(u));
+    for (const url of [info.url, info.containerUrl])
+      if (originOf(url)) previewOrigins.add(originOf(url));
+  } catch {
+    // Not a preview result.
+  }
+}
 
 const textOf = (content) =>
   typeof content === "string"
@@ -101,10 +186,20 @@ if (args[0] === "--child") {
     return response;
   };
   const complete = Backend.prototype.complete;
-  let request = 0;
+  let request = 0,
+    lastMcp = "";
   Backend.prototype.complete = async function (...input) {
     const [messages, tools] = input;
     const n = ++request;
+    // MCP tools reach the model as mcp_<server>_<tool>; the description names
+    // the real tool. Sent whenever the mapping changes.
+    const mcp = {};
+    for (const t of Array.isArray(tools) ? tools : []) {
+      const label = t?.function?.description?.match(
+        /^Untrusted MCP ([^:\s]+):/,
+      )?.[1];
+      if (label) mcp[t.function.name] = label;
+    }
     const started = Date.now();
     let cleared = 0,
       elided = 0;
@@ -128,6 +223,10 @@ if (args[0] === "--child") {
       completionTokens: null,
       reasoningTokens: null,
     };
+    if (JSON.stringify(mcp) !== lastMcp) {
+      lastMcp = JSON.stringify(mcp);
+      record.mcpTools = mcp;
+    }
     const observed = {};
     pending = observed;
     const onUsage = input[6];
@@ -170,10 +269,19 @@ if (args[0] === "--child") {
   process.argv = [process.execPath, join(directory, "dist/cli.js"), "acp"];
   await import(pathToFileURL(process.argv[1]));
 } else {
+  let taskName = "long";
+  const taskAt = args.indexOf("--task");
+  if (taskAt >= 0) {
+    taskName = args[taskAt + 1];
+    args.splice(taskAt, 2);
+  }
   assert(
-    args[0] === "--live" && (args.length === 3 || args.length === 4),
-    "Usage: LONG_BENCHMARK_RESULTS=DIR node test/manual-long-benchmark.mjs --live AGENT_DIRECTORY LABEL [TIMEOUT_MINUTES]",
+    args[0] === "--live" &&
+      (args.length === 3 || args.length === 4) &&
+      ["long", "game"].includes(taskName),
+    "Usage: LONG_BENCHMARK_RESULTS=DIR node test/manual-long-benchmark.mjs --live AGENT_DIRECTORY LABEL [TIMEOUT_MINUTES] [--task long|game]",
   );
+  const game = taskName === "game";
   const agentDirectory = resolve(args[1]),
     label = args[2],
     timeoutMinutes = Number(args[3] ?? 30);
@@ -244,9 +352,20 @@ if (args[0] === "--child") {
   await writeFile(join(state, "config.json"), JSON.stringify(config), {
     mode: 0o600,
   });
-  const task = longTask();
-  for (const [path, content] of Object.entries(task.files))
-    await writeFile(join(workspace, path), content, { mode: 0o600 });
+  const task = game ? { prompt: GAME.PROMPT } : longTask();
+  let gameSetup = null;
+  if (game)
+    gameSetup = await prepareGame({
+      root,
+      workspace,
+      state,
+      agentDirectory,
+      ClientApp,
+      ndJsonStream,
+    });
+  else
+    for (const [path, content] of Object.entries(task.files))
+      await writeFile(join(workspace, path), content, { mode: 0o600 });
   const apiKey = process.env.OPENWEBUI_API_KEY;
   const sanitize = (value) => {
     let text = String(value);
@@ -259,7 +378,7 @@ if (args[0] === "--child") {
   };
   const report = {
     label,
-    task: "long-suite",
+    task: game ? "lights-out-browser" : "long-suite",
     // Configuration identity: the model ID and request limits used. The
     // backend address is not recorded.
     model: config.model,
@@ -306,10 +425,14 @@ if (args[0] === "--child") {
       promptPeak: null,
     },
     viewImage: { calls: 0, failed: 0 },
-    // This task has no hidden checks and no interactive program to play-test;
-    // null means not applicable, not "none".
-    hiddenChecks: null,
-    unpromptedPlaytest: null,
+    // The long task has no hidden checks and no interactive program to
+    // play-test; null means not applicable, not "none".
+    hiddenChecks: game
+      ? { verdict: "unavailable", reason: "not evaluated" }
+      : null,
+    unpromptedPlaytest: game
+      ? { observed: null, reason: "not evaluated" }
+      : null,
     stopReason: null,
     timedOut: false,
     elapsedMs: 0,
@@ -318,6 +441,49 @@ if (args[0] === "--child") {
     latestContextTokens: null,
     contextSize: null,
   };
+  if (game) {
+    report.mcpTools = {};
+    report.browserMcp = Boolean(gameSetup.browserMcp);
+    report.evaluator = {
+      seal: GAME.GAME_SEAL,
+      transport: gameSetup.transport?.kind ?? null,
+      checker: gameSetup.checker ? { files: gameSetup.checker.files } : null,
+      references: gameSetup.references
+        ? Object.fromEntries(
+            Object.entries(gameSetup.references.outcomes).map(([k, v]) => [
+              k,
+              { matches: v.matches, failed: v.failed },
+            ]),
+          )
+        : null,
+    };
+    report.isolation = gameSetup.isolation;
+    if (gameSetup.problems.length) {
+      // Fail closed: no evaluated session without every precondition.
+      report.error = "game preconditions not met; no session was started";
+      report.preconditions = gameSetup.problems.map(sanitize);
+      report.hiddenChecks = {
+        verdict: "unavailable",
+        reason: "preconditions not met",
+      };
+      report.unpromptedPlaytest = { observed: null, reason: "no session" };
+      report.scratch = root;
+      await writeFile(
+        join(results, "report.json"),
+        JSON.stringify(report, null, 2),
+        { mode: 0o600 },
+      );
+      console.log(
+        JSON.stringify({
+          label,
+          error: report.error,
+          preconditions: report.preconditions,
+        }),
+      );
+      process.exit(4);
+    }
+  }
+  const previewOrigins = new Set();
   const requests = [];
   const env = {
     PATH: process.env.PATH,
@@ -359,6 +525,8 @@ if (args[0] === "--child") {
       event.failure.message = sanitize(event.failure.message);
       report.modelFailures.push(event.failure);
     }
+    if (event.mcpTools && report.mcpTools)
+      Object.assign(report.mcpTools, event.mcpTools);
   };
   child.stderr.on("data", (chunk) => {
     buffer += chunk.toString();
@@ -396,7 +564,8 @@ if (args[0] === "--child") {
     const u = params.update;
     // Model tool calls are titled with the tool name; automatic checks and
     // permission prompts use descriptive titles and are not counted.
-    if (u.sessionUpdate === "tool_call" && /^[a-z_]+$/.test(u.title)) {
+    trackPreview(u, tools, previewOrigins);
+    if (u.sessionUpdate === "tool_call" && /^[a-z][a-z0-9_]*$/.test(u.title)) {
       tools.set(u.toolCallId, u.title);
       report.toolCalls[u.title] = (report.toolCalls[u.title] ?? 0) + 1;
       report.toolCallsTotal++;
@@ -442,19 +611,18 @@ if (args[0] === "--child") {
     }
   });
   app.onRequest("session/request_permission", ({ params }) => {
-    const title = params.toolCall.title ?? "",
-      input = params.toolCall.rawInput ?? {};
-    const allow =
-      title.startsWith("Activate exact workspace ") ||
-      params.toolCall.kind === "edit" ||
-      (title.startsWith("Run ") &&
-        title.includes("OS sandbox: workspace") &&
-        !/extra reads|extra writes/.test(title) &&
-        !input.additional_read_paths?.length &&
-        !input.additional_write_paths?.length &&
-        input.sandbox_permissions !== "require_escalated");
+    const allow = decide(params, {
+      game,
+      previewOrigins,
+      browserUrl: gameSetup?.browserMcp,
+    });
     report.approvals++;
-    if (!allow) report.denied++;
+    if (!allow) {
+      report.denied++;
+      (report.deniedOperations ??= []).push(
+        sanitize(params.toolCall.title ?? "").slice(0, 160),
+      );
+    }
     return {
       outcome: { outcome: "selected", optionId: allow ? "once" : "deny" },
     };
@@ -544,7 +712,22 @@ if (args[0] === "--child") {
     };
     report.finalText = agentText.slice(-3000);
     try {
-      Object.assign(report, await inspect(workspace, state, sessionId, task));
+      if (game) {
+        renameMcp(report);
+        Object.assign(
+          report,
+          await inspectGame({
+            setup: gameSetup,
+            workspace,
+            state,
+            sessionId,
+            results,
+            label,
+            mcpTools: report.mcpTools,
+          }),
+        );
+      } else
+        Object.assign(report, await inspect(workspace, state, sessionId, task));
     } catch (error) {
       report.inspectError = sanitize(error.message).slice(0, 500);
     }
@@ -750,4 +933,395 @@ async function inspect(workspace, state, sessionId, task) {
       finalAssistantChars: textOf(finalAssistant?.content).length,
     },
   };
+}
+
+// ---- Game task ---------------------------------------------------------------
+// Every precondition is checked before the evaluated session; any problem
+// stops the run. Site settings come only from the environment:
+//   LONG_BENCHMARK_GAME_BROWSER        container:NAME or local:/abs/chromium
+//   LONG_BENCHMARK_ACCEPTANCE_CHECKER  /abs/.../lib/workstation/task_acceptance.py
+//   LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256  optional pin of that file
+//   LONG_BENCHMARK_BROWSER_MCP_URL     http://127.0.0.1:PORT/mcp for the agent
+async function prepareGame(context) {
+  const { root, workspace, state } = context;
+  const setup = {
+    problems: [],
+    acceptance: join(root, "acceptance"),
+    source: null,
+    transport: null,
+    checker: null,
+    references: null,
+    isolation: null,
+    browserMcp: null,
+  };
+  const problem = (text) => setup.problems.push(text);
+  try {
+    setup.source = await GAME.loadSource();
+  } catch (error) {
+    problem(`acceptance source: ${error.message}`);
+    return setup;
+  }
+  await GAME.copySource(setup.source, setup.acceptance);
+  await GAME.writeFixture(setup.source, workspace);
+  const mcpUrl = process.env.LONG_BENCHMARK_BROWSER_MCP_URL;
+  let mcpJson = null;
+  if (!mcpUrl)
+    problem(
+      "LONG_BENCHMARK_BROWSER_MCP_URL is not set; the agent needs the browser to play-test",
+    );
+  else if (!/^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}\/mcp$/.test(mcpUrl))
+    problem("LONG_BENCHMARK_BROWSER_MCP_URL must be http://127.0.0.1:PORT/mcp");
+  else {
+    setup.browserMcp = mcpUrl;
+    // The browser wrapper's documented entry (browser/config.mjs --agent).
+    mcpJson = [
+      {
+        type: "http",
+        name: "browser",
+        url: mcpUrl,
+        headersFrom: {},
+        options: {
+          includeTools: [...BROWSER_TOOLS],
+          alwaysApproveTools: ["browser_navigate"],
+          maxOutputChars: 24000,
+          callTimeoutMs: 60000,
+          maxFrameBytes: 1000000,
+          stripImages: true,
+          rejectFileOutput: true,
+        },
+      },
+    ];
+    await writeFile(join(state, "mcp.json"), JSON.stringify(mcpJson), {
+      mode: 0o600,
+    });
+  }
+  const checkerPath = process.env.LONG_BENCHMARK_ACCEPTANCE_CHECKER;
+  const identity = await GAME.checkerIdentity(checkerPath);
+  if (identity.unavailable) problem(identity.unavailable);
+  else {
+    const pin = process.env.LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256;
+    const seal = await GAME.checkerSeal(checkerPath, setup.acceptance);
+    if (pin && pin !== identity.files["task_acceptance.py"])
+      problem(
+        "task_acceptance.py does not match LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256",
+      );
+    else if (seal !== GAME.GAME_SEAL)
+      problem(
+        `the checker's seal of the source (${seal}) is not the pinned seal`,
+      );
+    else setup.checker = identity;
+  }
+  setup.transport = GAME.parseTransport(
+    process.env.LONG_BENCHMARK_GAME_BROWSER,
+  );
+  if (!setup.transport)
+    problem(
+      "LONG_BENCHMARK_GAME_BROWSER must be container:NAME or local:/abs/chromium",
+    );
+  else
+    try {
+      setup.references = await GAME.proveReferences(
+        setup.source,
+        setup.transport,
+      );
+      if (!setup.references.ok)
+        problem(
+          "the play-through did not give the declared reference and known-bug outcomes",
+        );
+    } catch (error) {
+      problem(`evaluator browser: ${error.message}`);
+    }
+  setup.isolation = await runProbes({ ...context, setup, mcpJson });
+  if (!setup.isolation.established)
+    problem(
+      `isolation not established: ${setup.isolation.findings.join("; ")}`,
+    );
+  return setup;
+}
+
+// Isolation probes: a scripted fake model sends tool calls through the same
+// agent build, child wrapper, permission policy and sandbox as the evaluated
+// session, from a sibling workspace, while the hidden source sits where it
+// stays during that session. Only pass/fail per probe is kept; tool output is
+// discarded so that a leak cannot reach the report.
+async function runProbes({
+  root,
+  setup,
+  mcpJson,
+  agentDirectory,
+  ClientApp,
+  ndJsonStream,
+}) {
+  const workspace = join(root, "probe"),
+    state = join(root, "probe-state");
+  await mkdir(workspace, { mode: 0o700 });
+  await mkdir(state, { mode: 0o700 });
+  const hidden = join(setup.acceptance, "playthrough.json");
+  const repoHidden = [join(GAME.SOURCE, "playthrough.json")];
+  const agentCopy = join(
+    agentDirectory,
+    "test/fixtures/long-benchmark-game/playthrough.json",
+  );
+  if (
+    (await lstat(agentCopy).catch(() => null)) &&
+    (await realpath(agentCopy)) !== (await realpath(repoHidden[0]))
+  )
+    repoHidden.push(agentCopy);
+  const nonce = randomUUID();
+  const plan = GAME.probePlan({
+    workspace,
+    acceptance: setup.acceptance,
+    hidden,
+    repoHidden,
+    nonce,
+    browser: Boolean(mcpJson),
+  });
+  const queue = [...plan];
+  const server = createServer(async (req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (req.url === "/api/models")
+      return res.end(JSON.stringify({ data: [{ id: "probe" }] }));
+    let raw = "";
+    for await (const part of req) raw += part;
+    const request = JSON.parse(raw);
+    let message = { role: "assistant", content: "Probe finished." };
+    while (request.tools.length && queue.length) {
+      const next = queue.shift();
+      const name = next.tool.startsWith("browser/")
+        ? request.tools.find((t) =>
+            t.function.description?.startsWith(`Untrusted MCP ${next.tool}:`),
+          )?.function.name
+        : next.tool;
+      if (!name) continue;
+      message = {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: `probe-${next.id}`,
+            type: "function",
+            function: { name, arguments: JSON.stringify(next.args) },
+          },
+        ],
+      };
+      break;
+    }
+    res.end(
+      JSON.stringify({
+        choices: [
+          {
+            message,
+            finish_reason: message.tool_calls ? "tool_calls" : "stop",
+          },
+        ],
+      }),
+    );
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  await writeFile(
+    join(state, "config.json"),
+    JSON.stringify({
+      url: `http://127.0.0.1:${server.address().port}`,
+      model: "probe",
+      rounds: 100,
+    }),
+    { mode: 0o600 },
+  );
+  if (mcpJson)
+    await writeFile(join(state, "mcp.json"), JSON.stringify(mcpJson), {
+      mode: 0o600,
+    });
+  // A synthetic key: the probe never uses the real credential.
+  const env = {
+    PATH: process.env.PATH,
+    HOME: homedir(),
+    OPENWEBUI_ACP_HOME: state,
+    OPENWEBUI_API_KEY: "synthetic-isolation-probe",
+  };
+  if (process.env.TMPDIR) env.TMPDIR = process.env.TMPDIR;
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(import.meta.url), "--child", agentDirectory],
+    { cwd: workspace, env, stdio: ["pipe", "pipe", "ignore"] },
+  );
+  const tools = new Map(),
+    outcomes = {},
+    previewOrigins = new Set(),
+    app = new ClientApp();
+  app.onNotification("session/update", ({ params }) => {
+    const u = params.update;
+    trackPreview(u, tools, previewOrigins);
+    if (u.sessionUpdate === "tool_call") tools.set(u.toolCallId, u.title);
+    if (
+      u.sessionUpdate === "tool_call_update" &&
+      ["completed", "failed"].includes(u.status) &&
+      String(u.toolCallId).startsWith("probe-")
+    )
+      outcomes[u.toolCallId.slice(6)] = {
+        ok: u.status === "completed",
+        text: updateText(u),
+      };
+  });
+  app.onRequest("session/request_permission", ({ params }) => ({
+    outcome: {
+      outcome: "selected",
+      optionId: decide(params, {
+        game: true,
+        previewOrigins,
+        browserUrl: mcpJson?.[0].url,
+      })
+        ? "once"
+        : "deny",
+    },
+  }));
+  const connection = app.connect(
+    ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)),
+  );
+  let error = null;
+  const timer = setTimeout(() => child.kill("SIGKILL"), 300000);
+  try {
+    await connection.agent.request("initialize", {
+      protocolVersion: 1,
+      clientCapabilities: {},
+    });
+    const { sessionId } = await connection.agent.request("session/new", {
+      cwd: workspace,
+      mcpServers: [],
+    });
+    await connection.agent.request("session/prompt", {
+      sessionId,
+      prompt: [{ type: "text", text: "Run the isolation probe." }],
+    });
+  } catch (e) {
+    error = String(e?.message ?? e).slice(0, 300);
+  } finally {
+    clearTimeout(timer);
+    connection.close();
+    child.kill("SIGTERM");
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  }
+  const after = await GAME.readTree(setup.acceptance, { strict: false });
+  const sealUnchanged =
+    after.refused.length === 0 && GAME.sealOf(after.files) === GAME.GAME_SEAL;
+  const created = Object.keys(after.files).filter(
+    (name) => !(name in setup.source.files),
+  );
+  let repoUnchanged = true;
+  try {
+    await GAME.loadSource();
+  } catch {
+    repoUnchanged = false;
+  }
+  const judged = GAME.judgeProbes(plan, outcomes, {
+    marker: setup.source.script.marker,
+    nonce,
+    sealUnchanged,
+    created,
+    repoUnchanged,
+  });
+  if (error) {
+    judged.established = false;
+    judged.findings.push(`probe session failed: ${error}`);
+  }
+  return {
+    ...judged,
+    // Per probe: outcome and, for a failure, the first line of the agent's
+    // error with local paths replaced. Output that holds the marker is dropped.
+    results: Object.fromEntries(
+      plan.map((p) => {
+        const o = outcomes[p.id];
+        const line = String(o?.text ?? "")
+          .split("\n", 1)[0]
+          .replaceAll(root, "[SCRATCH]")
+          .replaceAll(GAME.SOURCE, "[SOURCE]/")
+          .replaceAll(homedir(), "[HOME]")
+          .slice(0, 160);
+        return [
+          p.id,
+          {
+            kind: p.kind,
+            ok: o?.ok ?? null,
+            ...(o && !o.ok && !line.includes(setup.source.script.marker)
+              ? { reason: line }
+              : {}),
+          },
+        ];
+      }),
+    ),
+    paths: {
+      workspaceSibling: true,
+      repositorySources: repoHidden.length,
+      browser: Boolean(mcpJson),
+    },
+  };
+}
+
+// Tool names in the report: MCP tools by their real names.
+function renameMcp(report) {
+  const map = report.mcpTools ?? {};
+  for (const key of ["toolCalls", "toolFailuresByTool"]) {
+    const renamed = {};
+    for (const [name, n] of Object.entries(report[key]))
+      renamed[map[name] ?? name] = (renamed[map[name] ?? name] ?? 0) + n;
+    report[key] = renamed;
+  }
+  const failures = {};
+  for (const [key, n] of Object.entries(report.toolFailures)) {
+    const [name, ...rest] = key.split(": ");
+    failures[[map[name] ?? name, ...rest].join(": ")] = n;
+  }
+  report.toolFailures = failures;
+}
+
+// After the session: unprompted play-testing from the transcript, then the
+// hidden play-through and the PLAN-04 verdict.
+async function inspectGame({
+  setup,
+  workspace,
+  state,
+  sessionId,
+  results,
+  label,
+  mcpTools,
+}) {
+  const out = {};
+  if (sessionId) {
+    const session = JSON.parse(
+      await readFile(join(state, `session-${sessionId}.json`), "utf8"),
+    );
+    out.unpromptedPlaytest = GAME.detectPlaytest(
+      GAME.callsFromTranscript(session, mcpTools),
+      { browserAvailable: Boolean(setup.browserMcp) },
+    );
+  } else out.unpromptedPlaytest = { observed: null, reason: "no session" };
+  const observation = await GAME.playWorkspace({
+    source: setup.source,
+    transport: setup.transport,
+    references: setup.references,
+    workspace,
+    out: results,
+  });
+  const hidden = await GAME.runChecker({
+    checker: setup.checker.path,
+    source: setup.acceptance,
+    workspace,
+    state: observation.unavailable
+      ? null
+      : join(results, "playthrough-state.json"),
+    output: join(results, "acceptance-result.json"),
+    runId: label,
+  });
+  hidden.observation = observation.unavailable
+    ? { unavailable: observation.unavailable }
+    : {
+        complete: observation.complete,
+        entrySha256: observation.entry_sha256,
+        servedTreeSha256: observation.served_tree_sha256,
+        failures: observation.failures,
+        screenshots: observation.screenshots,
+        browserVersion: observation.browser_version ?? null,
+      };
+  out.hiddenChecks = hidden;
+  return out;
 }
