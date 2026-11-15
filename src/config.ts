@@ -35,7 +35,7 @@ export const configSchema = z
       .string()
       .regex(/^[A-Za-z0-9-]+$/)
       .default("Authorization"),
-    rounds: z.number().int().min(1).max(100).default(40),
+    rounds: z.number().int().min(1).max(250).default(100),
     // Guidance fallback; never sent with coding requests. It can only lower the
     // output cap of a compaction summary request (see summaryRequest).
     outputTokenBudget: z
