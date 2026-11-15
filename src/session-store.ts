@@ -12,6 +12,7 @@ import {
   writeJson,
 } from "./config.js";
 import type { Message } from "./backend.js";
+import { isImageMessage } from "./images.js";
 import {
   compactionStateSchema,
   contextMessages,
@@ -667,7 +668,7 @@ export function fitSessionRecord<T extends Fittable>(
   // still keeping the current request itself.
   const recentSkip = new Set([
     ...kept(),
-    messages.findLastIndex((m) => m.role === "user"),
+    messages.findLastIndex((m) => m.role === "user" && !isImageMessage(m)),
   ]);
   const start = recentStart(KEPT_TURNS);
   shorten(start, messages.length, false, recentSkip);

@@ -92,6 +92,19 @@ No changes after [0.6.0](0.6.0.md).
   approval, telling the model to use `edit_file`. Nothing is written. New files
   and files up to 8 KB are unaffected. This avoids a whole-file rewrite being
   cut off by the output limit mid tool call.
+- Add `view_image` so the model can look at workspace screenshots: PNG, JPEG,
+  GIF or WebP, up to 1 MB and 1280×1280. The image follows the tool results as
+  a labelled user-role `image_url` message. Only the latest images stay in
+  context; older ones become stubs in batches. Image bytes are never saved:
+  stored and restored sessions keep the path, size and hash. `viewImage`
+  (`auto`, `on`, `off`) controls the tool; `auto` respects Open WebUI's
+  `vision: false` flag. Plan and read-only modes offer it as an inspection tool.
+- For games, GUIs and web UIs, a definition of done that needs evidence: real
+  input through the real event loop, screenshots viewed with `view_image`, and
+  a final message saying what was seen. The once-per-turn check reminder also
+  asks for a visual check when an interactive-app file changed after the last
+  viewed screenshot. See the
+  [pygame recipe](../runtime-verification.md#play-testing-interactive-apps).
 
 See [verification](../verification.md), [session modes](../sessions.md#session-modes),
 [ACP v2 readiness](../design.md#acp-v2-readiness) and the

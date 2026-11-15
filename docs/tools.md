@@ -35,6 +35,76 @@ Prose and notice files do not trigger it: `.md`, `.markdown`, `.mdx`, `.txt`,
 and `CMakeLists.txt` do. The reminder names the files and is shown to the user;
 if the model still does not run anything, the turn ends normally.
 
+### Interactive apps
+
+When `view_image` is also offered, the guidance adds a rule for games, GUIs and
+web UIs. A check that would still pass with broken controls or rendering is not
+evidence. The model drives real input through the app's real event loop, saves
+screenshots at key moments, looks at them with `view_image` and compares them
+with what the user should see. It never calls the app playable or working
+without having seen it. Its final message says what it saw and what was not
+verified. With browser click tools, the browser guidance adds that those tools
+take no screenshots: a screenshot comes from a headless browser the project
+already has, saved in the workspace. See the
+[pygame recipe](runtime-verification.md#play-testing-interactive-apps).
+
+The same once-per-turn reminder also asks for a visual check. It does so when an
+interactive-app file was edited and no `view_image` call succeeded after that
+edit. A run alone does not satisfy it, and configured project checks do not
+either. Interactive-app files are `.html`, `.htm`, `.css`, `.vue`, `.svelte`,
+`.jsx` and `.tsx` files, Python files importing pygame, tkinter, PyQt5/6,
+PySide2/6, kivy, arcade, pyglet or wx, and `.js`, `.mjs` and `.ts` files that use
+`document.`, `window.`, `getContext(` or `requestAnimationFrame(`. The edited
+file's text decides, not its name alone. One reminder can name both missing
+checks; it is still sent at most once per turn.
+
+## Viewing images
+
+`view_image` lets the model look at a workspace image, normally a screenshot its
+own program or test saved. It takes `{ "path": "shots/start.png" }`.
+
+- **Formats and limits:** PNG, JPEG, GIF and WebP, identified by the file header,
+  not the extension. At most 1 MB, which is the hardened workspace reader's own
+  bound, and at most 1280 pixels on each side. Larger images are refused with
+  "save a smaller screenshot (≤ 1280×1280)". The agent has no image codec, and a
+  native one is not worth adding when the model saves its own screenshots and can
+  save them smaller.
+- **Scope:** the same checks as `read_file`. Outside, sensitive, protected,
+  symlinked and hard-linked paths are refused, and so are missing files and
+  non-images. Images are read from disk, never from an editor buffer. Like
+  `read_file`, it is an inspection tool, so Plan and read-only modes offer it.
+- **Message shape:** chat-completions `tool` messages carry text only, and Open
+  WebUI flattens images in them to text. The tool result is therefore a short
+  text: `image attached for review: <path> <w>×<h> (<format>, <n> bytes)`. After
+  all of that round's tool results, one user-role message per image follows,
+  with a text part and an `image_url` part holding a `data:` URI. The text part
+  labels the image as tool output and untrusted data, not a user request. Nothing
+  is placed between tool results, so call/result pairing is unchanged.
+- **Context:** images count toward context estimates by pixel size, not by
+  base64 length. The estimate is one token per 32×32 tile after rounding each
+  side to a multiple of 32, at least 64 tiles, plus 2. A 640×480 image is 302
+  tokens. In a live check, a 640×480 image raised reported usage by 420 tokens
+  across a turn that also added the call, its result, the label and a one-line
+  answer, which is consistent with the estimate. The measured characters-per-token
+  ratio is taken from the server's prompt count minus the estimated image
+  tokens. The 1 MB text-request bound does not count inline image data.
+- **Clearing:** up to four images stay in what the model is sent. When a fifth
+  arrives, all but the latest two become
+  `[image cleared from context: <path>; view it again if needed]`. Clearing in a
+  batch keeps the prompt prefix unchanged between batches, as with
+  [cleared tool results](sessions.md#clearing-older-tool-results).
+- **Storage:** image bytes are held in memory only. The saved transcript keeps
+  the label message with the path, format, size, byte count and SHA-256, never
+  the bytes. A restored, loaded or forked session sends the stub instead, and
+  replay does not show the label as a user message. Image messages are not user
+  turns for `/rewind` and are never kept as a pinned request by compaction.
+- **Model support:** `viewImage` in `config.json` is `auto` (default), `on` or
+  `off`. Open WebUI exposes one vision signal, `info.meta.capabilities.vision`,
+  and only for models with a Workspace entry. Its own UI treats a missing flag
+  as capable. `auto` does the same: it offers `view_image` unless that flag is
+  `false`. The model name is never used. Set `off` for a text-only model that
+  has no Workspace entry. The gateway's model list declares no vision field.
+
 ## Reading files
 
 `read_file` returns numbered lines. Each line starts with its 1-based number and

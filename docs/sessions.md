@@ -152,6 +152,11 @@ model's advertised limits and one reported prompt count, like the pre-request
 size check. `/doctor` output lists the boundary as `contextMask`. A write whose
 argument is one of these placeholders is refused.
 
+Images from `view_image` follow their own rule, independent of this boundary.
+At most four stay in what the model is sent. A fifth clears all but the latest
+two, again in one batch. Image bytes are never saved, so a restored session
+sends stubs. See [viewing images](tools.md#viewing-images).
+
 The task plan is not placed ahead of the conversation. The model sees it in its
 own latest `update_plan` call. When that call is no longer in context (after
 compaction or a restore without it), a short untrusted note after the latest
