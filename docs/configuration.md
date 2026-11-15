@@ -4,6 +4,8 @@
 
 Non-secret configuration is `config.json` in the application directory:
 `${XDG_CONFIG_HOME:-~/.config}/openwebui-acp-agent` on POSIX systems.
+OpenMettle ACP retains this directory and the `openwebui-acp-agent` credential
+service name for compatibility. The rename does not move stored data or keys.
 `OPENWEBUI_ACP_HOME` selects a different directory. Directories use mode 0700;
 files use 0600. Native Windows persistence is disabled pending ACL support.
 
@@ -91,7 +93,7 @@ make access succeed.
 
 ## CLI fallback
 
-`openwebui-acp-agent` provides `acp`, `login`, `logout`, `models`, `status`,
+`openmettle-acp` (also available as `openwebui-acp-agent`) provides `acp`, `login`, `logout`, `models`, `status`,
 `doctor`, `trust`, `trust revoke /absolute/workspace` and
 `trust allow /absolute/workspace`. The last command explicitly clears a block
 and remembers trust. Normal IDE use requires no wrapper script or routine CLI

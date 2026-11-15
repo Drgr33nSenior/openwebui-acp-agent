@@ -230,7 +230,7 @@ export class Mcp {
         let transport;
         const connecting = new AbortController();
         const client = new Client({
-          name: "openwebui-acp-agent",
+          name: "openmettle-acp",
           version: "0.6.0",
         });
         let failed = false;

@@ -104,7 +104,7 @@ main().catch((error: unknown) => {
   )
     process.stderr.write(message + "\n");
   process.stderr.write(
-    "Open WebUI agent failed. Check setup, secure storage, URL/API permissions, and command usage. Credentials and raw errors are withheld.\n",
+    "OpenMettle ACP failed. Check setup, secure storage, URL/API permissions, and command usage. Credentials and raw errors are withheld.\n",
   );
   process.exitCode = 1;
 });

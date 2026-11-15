@@ -160,7 +160,7 @@ export async function writeJson(name: string, value: unknown) {
 }
 export async function config() {
   const raw = await readJson("config.json");
-  if (!raw) throw new Error("Setup required: run openwebui-acp-agent login");
+  if (!raw) throw new Error("Setup required: run openmettle-acp login");
   const c = configSchema.parse(raw);
   endpoint(c.url, "api/models");
   return c;
@@ -183,7 +183,7 @@ export async function key(c: Config) {
     /* No insecure fallback. */
   }
   throw new Error(
-    "Authentication required: run openwebui-acp-agent login or supply OPENWEBUI_API_KEY for this process",
+    "Authentication required: run openmettle-acp login or supply OPENWEBUI_API_KEY for this process",
   );
 }
 export async function saveKey(c: Config, value: string) {

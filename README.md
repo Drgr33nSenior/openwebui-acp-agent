@@ -1,6 +1,6 @@
-# Open WebUI ACP Agent
+# OpenMettle ACP
 
-An unofficial coding agent for JetBrains AI Assistant, Air in JetBrains IDEs,
+An independent coding agent from OpenMettle for JetBrains AI Assistant, Air in JetBrains IDEs,
 and other compatible Agent Client Protocol (ACP) clients. Connect your Open WebUI
 installation, select a model, and work on your project from the IDE chat.
 
@@ -17,8 +17,13 @@ see [compatibility and testing](docs/verification.md). Native Windows is not
 supported; see the [Windows plan](docs/windows-plan.md) for a later version.
 Linux needs bubblewrap, socat and ripgrep for command isolation.
 
+The published 0.6.0 package retains the `openwebui-acp-agent` package and command
+names shown below. The renamed source builds as `openmettle-acp`, with both
+`openmettle-acp` and `openwebui-acp-agent` commands. A renamed package has not yet
+been released or published to npm. See [the rename and upgrade notes](docs/migration.md#openmettle-rename).
+
 ```sh
-npm install --global https://github.com/Drgr33nSenior/openwebui-acp-agent/releases/download/v0.6.0/openwebui-acp-agent-0.6.0.tgz
+npm install --global https://github.com/OpenMettle/openmettle-acp/releases/download/v0.6.0/openwebui-acp-agent-0.6.0.tgz
 ```
 
 In your ACP client's custom-agent settings, use an absolute Node executable and
@@ -41,7 +46,7 @@ JetBrains registration has this form; preserve your other entries:
 }
 ```
 
-`npm root --global` shows the global `node_modules` directory. This release is distributed through [GitHub Releases](https://github.com/Drgr33nSenior/openwebui-acp-agent/releases/tag/v0.6.0); no npm account is needed.
+`npm root --global` shows the global `node_modules` directory. This release is distributed through [GitHub Releases](https://github.com/OpenMettle/openmettle-acp/releases/tag/v0.6.0); no npm account is needed.
 See the [0.6.0 release notes](docs/releases/0.6.0.md) for changes since 0.5.0.
 The [ACP registry manifest](registry/agent.json) is a proposal for future catalog
 distribution. Its npm target is not published, and it is not an installable
@@ -69,8 +74,9 @@ arguments, project files or ACP configuration. `/login` requests setup again;
 `/logout` signs out and cancels active work without deleting transcripts or
 revoking the server's API key. Reconnect after login or logout.
 
-For a client without terminal authentication, `openwebui-acp-agent login` is the
-manual fallback. Browser sign-in and OAuth are not implemented. See
+For a client without terminal authentication, `openmettle-acp login` is the
+manual fallback; published 0.6.0 uses `openwebui-acp-agent login`. Browser
+sign-in and OAuth are not implemented. See
 [configuration and troubleshooting](docs/configuration.md).
 
 ## Working with the agent

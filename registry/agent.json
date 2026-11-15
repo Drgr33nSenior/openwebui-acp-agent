@@ -1,17 +1,17 @@
 {
   "$schema": "https://cdn.agentclientprotocol.com/registry/v1/latest/agent.schema.json",
-  "id": "openwebui-acp-agent",
-  "name": "Open WebUI Agent (unofficial)",
+  "id": "openmettle-acp",
+  "name": "OpenMettle ACP",
   "version": "0.6.0",
-  "description": "Unofficial coding agent for JetBrains and compatible ACP clients, using your Open WebUI installation.",
+  "description": "OpenMettle coding agent for compatible ACP clients, using your Open WebUI installation.",
   "license": "MIT",
-  "license_url": "https://github.com/Drgr33nSenior/openwebui-acp-agent/blob/main/LICENSE",
-  "repository": "https://github.com/Drgr33nSenior/openwebui-acp-agent",
-  "website": "https://github.com/Drgr33nSenior/openwebui-acp-agent#readme",
+  "license_url": "https://github.com/OpenMettle/openmettle-acp/blob/main/LICENSE",
+  "repository": "https://github.com/OpenMettle/openmettle-acp",
+  "website": "https://github.com/OpenMettle/openmettle-acp#readme",
   "authors": ["Drgr33nSenior"],
   "distribution": {
     "npx": {
-      "package": "openwebui-acp-agent@0.6.0",
+      "package": "openmettle-acp@0.6.0",
       "args": ["acp"],
       "env": {}
     }

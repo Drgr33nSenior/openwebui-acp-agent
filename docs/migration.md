@@ -4,6 +4,37 @@ The agent has its own package, application directory and OS credential-store
 entry. It does not import another agent's credentials, trust, sessions, hooks
 or executable project settings.
 
+## OpenMettle rename
+
+The project is now **OpenMettle ACP**, at
+[OpenMettle/openmettle-acp](https://github.com/OpenMettle/openmettle-acp).
+The renamed source package is `openmettle-acp`; its executable is
+`openmettle-acp`, with `openwebui-acp-agent` retained as an alias. The agent's
+ACP title and MCP client metadata use the new name. The proposed, unpublished
+ACP registry entry uses `openmettle-acp` too.
+
+Compatibility identities remain unchanged:
+
+- application state stays in `openwebui-acp-agent` under the configured user
+  configuration directory;
+- `OPENWEBUI_ACP_HOME` and `OPENWEBUI_API_KEY` keep their existing meanings;
+- the OS credential service remains `openwebui-acp-agent`;
+- administrator policy stays at the fixed `openwebui-acp-agent/policy.json` path;
+- browser-wrapper package, image and Compose names are retained so existing
+  containers and configuration continue to work.
+
+No credential, trust or session migration runs. Existing client registrations
+continue to use their installed executable until explicitly updated. When
+installing a renamed build, its entrypoint is under
+`node_modules/openmettle-acp/dist/cli.js`; preserve the registration's identity
+and update only its command path. Keep the previous package for rollback.
+
+Existing releases retain their original tarball names. The 0.6.0 artifact is
+still `openwebui-acp-agent-0.6.0.tgz`; do not construct a renamed 0.6.0 asset URL.
+Future releases from the renamed source use `openmettle-acp-VERSION.tgz` and
+need a new immutable version. The npm name check returned no public package
+on 15 November 2026; that does not reserve the name or establish publishing rights.
+
 ## Upgrade
 
 1. Stop active agent work and keep the previous version installed.

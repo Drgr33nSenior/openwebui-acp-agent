@@ -25,7 +25,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          test "$GITHUB_REPOSITORY" = Drgr33nSenior/openwebui-acp-agent
+          test "$GITHUB_REPOSITORY" = OpenMettle/openmettle-acp
           test "$GITHUB_REF" = refs/heads/main
           node --input-type=module <<'JS'
           import { readFileSync } from 'node:fs';
@@ -91,7 +91,7 @@ jobs:
           const { RELEASE_VERSION: version, GITHUB_REPOSITORY: repo, GITHUB_SHA: sha,
             GITHUB_RUN_ID: run, PACKAGE_FILE: file } = process.env;
           const url = `https://github.com/${repo}/releases/download/v${version}/${file}`;
-          console.log(`Unofficial Open WebUI coding agent for JetBrains and compatible ACP clients.\n
+          console.log(`OpenMettle ACP coding agent for compatible clients, powered by Open WebUI.\n
           Install with Node.js 26 LTS and npm; no npm account is needed:\n
           \`\`\`sh\nnpm install --global ${url}\n\`\`\`\n
           Use the attached package rather than the source archive. SHA256SUMS covers the package.
@@ -103,7 +103,7 @@ jobs:
           gh release create "v$RELEASE_VERSION" \
             "$RUNNER_TEMP/$PACKAGE_FILE" "$RUNNER_TEMP/SHA256SUMS" \
             --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "Open WebUI ACP Agent $RELEASE_VERSION" \
+            --title "OpenMettle ACP $RELEASE_VERSION" \
             --notes-file "$RUNNER_TEMP/release-notes.md"
       - name: Verify public download and installation
         env:

@@ -2658,8 +2658,8 @@ export function createAgent(
     return {
       protocolVersion: 1,
       agentInfo: {
-        name: "openwebui-acp-agent",
-        title: "Open WebUI Agent (unofficial)",
+        name: "openmettle-acp",
+        title: "OpenMettle ACP",
         version: "0.6.0",
       },
       agentCapabilities: {

@@ -1,5 +1,10 @@
 # Release checklist
 
+The canonical repository is `OpenMettle/openmettle-acp`. The rename changes
+future package and artifact names to `openmettle-acp`; existing release files
+keep their original names. Do not overwrite or republish 0.6.0. Choose a new
+version for the first renamed release. See [migration](migration.md#openmettle-rename).
+
 ## Publish on GitHub
 
 Merge the reviewed source PR first. In the repository's **Actions** tab, select

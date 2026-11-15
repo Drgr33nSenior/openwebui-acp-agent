@@ -1,5 +1,24 @@
 # Testing and compatibility
 
+## OpenMettle branding (unreleased)
+
+The rename is based on main `f219d6e`. It changes package, executable, ACP/MCP
+metadata, proposed registry identity and repository links to OpenMettle ACP.
+The legacy executable alias, credential service, configuration directory,
+environment variables and fixed policy paths are retained. The original MIT
+copyright notice is unchanged. No dependency versions changed.
+
+On macOS 27.0 with Node 26.11.1, `npm ci --ignore-scripts`, lint, typecheck,
+Prettier, build and the full suite passed: **561 tests, 553 passed, eight skips,
+zero failures**. The renamed tarball installed outside the checkout and passed
+the ACP metadata, both executable-alias, authentication-discovery and real
+sandbox checks. The installed production audit found zero vulnerabilities.
+
+The GitHub repository transfer preserved the repository ID and the existing
+0.6.0 release and asset IDs. Its public tarball downloaded from the new address
+with the original SHA-256 digest. No renamed release or npm package was
+published, and the installed IDE agents were not replaced by this branch.
+
 ## Automated checks
 
 Use the pinned Node release from `.node-version` and a private temporary
