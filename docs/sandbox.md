@@ -29,6 +29,14 @@ scope and can fail with `Operation not permitted`, even after command approval.
 Scratch files are deleted when the invocation ends. Use workspace-relative files
 for data needed by later commands.
 
+The private `TMPDIR` is a new directory below the agent's own `TMPDIR`. On
+macOS, the sandbox broker keeps its internal proxy socket in a second private
+directory below `/private/tmp`, because macOS limits a socket path to 104 bytes
+and a long agent `TMPDIR` would exceed it. Commands get no access to that
+directory, and the broker removes both directories when the invocation ends.
+On Linux the runtime's bridge sockets must stay in the command's directory, so
+the agent's `TMPDIR` must leave room for them (about 47 bytes or less).
+
 The policy denies home/common temporary paths and known credential stores, then
 allows the workspace, invocation temporary directory and approved read scopes.
 Other system paths remain readable for toolchain compatibility: this is not a

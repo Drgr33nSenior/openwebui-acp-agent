@@ -322,6 +322,27 @@ export async function sandboxDiagnostics(probe = false) {
   };
 }
 
+// macOS limits a Unix socket path to 104 bytes, including the terminator. The
+// runtime binds its proxy backend socket in the broker's os.tmpdir()
+// (srt-mux-<pid>-<n>.sock); below a long TMPDIR, the invocation's scratch
+// directory can leave too little room, and initialization then fails. On macOS the
+// broker therefore gets its own private directory below the short system
+// root. Only the broker process uses it: commands keep the invocation's
+// scratch directory, and the policy grants them nothing new.
+const MAC_SOCKET_PATH_MAX = 103;
+const MUX_SOCKET_NAME = "srt-mux-99999999-zzzzzz.sock";
+export async function brokerTemporary(platform = process.platform) {
+  if (platform !== "darwin") return undefined;
+  const path = await realpath(await mkdtemp("/private/tmp/openwebui-broker-"));
+  if (Buffer.byteLength(join(path, MUX_SOCKET_NAME)) > MAC_SOCKET_PATH_MAX) {
+    await rm(path, { recursive: true, force: true });
+    throw new SandboxError(
+      "Sandbox broker socket path exceeds the macOS limit",
+    );
+  }
+  return path;
+}
+
 // One broker process per invocation. The runtime has global mutable state;
 // sharing it across sessions could mix roots, credentials and network grants.
 export async function startSandbox(
@@ -344,6 +365,21 @@ export async function startSandbox(
   const temporary = await realpath(
     await mkdtemp(join(tmpdir(), "openwebui-sandbox-")),
   );
+  let broker: string | undefined;
+  try {
+    broker = await brokerTemporary();
+  } catch (error) {
+    await rm(temporary, { recursive: true, force: true });
+    throw error instanceof SandboxError
+      ? error
+      : new SandboxError("Sandbox broker could not start");
+  }
+  const removeTemporary = () =>
+    Promise.all(
+      [temporary, broker]
+        .filter((path): path is string => !!path)
+        .map((path) => rm(path, { recursive: true, force: true })),
+    );
   let child: ChildProcess;
   try {
     child = fork(
@@ -354,11 +390,13 @@ export async function startSandbox(
         // The runtime creates Linux proxy bridge sockets via os.tmpdir(). Keep
         // them in this invocation's allowed temp scope before importing it;
         // otherwise the filesystem deny hides its sockets under the shared /tmp.
+        // On macOS the broker's own sockets need a short path instead; see
+        // brokerTemporary(). Commands always use `temporary`.
         env: {
           ...childEnv(),
-          TMPDIR: temporary,
-          TMP: temporary,
-          TEMP: temporary,
+          TMPDIR: broker ?? temporary,
+          TMP: broker ?? temporary,
+          TEMP: broker ?? temporary,
         },
         execArgv: [],
         detached: true,
@@ -366,7 +404,7 @@ export async function startSandbox(
       },
     );
   } catch {
-    await rm(temporary, { recursive: true, force: true });
+    await removeTemporary();
     throw new SandboxError("Sandbox broker could not start");
   }
   let stopped = false,
@@ -402,7 +440,7 @@ export async function startSandbox(
         lifetime.abort();
         signal.removeEventListener("abort", stop);
         kill("SIGKILL");
-        await rm(temporary, { recursive: true, force: true }).catch(() => {});
+        await removeTemporary().catch(() => {});
         resolve({ code, error });
       });
     },
