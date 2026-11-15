@@ -16,6 +16,7 @@ import {
   ToolArgumentsError,
   checkReminder,
   needsRuntimeCheck,
+  interactiveFile,
 } from "./harness.js";
 import {
   FILE_VIEW_LIMIT,
@@ -46,6 +47,20 @@ import {
   withoutLineNumbers,
 } from "./reading.js";
 import { userMcp, mcpOptions } from "./user-mcp.js";
+import {
+  IMAGE_MAX_BYTES,
+  IMAGE_MAX_SIDE,
+  checkImage,
+  clearOldImages,
+  imagesSupported,
+  imageMessage,
+  imageResultText,
+  isImageMessage,
+  liveImageTokens,
+  withImages,
+  type ImageRecord,
+  type LiveImages,
+} from "./images.js";
 import { mcpSecrets, ideFileProblemsArguments } from "./ide-mcp.js";
 import {
   verificationCommands,
@@ -191,6 +206,7 @@ import {
   changeTrust,
   target,
   readText,
+  readBytes,
   files,
   searchFiles,
   listing,
@@ -342,6 +358,7 @@ const schemas = {
     })
     .strict(),
   stop_job: z.object({ id: z.string().uuid() }).strict(),
+  view_image: z.object({ path: z.string().min(1).max(4096) }).strict(),
   start_preview: previewSchema,
   stop_preview: z.object({ id: z.string().uuid() }).strict(),
   list_checkpoints: z.object({}).strict(),
@@ -363,6 +380,7 @@ const inspectionTools = new Set([
   "list_files",
   "read_file",
   "search_text",
+  "view_image",
   "list_jobs",
   "poll_job",
   "stop_job",
@@ -385,6 +403,7 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
       poll_job:
         "Read a page of output/status from this session's job; use nextOffset for subsequent pages",
       stop_job: "Stop and clean up this session's command job",
+      view_image: `Look at a workspace image: a PNG, JPEG, GIF or WebP file up to ${IMAGE_MAX_BYTES / 1_000_000} MB and ${IMAGE_MAX_SIDE}×${IMAGE_MAX_SIDE} pixels, such as a screenshot your program or test saved. The image is attached after the tool results; describe what it actually shows. Larger images are refused: save a smaller screenshot.`,
       start_preview:
         "Serve an approved immutable snapshot of explicit workspace frontend files (HTML/CSS/JS and assets) on one temporary loopback port. No command or shell is needed. List workspace-relative files and an HTML entry; its directory is the web root and all assets must be within it. Returns ready url for a host browser and containerUrl for the documented Docker Desktop browser. Recreate after edits; stop_preview when done. Closes at turn end. No project server, backend API, build or hot reload is executed.",
       stop_preview:
@@ -401,6 +420,8 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
 }));
 type ToolResult = {
   text: string;
+  // view_image only: attached to the request after the tool results.
+  image?: { record: ImageRecord; dataUri: string };
   failed?: boolean;
   background?: boolean;
   content?: ToolCallContent[];
@@ -441,6 +462,9 @@ type Session = {
   // Which older tool observations the model is sent as stubs; persisted so
   // the masked prompt is the same on every round and after a restore.
   mask: ContextMask;
+  // Image bytes for view_image messages still sent to the model, keyed by the
+  // transcript message. Memory only: never saved, empty after a restore.
+  images: LiveImages;
   workflow: "code" | "plan";
   // In-memory permission choice that Code restores after Ask; never persisted.
   codePermissions?: PermissionMode;
@@ -924,6 +948,11 @@ export function createAgent(
     }
     if (!s.active) throw new Error("Workspace is not active");
   };
+  const imagesOffered = (s: Session) =>
+    imagesSupported(
+      s.config.viewImage,
+      s.metadata.find((m) => m.id === s.config.model),
+    );
   // The transcript as the model is sent it: same messages and indexes, with
   // older tool observations masked.
   const modelView = (s: Session) =>
@@ -2075,6 +2104,25 @@ export function createAgent(
       recordFileView(s.fileViews, viewKey(s, a.path), text);
       return pageText(text, a.offset, a.limit);
     }
+    if (name === "view_image") {
+      if (!imagesOffered(s))
+        throw new Error("view_image is not available for this model");
+      // Same scope checks as read_file: outside, sensitive, protected and
+      // symlinked paths are refused. Images are read from disk, never from
+      // an editor buffer.
+      const p = await target(s.root, a.path);
+      const info = await stat(p);
+      if (!info.isFile()) throw new Error(`${a.path} is not a file`);
+      if (info.size > IMAGE_MAX_BYTES)
+        throw new Error(
+          `${a.path} is ${info.size} bytes, over the ${IMAGE_MAX_BYTES / 1_000_000} MB view_image limit; save a smaller screenshot (≤ ${IMAGE_MAX_SIDE}×${IMAGE_MAX_SIDE}, PNG or JPEG) and view that`,
+        );
+      const image = checkImage(
+        relative(s.root, p).replaceAll("\\", "/"),
+        await readBytes(s.root, p, IMAGE_MAX_BYTES),
+      );
+      return { text: imageResultText(image.record), image };
+    }
     if (name === "search_text") {
       const found = new SearchResults(a.text, a.max_results);
       const searched = await searchFiles(s.root, a.path);
@@ -2462,7 +2510,8 @@ export function createAgent(
       if (
         m.role === "user" &&
         m.content &&
-        !m.content.startsWith(PROJECT_GUIDANCE_PREFIX)
+        !m.content.startsWith(PROJECT_GUIDANCE_PREFIX) &&
+        !isImageMessage(m)
       )
         await update(client, s, {
           sessionUpdate: "user_message_chunk",
@@ -2632,6 +2681,7 @@ export function createAgent(
       fileViews: new Map(),
       instructions: [],
       mask: NO_MASK,
+      images: new WeakMap(),
       root: await root(params.cwd),
       config: { ...c },
       backend,
@@ -2852,6 +2902,7 @@ export function createAgent(
       messages: restoreHistory(saved.messages),
       compaction: saved.compaction,
       mask: clampMask(saved.contextMask, saved.messages.length),
+      images: new WeakMap(),
       workflow: saved.workflow,
       promptMode: saved.promptMode,
       turns: new Turns(),
@@ -3650,9 +3701,13 @@ export function createAgent(
                 tools:
                   s.workflow === "plan" ||
                   s.permissions.currentMode === "read_only"
-                    ? [...inspectionTools, "update_plan"]
+                    ? [...inspectionTools, "update_plan"].filter(
+                        (name) => name !== "view_image" || imagesOffered(s),
+                      )
                     : [
-                        ...Object.keys(schemas),
+                        ...Object.keys(schemas).filter(
+                          (name) => name !== "view_image" || imagesOffered(s),
+                        ),
                         "update_plan",
                         ...s.mcp.tools.keys(),
                         ...(s.serverTools && s.serverCatalog
@@ -3853,6 +3908,9 @@ export function createAgent(
         // Behavior-changing files edited since the last command, preview or
         // browser call; one reminder per turn (see checkReminder).
         const unchecked = new Set<string>();
+        // Interactive-app files edited since the last view_image; the same
+        // once-per-turn reminder asks for a visual check.
+        const unviewed = new Set<string>();
         let checkReminded = false;
         let lastVerification: VerificationResult | undefined;
         let mutationRevision = 0;
@@ -4122,9 +4180,10 @@ export function createAgent(
           const tools = [
             ...definitions.filter(
               (d) =>
-                (s.workflow !== "plan" &&
+                ((s.workflow !== "plan" &&
                   s.permissions.currentMode !== "read_only") ||
-                inspectionTools.has(d.function.name),
+                  inspectionTools.has(d.function.name)) &&
+                (d.function.name !== "view_image" || imagesOffered(s)),
             ),
             planToolDefinition,
             ...(s.workflow === "plan" ||
@@ -4164,9 +4223,15 @@ export function createAgent(
             s.config.outputTokenBudget,
             replyCap(s),
           );
+        // Live images count by their estimated tokens, converted at the
+        // measured ratio; their base64 length says nothing about tokens.
         const requestSize = (request: ReturnType<typeof requestContext>) =>
           JSON.stringify(request.modelContext).length +
-          JSON.stringify(request.tools).length;
+          JSON.stringify(request.tools).length +
+          Math.ceil(
+            liveImageTokens(request.modelContext, s.images) *
+              (s.tokenRatio ?? 0),
+          );
         // The tier before compaction: once the request passes the trigger,
         // older tool observations are cleared in one batch and the boundary is
         // saved. Between batches the masked prompt does not change.
@@ -4219,6 +4284,12 @@ export function createAgent(
           // built, so the compaction check below measures them too.
           await absorbSteering(client, s, signal);
           await reportFinishedJobs(s);
+          // Older images become stubs in batches (images.ts), so the prompt
+          // prefix changes once per batch rather than on every new image.
+          if (clearOldImages(s.messages, s.images))
+            process.stderr.write(
+              JSON.stringify({ event: "image_context_cleared" }) + "\n",
+            );
           let request = await maskContext(requestContext());
           for (;;) {
             const limits = requestLimits();
@@ -4312,8 +4383,9 @@ export function createAgent(
             availableTools = request.availableTools;
             let contextNotice: string | undefined;
             try {
+              const imageTokens = liveImageTokens(modelContext, s.images);
               message = await s.backend.complete(
-                modelContext,
+                withImages(modelContext, s.images),
                 tools,
                 signal,
                 async (t) => {
@@ -4332,11 +4404,13 @@ export function createAgent(
                 undefined,
                 async (used, prompt) => {
                   signal.throwIfAborted();
+                  // The ratio describes text: estimated image tokens are
+                  // taken out of the server's prompt count first.
                   s.tokenRatio =
                     charsPerToken(
                       JSON.stringify(modelContext).length +
                         JSON.stringify(tools).length,
-                      prompt ?? 0,
+                      (prompt ?? 0) - imageTokens,
                     ) ?? s.tokenRatio;
                   const size = contextSize(
                     s.metadata.find((m) => m.id === s.config.model),
@@ -4449,16 +4523,26 @@ export function createAgent(
               (await absorbSteering(client, s, signal))
             )
               continue;
-            // Configured project checks run in verify() below and count as the run.
+            // Configured project checks run in verify() below and count as the
+            // run; they do not count as looking at an interactive app.
+            const runCheck =
+              unchecked.size > 0 &&
+              !(await verificationCommands(s.config.verify, s.root)).length;
+            const visualCheck =
+              unviewed.size > 0 && availableTools.includes("view_image");
             if (
-              unchecked.size &&
+              (runCheck || visualCheck) &&
               !checkReminded &&
               availableTools.includes("run_command") &&
-              round + 1 < s.config.rounds &&
-              !(await verificationCommands(s.config.verify, s.root)).length
+              round + 1 < s.config.rounds
             ) {
               checkReminded = true;
-              const notice = s.backend.redact(checkReminder([...unchecked]));
+              const notice = s.backend.redact(
+                checkReminder(
+                  runCheck ? [...unchecked] : [],
+                  visualCheck ? [...unviewed] : [],
+                ),
+              );
               s.messages.push({ role: "assistant", content: notice });
               await text(client, s, notice + "\n");
               await save(s);
@@ -4493,6 +4577,9 @@ export function createAgent(
             await save(s);
             return { stopReason: "end_turn" };
           }
+          // view_image results, attached after the whole group of tool
+          // results: a message between them would orphan later results.
+          const attachments: NonNullable<ToolResult["image"]>[] = [];
           for (const c of message.tool_calls) {
             let result = "Not executed: turn cancelled or limit reached";
             const runs =
@@ -4537,15 +4624,25 @@ export function createAgent(
               ) {
                 mutationRevision++;
                 const path = String(JSON.parse(c.function.arguments).path);
-                if (needsRuntimeCheck(path))
-                  unchecked.add(
-                    relative(s.root, resolve(s.root, path)).replaceAll(
-                      "\\",
-                      "/",
-                    ),
-                  );
+                const shown = relative(
+                  s.root,
+                  resolve(s.root, path),
+                ).replaceAll("\\", "/");
+                if (needsRuntimeCheck(path)) unchecked.add(shown);
+                if (
+                  availableTools.includes("view_image") &&
+                  interactiveFile(
+                    path,
+                    await read(client, s, path).catch(() => ""),
+                  )
+                )
+                  unviewed.add(shown);
               }
               if (runs) unchecked.clear();
+              if (typeof outcome !== "string" && outcome.image) {
+                attachments.push(outcome.image);
+                unviewed.clear();
+              }
               result = typeof outcome === "string" ? outcome : outcome.text;
               const tally =
                 typeof outcome === "string" || !outcome.failed
@@ -4606,6 +4703,15 @@ export function createAgent(
             });
             await save(s);
           }
+          for (const image of attachments) {
+            const attachment = imageMessage({
+              ...image.record,
+              path: s.backend.redact(image.record.path),
+            });
+            s.messages.push(attachment);
+            s.images.set(attachment, image.dataUri);
+          }
+          if (attachments.length) await save(s);
           signal.throwIfAborted();
           if (count >= 64) {
             limit = "Tool-call limit";

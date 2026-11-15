@@ -12,12 +12,13 @@ Setup writes `url` and `model`. Optional settings include:
 | Setting                 | Default and range                                             |
 | ----------------------- | ------------------------------------------------------------- |
 | `header`                | `Authorization`; change only for a verified proxy requirement |
-| `rounds`                | 40 model rounds per turn; maximum 100                         |
+| `rounds`                | 100 model rounds per turn; maximum 250                        |
 | `outputTokenBudget`     | 12288 fallback guidance tokens per reply; integer 1–1000000 |
 | `timeoutMs`             | 120000 ms for discovery; maximum 3600000                      |
 | `firstContentTimeoutMs` | 900000 ms to first streamed content; maximum 3600000          |
 | `idleTimeoutMs`         | 300000 ms between streamed chunks; maximum 3600000            |
 | `verify`                | Bounded [verification settings](ide-diagnostics.md)           |
+| `viewImage`             | `auto`; `on` or `off` to override [image support](tools.md#viewing-images) |
 
 There is no overall turn deadline while content continues to stream. Stop remains
 available. Each command has a separate `timeout_ms`: default 120000, maximum 600000. Existing explicit configuration values are preserved on setup.

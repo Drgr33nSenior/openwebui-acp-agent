@@ -244,6 +244,7 @@ test("Plan mode enforces read-only tools before forged mutations and never conne
       "stop_job",
       "stop_preview",
       "update_plan",
+      "view_image",
     ]);
     assert.equal(
       c.approvals.length,

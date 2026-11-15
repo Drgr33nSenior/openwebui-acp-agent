@@ -35,7 +35,7 @@ export const configSchema = z
       .string()
       .regex(/^[A-Za-z0-9-]+$/)
       .default("Authorization"),
-    rounds: z.number().int().min(1).max(100).default(40),
+    rounds: z.number().int().min(1).max(250).default(100),
     // Guidance fallback; never sent with coding requests. It can only lower the
     // output cap of a compaction summary request (see summaryRequest).
     outputTokenBudget: z
@@ -58,6 +58,11 @@ export const configSchema = z
       .max(3600000)
       .default(900000),
     idleTimeoutMs: z.number().int().min(1000).max(3600000).default(300000),
+    // view_image. "auto" offers it unless the selected model's Open WebUI
+    // metadata declares info.meta.capabilities.vision false, the only vision
+    // flag Open WebUI exposes; like Open WebUI itself, an absent flag counts
+    // as capable. "off" for text-only models without that flag.
+    viewImage: z.enum(["auto", "on", "off"]).default("auto"),
   })
   .strict();
 export type Config = z.infer<typeof configSchema>;

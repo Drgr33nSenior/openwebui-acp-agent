@@ -24,10 +24,50 @@ const buildText = /(?:^|[\\/])(?:requirements[^\\/]*|CMakeLists)\.txt$/i;
 export const needsRuntimeCheck = (path: string) =>
   !prose.test(path) || buildText.test(path);
 
-// Sent at most once per turn, when files that can change behavior were edited
-// after the last command, preview or browser call and the model tries to finish.
-export const checkReminder = (paths: readonly string[]) =>
-  `Check reminder (sent once): ${paths.length > 5 ? `${paths.slice(0, 5).join(", ")} and ${paths.length - 5} more` : paths.join(", ")} changed after your last run. Before finishing, run the check that proves the change works with run_command, then list each command and its result. If it cannot be run, say what was not verified and why.`;
+// Offered with run_command and view_image. Headless state assertions passed
+// while a real game was unplayable: only what was seen counts for these apps.
+export const INTERACTIVE_RULE =
+  "Interactive apps (games, GUIs, web UIs): a check that would still pass with broken controls or rendering is not evidence. Drive real input through the app's real event loop (for pygame, post key events into the actual main loop with SDL_VIDEODRIVER=dummy), save screenshots at key moments (pygame.image.save works headless), look at them with view_image and compare them with what the user should see. Never call it playable or working without having seen it; the final message states what you saw and what was not verified.";
+
+// Files whose behavior is only proven by looking at them: web UI sources, and
+// scripts that use a GUI toolkit or the browser DOM/canvas. Judged from the
+// edited file's own text; a wrong guess costs at most one reminder.
+const webUi = /\.(?:html?|css|vue|svelte|jsx|tsx)$/i;
+const script = /\.(?:m?js|ts)$/i;
+const python = /\.pyw?$/i;
+const guiImport =
+  /^\s*(?:import|from)\s+(?:pygame|tkinter|Tkinter|PyQt[56]|PySide[26]|kivy|arcade|pyglet|wx)\b/m;
+const domUse = /\b(?:document\.|window\.|getContext\(|requestAnimationFrame\()/;
+export const interactiveFile = (path: string, text: string) =>
+  webUi.test(path) ||
+  (python.test(path) && guiImport.test(text)) ||
+  (script.test(path) && domUse.test(text));
+
+const listed = (paths: readonly string[]) =>
+  paths.length > 5
+    ? `${paths.slice(0, 5).join(", ")} and ${paths.length - 5} more`
+    : paths.join(", ");
+
+// Sent at most once per turn when the model tries to finish: `paths` are files
+// that can change behavior, edited after the last command, preview or browser
+// call; `unviewed` are interactive-app files edited after the last view_image.
+export const checkReminder = (
+  paths: readonly string[],
+  unviewed: readonly string[] = [],
+) =>
+  "Check reminder (sent once): " +
+  [
+    ...(paths.length
+      ? [
+          `${listed(paths)} changed after your last run. Before finishing, run the check that proves the change works with run_command, then list each command and its result. If it cannot be run, say what was not verified and why.`,
+        ]
+      : []),
+    ...(unviewed.length
+      ? [
+          `${paths.length ? "Visual check: " : ""}${listed(unviewed)} ${unviewed.length === 1 ? "is an interactive app file" : "are interactive app files"} and no screenshot was viewed after the last edit. Drive the app with real input through its real event loop, save a screenshot, look at it with view_image and compare it with what the user should see. If you cannot, say what was not verified visually and why.`,
+        ]
+      : []),
+  ].join(" ");
 
 // Rebuild for every model round, including restored sessions. Only filtered,
 // currently offered tools count. Never promote MCP descriptions into system text.
@@ -73,6 +113,7 @@ export function runtimeInstruction(
       "For executable changes, run the actual entrypoint as well as relevant tests. Exercise the main behavior and a meaningful failure or boundary case; inspect exit status and output, fix relevant failures and recheck. File readback or passing static checks alone does not prove runtime behavior. Commands start in the session workspace: use workspace-relative paths, never invent an absolute project path.",
       DONE_RULE,
     );
+    if (names.has("view_image")) guidance.push(INTERACTIVE_RULE);
     if (names.has("poll_job") && names.has("stop_job"))
       guidance.push(
         "For a long-running process, use run_command with background=true and a finite timeout_ms. Keep its job ID; use poll_job to inspect readiness and failures before connecting, then stop_job when finished. Starting a job does not prove readiness or network reachability. If the sandbox blocks listening, report the blocker and ask; do not switch execution routes or weaken isolation.",
@@ -88,7 +129,10 @@ export function runtimeInstruction(
     );
     if (browsers.some((group) => group.has("browser_click")))
       guidance.push(
-        "For web apps and games, exercise the main interaction and reset or error path with the available browser controls. Check resulting visible state through accessibility snapshots; loading the page alone is not a play-through. Report any interaction or visual behavior you could not verify.",
+        "For web apps and games, exercise the main interaction and reset or error path with the available browser controls. Check resulting visible state through accessibility snapshots; loading the page alone is not a play-through. Report any interaction or visual behavior you could not verify." +
+          (names.has("view_image") && names.has("run_command")
+            ? " The browser tools take no screenshots: to check rendering, save one in the workspace with a headless browser the project already has, then look at it with view_image."
+            : ""),
       );
   }
   if (browsers.length || (names.has("openwebui_task") && serverWebSearch))
