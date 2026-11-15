@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { McpServer } from "@agentclientprotocol/sdk";
+import { t3McpConnection } from "./t3-mcp.js";
 import { Ajv, type ValidateFunction } from "ajv";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { endpoint } from "./config.js";
@@ -203,16 +204,19 @@ export class Mcp {
         serverNumber = i + 1;
         stage = "configuration validation";
         const options = mcpOptions(source);
-        const s = ideMcpConnection(source);
+        const ide = ideMcpConnection(source);
+        const s = ideServers.includes(source) ? t3McpConnection(ide) : ide;
         if (!("command" in s)) endpoint(s.url, "");
         const readPaths = await mcpReadPaths(s);
         const label =
           "command" in s
             ? `MCP ${s.name}: ${s.command} ${JSON.stringify(s.args)}; cwd ${cwd}; explicit environment names: ${s.env.map((e) => e.name).join(", ")}`
             : `MCP ${s.name}: ${s.type} ${s.url}; authentication headers are redacted` +
-              (s !== source && "command" in source
+              (ide !== source && "command" in source
                 ? `; direct IDE connection instead of stdioMcpServer; IDE project: ${source.env.find((e) => e.name === "IJ_MCP_SERVER_PROJECT_PATH")!.value}`
-                : "");
+                : s !== source
+                  ? "; direct T3 Code connection instead of acp-mcp-bridge"
+                  : "");
         stage = "connection approval";
         await approve(
           label +

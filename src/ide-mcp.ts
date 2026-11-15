@@ -3,6 +3,7 @@ import { isAbsolute, relative, sep } from "node:path";
 import { lstat, realpath } from "node:fs/promises";
 import { z } from "zod";
 import { target } from "./workspace.js";
+import { t3McpConnection } from "./t3-mcp.js";
 
 export type IdeFileProblems = { projectPath: string };
 
@@ -106,26 +107,29 @@ export async function ideFileProblemsArguments(
   };
 }
 
-// The verified IDE descriptor contains public routing metadata as well as its
-// credential. Treat all other MCP values conservatively as secrets.
+// Verified client descriptors contain public flags/routing metadata as well as
+// credentials. Treat all other MCP values conservatively as secrets.
 export function mcpSecrets(servers: McpServer[]): string[] {
   return servers.flatMap((server) => {
     const fields = "command" in server ? server.env : server.headers;
     let ide = false;
+    let t3 = false;
     try {
       ide = ideMcpConnection(server) !== server;
+      t3 = t3McpConnection(server) !== server;
     } catch {
       // Invalid definitions remain fully redacted; activation validates them.
     }
     return fields
       .filter(
         (field) =>
-          !ide ||
-          ![
-            "IJ_MCP_SERVER_PROJECT_PATH",
-            "IJ_MCP_SERVER_PORT",
-            "IJ_MCP_DEBUG",
-          ].includes(field.name),
+          !(t3 && field.name === "ELECTRON_RUN_AS_NODE") &&
+          (!ide ||
+            ![
+              "IJ_MCP_SERVER_PROJECT_PATH",
+              "IJ_MCP_SERVER_PORT",
+              "IJ_MCP_DEBUG",
+            ].includes(field.name)),
       )
       .map((field) => field.value);
   });
