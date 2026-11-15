@@ -1,5 +1,10 @@
 # Unreleased
 
+- Recover from common tool misuse without a wasted round: `search_text` `path`
+  may be a single file; `read_file` with an offset past the end returns the last
+  page with a note; `run_command` refuses a command line in `executable` with a
+  corrected `executable`/`args` suggestion before starting any process (an
+  existing absolute path containing a space is still allowed).
 - Add `edit_file` for unique literal replacements in existing files, with explicit
   `replace_all`, full-diff approvals, checkpoints, undo and automatic verification.
   It shares the protected write path with `write_file`.

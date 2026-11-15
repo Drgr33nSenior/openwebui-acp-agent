@@ -7,6 +7,7 @@ import {
   readFile,
   writeFile,
   realpath,
+  symlink,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -178,11 +179,26 @@ test("larger files page by offset and limit, ending with the last page", () => {
     pageText("a\nb\nc\n", 2, 1),
     "2→b\n[lines 2–2 of 3; continue with offset=3]",
   );
-  assert.throws(
-    () => pageText(text, 1001),
-    /offset 1001 is past the end of the file, which has 1000 lines/,
+  // An offset past the end returns the last page with a note, not an error.
+  assert.equal(
+    pageText(text, 1001),
+    pageText(text, 601).replace(
+      "[lines",
+      "[offset 1001 is past the end; the file has 1000 lines; showing lines 601–1000; lines",
+    ),
   );
-  assert.throws(() => pageText("a\n", 2), /past the end.*1 lines/);
+  assert.equal(
+    pageText(text, 1500, 10),
+    pageText(text, 991).replace(
+      "[lines",
+      "[offset 1500 is past the end; the file has 1000 lines; showing lines 991–1000; lines",
+    ),
+  );
+  assert.equal(
+    pageText("a\n", 2),
+    "1→a\n[offset 2 is past the end; the file has 1 lines; showing lines 1–1; lines 1–1 of 1; end of file]",
+  );
+  assert.equal(pageText("", 5), "[empty file: 0 lines]");
 });
 
 test("CRLF files show content without carriage returns and say so", () => {
@@ -330,7 +346,7 @@ test("read_file pages through the agent and edit_file works with or without copi
     );
     assert.match(
       result("beyond"),
-      /offset 700 is past the end of the file, which has 600 lines/,
+      /^201→def f201[\s\S]*600→def f600\(\): return 600  # padding text\n\[offset 700 is past the end; the file has 600 lines; showing lines 201–600; lines 201–600 of 600; end of file\]$/,
     );
     assert.match(
       result("prefixed"),
@@ -406,11 +422,93 @@ test("search_text caps results, narrows by path and glob and refuses unsafe scop
     assert.equal(result("none"), "No matches");
     assert.match(result("outside"), /outside permitted scope/);
     assert.match(result("sensitive"), /outside permitted scope or sensitive/);
-    assert.match(result("file"), /path must be a workspace directory/);
+    assert.equal(result("file"), "plain.txt:1: hit");
     assert.match(
       result("toomany"),
       /Invalid tool arguments: max_results: keep within 200/,
     );
+  } finally {
+    await c.close();
+  }
+});
+
+test("search_text accepts a single file and keeps every refusal", async () => {
+  const c = await client();
+  try {
+    await mkdir(join(c.cwd, "build"), { recursive: true });
+    await mkdir(join(c.cwd, "src"), { recursive: true });
+    await writeFile(join(c.cwd, "build/out.js"), "x\nneedle\n");
+    await writeFile(join(c.cwd, "src/a.py"), "needle one\nother\n");
+    await writeFile(join(c.cwd, "src/b.py"), "needle two\n");
+    await writeFile(join(c.cwd, ".env"), "needle\n");
+    await mkdir(join(c.cwd, ".git"), { recursive: true });
+    await writeFile(join(c.cwd, ".git/config"), "needle\n");
+    await symlink(join(c.cwd, "src/a.py"), join(c.cwd, "link.py"));
+    pending = [
+      call("search_text", { text: "needle", path: "src/a.py" }, "one"),
+      call("search_text", { text: "needle", path: "build/out.js" }, "ignored"),
+      call("search_text", { text: "zzz", path: "src/a.py" }, "none"),
+      call(
+        "search_text",
+        { text: "needle", path: "src/a.py", glob: "*.ts" },
+        "glob",
+      ),
+      call("search_text", { text: "needle", path: ".env" }, "env"),
+      call("search_text", { text: "needle", path: ".git/config" }, "git"),
+      call("search_text", { text: "needle", path: "/etc/hosts" }, "outside"),
+      call("search_text", { text: "needle", path: "link.py" }, "link"),
+      call("search_text", { text: "needle", path: "missing.py" }, "missing"),
+    ];
+    await c.prompt();
+    assert.equal(result("one"), "src/a.py:1: needle one");
+    assert.equal(result("ignored"), "build/out.js:2: needle");
+    assert.equal(result("none"), "No matches");
+    assert.equal(result("glob"), "src/a.py:1: needle one");
+    for (const id of ["env", "git", "outside"])
+      assert.match(result(id), /outside permitted scope or sensitive/, id);
+    assert.match(result("link"), /Symlink access refused/);
+    assert.match(result("missing"), /ENOENT/);
+  } finally {
+    await c.close();
+  }
+});
+
+test("run_command refuses a command line in executable without running it", async () => {
+  const c = await client();
+  try {
+    await mkdir(join(c.cwd, "with space"));
+    const spaced = join(c.cwd, "with space", "tool.sh");
+    await writeFile(spaced, "#!/bin/sh\n");
+    pending = [
+      call("run_command", { executable: "python3 -m unittest", args: [] }, "a"),
+      call(
+        "run_command",
+        { executable: "which python python3", args: ["-a"] },
+        "b",
+      ),
+      call(
+        "run_command",
+        { executable: join(c.cwd, "missing dir", "tool"), args: [] },
+        "c",
+      ),
+      call("run_command", { executable: spaced, args: ["x"] }, "d"),
+      call("run_command", { executable: "python3", args: ["-V"] }, "e"),
+    ];
+    await c.prompt();
+    assert(
+      result("a").startsWith(
+        'Tool failed: executable must be the program only; use executable: "python3", args: ["-m", "unittest"]. If the command needs quoting or shell syntax, use executable: "sh", args: ["-c", "..."]. Nothing was run.',
+      ),
+    );
+    assert.match(
+      result("b"),
+      /use executable: "which", args: \["python", "python3", "-a"\]/,
+    );
+    assert.match(result("c"), /executable must be the program only/);
+    assert.deepEqual(c.executed, [
+      [spaced, "x"],
+      ["python3", "-V"],
+    ]);
   } finally {
     await c.close();
   }

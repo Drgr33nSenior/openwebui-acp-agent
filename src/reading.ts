@@ -28,11 +28,12 @@ export function pageText(text: string, offset?: number, limit?: number) {
   const lines = fileLines(text);
   const total = lines.length;
   if (!total) return "[empty file: 0 lines]";
-  const start = offset ?? 1;
-  if (start > total)
-    throw new Error(
-      `offset ${start} is past the end of the file, which has ${total} lines`,
-    );
+  // An offset past the end returns the last page instead of failing: the
+  // model wanted the end of the file and a failed call costs a round.
+  const past = offset !== undefined && offset > total;
+  const start = past
+    ? Math.max(1, total - (limit ?? READ_PAGE_LINES) + 1)
+    : (offset ?? 1);
   const whole =
     offset === undefined &&
     limit === undefined &&
@@ -56,6 +57,11 @@ export function pageText(text: string, offset?: number, limit?: number) {
   }
   const end = start + out.length - 1;
   const notes = [
+    ...(past
+      ? [
+          `offset ${offset} is past the end; the file has ${total} lines; showing lines ${start}–${end}`,
+        ]
+      : []),
     `lines ${start}–${end} of ${total}`,
     end < total ? `continue with offset=${end + 1}` : "end of file",
   ];
