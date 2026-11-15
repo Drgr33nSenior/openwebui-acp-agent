@@ -240,18 +240,19 @@ test("actual model requests refresh runtime guidance and do not persist it", asy
 });
 
 test("round defaults and bounds remain finite and configurable", () => {
-  assert.equal(configSchema.parse({ url, model: "fixture" }).rounds, 40);
+  assert.equal(configSchema.parse({ url, model: "fixture" }).rounds, 100);
   assert.equal(
     configSchema.parse({ url, model: "fixture", rounds: 1 }).rounds,
     1,
   );
   assert.equal(
-    configSchema.parse({ url, model: "fixture", rounds: 100 }).rounds,
-    100,
+    configSchema.parse({ url, model: "fixture", rounds: 250 }).rounds,
+    250,
   );
   assert.throws(() =>
-    configSchema.parse({ url, model: "fixture", rounds: 101 }),
+    configSchema.parse({ url, model: "fixture", rounds: 251 }),
   );
+  assert.throws(() => configSchema.parse({ url, model: "fixture", rounds: 0 }));
 });
 
 test("edit/output guidance and recovery hints name only available tools", () => {

@@ -131,7 +131,8 @@ requests at the declared `xhigh` reasoning effort send an explicit `max_tokens`
 within the advertised `context_window` (see
 [sessions](sessions.md#models-and-context)).
 
-The default remains 40 model rounds, maximum 100, with 64 attempted tool calls
+The default is 100 model rounds (raised from 40 now that context masking keeps
+long turns affordable), maximum 250, with 64 attempted tool calls
 per turn. Schema failures still consume a round and tool-call allowance. No free
 retry allowance was added: one reply can mix failed validation and completed
 side effects, and the live comparison does not justify changing these limits.

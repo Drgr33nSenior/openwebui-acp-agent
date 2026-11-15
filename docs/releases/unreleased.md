@@ -1,6 +1,12 @@
 # Unreleased
 
 No changes after [0.6.0](0.6.0.md).
+
+- Raise the default `rounds` limit from 40 to 100 model rounds per turn and the
+  maximum from 100 to 250. Context masking keeps long turns affordable, so
+  multi-step tasks no longer stop early with "Model-round limit reached". The
+  limit message and behavior at the limit are unchanged, and the 64 attempted
+  tool-call budget is unchanged. Set `rounds` in the configuration to lower it.
 - Recover from common tool misuse without a wasted round: `search_text` `path`
   may be a single file; `read_file` with an offset past the end returns the last
   page with a note; `run_command` refuses a command line in `executable` with a

@@ -194,7 +194,7 @@ six fixture tests passed in each, with 16 versus 13 tool calls and eight versus
 nine model rounds. Two earlier changed-build attempts returned HTTP 503 before
 tool execution. The completed run used `edit_file`, recovering from one zero-match
 edit and one malformed command. This small sample does not establish a general
-efficiency improvement. The default 40 rounds and 64-call budget are unchanged;
+efficiency improvement. The default was 40 rounds then (now 100) and the 64-call budget is unchanged;
 schema failures still count toward both.
 
 ## Session modes, model controls and ACP v2 readiness (included in 0.6.0)
