@@ -131,7 +131,10 @@ sent. The saved transcript keeps them. When the next request is estimated at
 1. Arguments of recorded `write_file` and `edit_file` calls outside the kept
    tail are elided: `before`, `after`, `content`, `old_string` and `new_string`
    values over 200 characters become
-   `[elided from context: N chars; read the file for its current content]`.
+   `[elided from context: N chars; not file text; never copy this into a tool call; read the file to see it]`.
+   A `write_file` or `edit_file` argument that starts with `[elided from context: `
+   (including the wording of earlier releases) is refused before anything is
+   written, with a pointer to `read_file`.
    The call, its path and its result (with the checkpoint ID) stay. A read that
    was repeated later with the same arguments is cleared.
 2. Tool results are then cleared oldest first until the request is at about 30%:

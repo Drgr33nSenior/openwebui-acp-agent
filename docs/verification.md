@@ -465,6 +465,40 @@ Reported usage rose from 4,733 to 5,153 tokens between the two requests. That
 fits the 302-token estimate plus the call, result, label and answer. No IDE UI
 was driven, and no model play-test of a real game was run.
 
+## Content-only write_file (unreleased)
+
+`test/edit-file.test.mjs` covers the following through the ACP loop:
+
+- creation of a new file; refusal of an unread existing file and of a file
+  changed after the agent's write, both before approval; replacement after a
+  read and after a re-read;
+- a `read_file` page that counts as a read; a blind `edit_file` that does not;
+  an `edit_file` after a read that keeps the record current;
+- unsaved editor text changed after the read, through client file methods;
+- legacy `{before, after}` calls: a mismatched `before` ignored, creation with
+  `before: null`, the read rule still applied, and the note in the result;
+- `edit_file` on a missing file and writes into a missing folder, with no raw
+  `ENOENT` in any result;
+- records saved as hashes and used after `session/load`, cleared by `/rewind`,
+  and an unreadable saved map dropped;
+- the 8 KB refusal before the read check, undo through a new-form checkpoint,
+  and the existing mode, path, instruction and approval refusals.
+
+Elision and placeholder tests in `context-mask.test.mjs` cover the new stub
+text, the older stub wording, and a placeholder in an ignored legacy `before`.
+`reading.test.mjs` covers numbered-line content. Tests that rewrote an existing
+file without reading it now read it first or record the read in the fixture:
+`core`, `edit-file`, `harness`, `interrupt`, `next-workflows`, `permissions`,
+`sessions`, `verification` and `yolo`. `permissions.test.mjs` writes after a
+reconnect without reading again. Historical transcripts in `workflow.test.mjs`
+and `session-store.test.mjs` keep the older form.
+
+On macOS 27.0 with Node 26.11.1, lint, typecheck, Prettier, build and `npm test`
+passed: **529 tests, 523 passed, six platform skips, zero failures**. `npm pack`,
+installation into a fresh temporary prefix and `test/package-install.mjs`
+passed. Checkout and installed production audits found zero vulnerabilities.
+No live model or IDE session was run for this change.
+
 ## 0.6.0 release candidate
 
 This candidate includes main `b945e39` and updates package, lockfile, ACP/MCP
