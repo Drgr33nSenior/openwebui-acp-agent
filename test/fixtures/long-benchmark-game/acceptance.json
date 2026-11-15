@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "kind": "workstation-task-acceptance-spec",
+  "task_id": "lights-out-browser",
+  "version": "1",
+  "oracle": {
+    "applicable": false,
+    "reason": "the scripted browser play-through runs in the benchmark evaluator; its observation is the external-state file"
+  },
+  "external_state": {
+    "checks": [
+      {
+        "id": "playthrough-complete",
+        "path": ["complete"],
+        "equals": true
+      },
+      {
+        "id": "board-layout",
+        "path": ["checks", "board-layout"],
+        "equals": true
+      },
+      {
+        "id": "start-state",
+        "path": ["checks", "start-state"],
+        "equals": true
+      },
+      {
+        "id": "lit-distinct",
+        "path": ["checks", "lit-distinct"],
+        "equals": true
+      },
+      {
+        "id": "corner-move",
+        "path": ["checks", "corner-move"],
+        "equals": true
+      },
+      {
+        "id": "edge-move",
+        "path": ["checks", "edge-move"],
+        "equals": true
+      },
+      {
+        "id": "undo",
+        "path": ["checks", "undo"],
+        "equals": true
+      },
+      {
+        "id": "solve",
+        "path": ["checks", "solve"],
+        "equals": true
+      },
+      {
+        "id": "solved-locked",
+        "path": ["checks", "solved-locked"],
+        "equals": true
+      },
+      {
+        "id": "restart",
+        "path": ["checks", "restart"],
+        "equals": true
+      },
+      {
+        "id": "no-page-errors",
+        "path": ["checks", "no-page-errors"],
+        "equals": true
+      },
+      {
+        "id": "self-contained",
+        "path": ["checks", "self-contained"],
+        "equals": true
+      },
+      {
+        "id": "screenshots",
+        "path": ["checks", "screenshots"],
+        "equals": true
+      }
+    ]
+  },
+  "deliverable": {
+    "artifacts": [
+      {
+        "id": "game-entry",
+        "format": "bytes",
+        "path": "index.html"
+      }
+    ]
+  },
+  "linkage": {
+    "checks": [
+      {
+        "id": "played-entry",
+        "left": {
+          "from": "state",
+          "path": ["entry_sha256"]
+        },
+        "right": {
+          "from": "artifact-sha256",
+          "name": "game-entry"
+        }
+      }
+    ]
+  }
+}

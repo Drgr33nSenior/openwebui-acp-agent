@@ -220,10 +220,31 @@ const BUSY_METRICS = METRICS.replace(
   'num_queue_reqs{model_name="m",tp_rank="0"} 0.0',
   'num_queue_reqs{model_name="m",tp_rank="0"} 3.0',
 );
-// Synthetic service-tools /health, shaped like the stack's ServiceTools.health.
-const health = (changes = {}) =>
-  JSON.stringify({
+// Synthetic service-tools observations, shaped like the stack's
+// ServiceTools.health and assistant_metrics output with the PLAN-01 request
+// lifecycle. `life` sets requests in flight and started per route and the
+// process start time, consistently for /health and /metrics.
+const PROCESS = 1763200000.123;
+const ROUTES0 = { image: 0, mcp: 0, web: 0 };
+const lifeOf = ({
+  active = ROUTES0,
+  started = ROUTES0,
+  process = PROCESS,
+} = {}) => ({
+  active,
+  started,
+  process,
+});
+const health = (changes = {}, life = {}) => {
+  const { active, started, process } = lifeOf(life);
+  return JSON.stringify({
     status: "process-ready",
+    requests: {
+      active: Object.values(active).reduce((a, b) => a + b, 0),
+      active_by_route: active,
+      started_total: started,
+    },
+    process_started_unix_seconds: process,
     image_busy: false,
     image_active: 0,
     image_slots: 1,
@@ -237,9 +258,12 @@ const health = (changes = {}) =>
     web_search: { status: "disabled" },
     ...changes,
   });
-// Synthetic service-tools /metrics: seeded counters and a histogram.
-const toolsMetrics = (calls = 0, kvTail = 0) =>
-  [
+};
+// Seeded counters, a histogram and the lifecycle series. The process start is
+// rendered with 12 significant digits, as the PLAN-01 metrics renderer does.
+const toolsMetrics = (calls = 0, kvTail = 0, life = {}) => {
+  const { active, started, process } = lifeOf(life);
+  return [
     "# HELP workstation_assistant_web_requests_total Web tool calls.",
     "# TYPE workstation_assistant_web_requests_total counter",
     `workstation_assistant_web_requests_total{outcome="ok",tool="search"} ${calls}`,
@@ -250,14 +274,28 @@ const toolsMetrics = (calls = 0, kvTail = 0) =>
     `workstation_assistant_kv_tail_duration_seconds_count{op="grow"} ${kvTail}`,
     "# TYPE workstation_assistant_kv_tail_state gauge",
     'workstation_assistant_kv_tail_state{state="ready"} 1',
+    "# TYPE workstation_assistant_active_requests gauge",
+    ...Object.entries(active).map(
+      ([route, n]) =>
+        `workstation_assistant_active_requests{route="${route}"} ${n}`,
+    ),
+    "# TYPE workstation_assistant_requests_started_total counter",
+    ...Object.entries(started).map(
+      ([route, n]) =>
+        `workstation_assistant_requests_started_total{route="${route}"} ${n}`,
+    ),
+    "# TYPE workstation_assistant_process_start_time_seconds gauge",
+    `workstation_assistant_process_start_time_seconds ${Number(process.toPrecision(12))}`,
     "",
   ].join("\n");
+};
 // The remote command's output: each part after its marker.
 const remote = ({
   sglang = METRICS,
   endpoints = "true\n",
-  toolsHealth = health(),
-  tools = toolsMetrics(),
+  life = {},
+  toolsHealth = health({}, life),
+  tools = toolsMetrics(0, 0, life),
 } = {}) =>
   `### sglang-metrics\n${sglang}\n### tools-endpoints\n${endpoints}` +
   `### tools-health\n${toolsHealth}\n### tools-metrics\n${tools}### end\n`;
@@ -297,47 +335,110 @@ test("SGLang metrics parsing never reads missing data as idle", () => {
   assert.equal(wait.counterDelta(idle, null), null);
 });
 
-test("service-tools health and counters: busy, idle and ambiguous", () => {
-  assert.deepEqual(wait.parseToolsHealth(health()), []);
+test("service-tools health: request lifecycle and background work, fail closed", () => {
+  const idle = wait.parseToolsHealth(health());
+  assert.deepEqual(idle, {
+    busy: [],
+    started: ROUTES0,
+    processStarted: PROCESS,
+  });
   assert.deepEqual(
     wait.parseToolsHealth(
       health({
         kv_tail: { enabled: false },
         deep_research: { enabled: false },
       }),
-    ),
+    ).busy,
     [],
   );
-  for (const [changes, reasons] of [
-    [{ image_active: 1, image_busy: true }, ["image_active=1", "image_busy"]],
-    [{ image_recovery_required: true }, ["image_recovery_required"]],
-    [{ video_active: true }, ["video_active"]],
+  for (const [changes, life, reasons] of [
+    [
+      {},
+      { active: { image: 0, mcp: 2, web: 1 } },
+      ["requests.active=3 (image=0 mcp=2 web=1)"],
+    ],
+    [
+      { image_active: 1, image_busy: true },
+      {},
+      ["image_active=1", "image_busy"],
+    ],
+    [{ image_recovery_required: true }, {}, ["image_recovery_required"]],
+    [{ video_active: true }, {}, ["video_active"]],
     [
       { deep_research: { enabled: true, active: 2, limit: 2 } },
+      {},
       ["deep_research.active=2"],
     ],
-    [{ kv_tail: { enabled: true, jobs: 1 } }, ["kv_tail.jobs=1"]],
+    [{ kv_tail: { enabled: true, jobs: 1 } }, {}, ["kv_tail.jobs=1"]],
   ])
-    assert.deepEqual(wait.parseToolsHealth(health(changes)), reasons);
-  for (const text of [
-    "",
-    "not json",
-    "[]",
-    "null",
-    health({ status: "starting" }),
-    health({ image_active: "0" }),
-    health({ image_active: -1 }),
-    health({ video_active: 0 }),
-    health({ image_recovery_required: undefined }),
-    health({ deep_research: { enabled: true, limit: 1 } }),
-    health({ deep_research: undefined }),
-    health({ kv_tail: { enabled: "yes" } }),
+    assert.deepEqual(
+      wait.parseToolsHealth(health(changes, life)).busy,
+      reasons,
+    );
+  const missing =
+    "service-tools /health lacks the request lifecycle (requests, process_started_unix_seconds)";
+  for (const [text, error] of [
+    ["", "service-tools /health is not JSON"],
+    ["not json", "service-tools /health is not JSON"],
+    ["[]", "service-tools /health ambiguous"],
+    ["null", "service-tools /health ambiguous"],
+    [health({ status: "starting" }), "service-tools /health ambiguous"],
+    [health({ image_active: "0" }), "service-tools /health ambiguous"],
+    [health({ image_active: -1 }), "service-tools /health ambiguous"],
+    [health({ video_active: 0 }), "service-tools /health ambiguous"],
+    [
+      health({ image_recovery_required: undefined }),
+      "service-tools /health ambiguous",
+    ],
+    [
+      health({ deep_research: { enabled: true, limit: 1 } }),
+      "service-tools /health ambiguous",
+    ],
+    [health({ deep_research: undefined }), "service-tools /health ambiguous"],
+    [
+      health({ kv_tail: { enabled: "yes" } }),
+      "service-tools /health ambiguous",
+    ],
+    // The deployed service before PLAN-01: no lifecycle, never idle.
+    [
+      health({ requests: undefined, process_started_unix_seconds: undefined }),
+      missing,
+    ],
+    [health({ process_started_unix_seconds: "1" }), missing],
+    [health({ requests: { active: 0, active_by_route: ROUTES0 } }), missing],
+    [health({}, { active: { mcp: 0, web: 0 } }), missing],
+    [health({}, { started: { ...ROUTES0, ftp: 0 } }), missing],
+    [health({}, { active: { ...ROUTES0, mcp: 1.5 } }), missing],
+    [
+      health({
+        requests: {
+          active: 1,
+          active_by_route: ROUTES0,
+          started_total: ROUTES0,
+        },
+      }),
+      "service-tools request counts do not add up",
+    ],
   ])
-    assert.equal(wait.parseToolsHealth(text), null, text.slice(0, 60));
+    assert.deepEqual(wait.parseToolsHealth(text), { error }, text.slice(0, 80));
   assert.deepEqual(wait.parseToolsCounters(toolsMetrics(4, 2)), {
     total: 6,
-    series: 3,
+    series: 6,
+    lifecycle: {
+      active: ROUTES0,
+      started: ROUTES0,
+      processStarted: 1763200000.12,
+    },
   });
+  assert.equal(
+    wait.parseToolsCounters(
+      toolsMetrics().replace(
+        /# TYPE workstation_assistant_active_requests[\s\S]*$/,
+        "",
+      ),
+    ).lifecycle,
+    null,
+  );
   for (const text of [
     "",
     toolsMetrics().replaceAll(/^# TYPE .*\n/gm, ""),
@@ -352,8 +453,14 @@ test("a combined sample is unavailable unless every part is clear", () => {
   const idle = sample();
   assert.equal(idle.unavailable, undefined);
   assert.deepEqual(
-    [idle.running, idle.queued, idle.tools.busy, idle.tools.counterTotal],
-    [0, 0, [], 0],
+    [
+      idle.running,
+      idle.queued,
+      idle.tools.busy,
+      idle.tools.counterTotal,
+      idle.tools.processStarted,
+    ],
+    [0, 0, [], 0, PROCESS],
   );
   assert.deepEqual(wait.activity(idle, null), { state: "idle", reasons: [] });
   for (const [text, code, reason] of [
@@ -396,9 +503,29 @@ test("a combined sample is unavailable unless every part is clear", () => {
       "service-tools /health ambiguous",
     ],
     [
+      remote({ toolsHealth: health({ requests: undefined }) }),
+      0,
+      "service-tools /health lacks the request lifecycle (requests, process_started_unix_seconds)",
+    ],
+    [
       remote({ tools: "404 page not found\n" }),
       0,
       "service-tools /metrics unreadable",
+    ],
+    [
+      remote({
+        tools: toolsMetrics().replace(
+          /# TYPE workstation_assistant_active_requests[\s\S]*$/,
+          "",
+        ),
+      }),
+      0,
+      "service-tools /metrics lacks the request lifecycle series",
+    ],
+    [
+      remote({ tools: toolsMetrics(0, 0, { process: PROCESS + 60 }) }),
+      0,
+      "service-tools /health and /metrics come from different processes",
     ],
   ]) {
     const parsed = wait.parseSample(text, code);
@@ -420,15 +547,53 @@ test("a combined sample is unavailable unless every part is clear", () => {
     ),
     { state: "busy", reasons: ["service-tools video_active"] },
   );
-  // Short tool calls finish between samples; only the counters show them.
+  // A short tool call in flight: the lifecycle shows it.
+  assert.deepEqual(
+    wait.activity(
+      sample({
+        life: {
+          active: { ...ROUTES0, mcp: 1 },
+          started: { ...ROUTES0, mcp: 1 },
+        },
+      }),
+      idle,
+    ),
+    {
+      state: "busy",
+      reasons: [
+        "service-tools requests.active=1 (image=0 mcp=1 web=0)",
+        "service-tools /metrics shows requests in flight or started after /health",
+        "service-tools requests started (mcp 0 -> 1)",
+        "service-tools counters 0 -> 1",
+      ],
+    },
+  );
+  // A short call that started and finished between two samples.
+  assert.deepEqual(
+    wait.activity(sample({ life: { started: { ...ROUTES0, web: 2 } } }), idle),
+    {
+      state: "busy",
+      reasons: [
+        "service-tools requests started (web 0 -> 2)",
+        "service-tools counters 0 -> 2",
+      ],
+    },
+  );
+  // A request between the /health and /metrics reads of one sample.
+  assert.deepEqual(
+    sample({ tools: toolsMetrics(0, 0, { started: { ...ROUTES0, mcp: 1 } }) })
+      .tools.busy,
+    ["/metrics shows requests in flight or started after /health"],
+  );
+  // Outcome counters still count, as a second signal.
   assert.deepEqual(wait.activity(sample({ tools: toolsMetrics(1) }), idle), {
     state: "busy",
     reasons: ["service-tools counters 0 -> 1"],
   });
-  // A restart resets the counters: also not idle.
+  // A different process: not comparable, never idle.
   assert.deepEqual(
-    wait.activity(sample(), sample({ tools: toolsMetrics(5) })),
-    { state: "busy", reasons: ["service-tools counters 5 -> 0"] },
+    wait.activity(sample({ life: { process: PROCESS + 100 } }), idle),
+    { state: "busy", reasons: ["service-tools process changed"] },
   );
   // During our own run one running SGLang request is ours.
   const own = sample({
@@ -461,7 +626,7 @@ test("a combined sample is unavailable unless every part is clear", () => {
     kinds: [],
   });
   const toolsDuringRun = wait.contention(
-    [own, sample({ tools: toolsMetrics(0, 1) })],
+    [own, sample({ life: { started: { ...ROUTES0, image: 1 } } })],
     idle,
   );
   assert.equal(toolsDuringRun.sglangContended, false);
@@ -545,6 +710,28 @@ test("the wrapper waits for the window, a quiet period and real metrics", async 
     idleSeconds: 300,
   });
   assert.equal(result.started, false);
+
+  // Everything idle, but service-tools without the request lifecycle (the
+  // service as deployed before PLAN-01): never starts, all night.
+  const legacy = health({
+    requests: undefined,
+    process_started_unix_seconds: undefined,
+  });
+  c = clock(at(20), () => sample({ toolsHealth: legacy }));
+  result = await wait.waitForIdle({
+    ...c.options,
+    timeoutMinutes: 30,
+    idleSeconds: 300,
+  });
+  assert.deepEqual(result, {
+    started: false,
+    reason: "too close to 07:00 to finish",
+  });
+  assert(c.calls() > 600);
+  assert(
+    c.log.every((l) => l.includes("lacks the request lifecycle")),
+    c.log[0],
+  );
 
   // SGLang busy, then service-tools busy, a gap, a finished tool call, then
   // idle: each resets the quiet period, which must then complete.

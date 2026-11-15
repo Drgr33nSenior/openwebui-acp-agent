@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Lights Out</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 24px;
+      }
+      #board {
+        display: grid;
+        grid-template-columns: repeat(5, 56px);
+        gap: 6px;
+        margin: 16px 0;
+      }
+      #board button {
+        width: 56px;
+        height: 56px;
+        border: 2px solid #333;
+        border-radius: 8px;
+        background: #222;
+        cursor: pointer;
+      }
+      #board button[aria-pressed="true"] {
+        background: #ffd23f;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Lights Out</h1>
+    <div id="board"></div>
+    <p>Moves: <span id="moves">0</span></p>
+    <p id="status"></p>
+    <button id="undo">Undo</button>
+    <button id="restart">Restart</button>
+    <script>
+      const START = ["11110", "11011", "10101", "11111", "11101"];
+      const board = document.getElementById("board");
+      const movesEl = document.getElementById("moves");
+      const statusEl = document.getElementById("status");
+      const undoEl = document.getElementById("undo");
+      let grid, history, solved;
+      const buttons = [];
+      for (let row = 0; row < 5; row++)
+        for (let col = 0; col < 5; col++) {
+          const button = document.createElement("button");
+          button.dataset.row = row;
+          button.dataset.col = col;
+          button.setAttribute("aria-label", `Light ${row + 1}, ${col + 1}`);
+          button.addEventListener("click", () => play(row, col));
+          board.append(button);
+          buttons.push(button);
+        }
+      function toggle(row, col) {
+        for (const [r, c] of [
+          [row, col],
+          [row - 1, col],
+          [row + 1, col],
+          [row, col - 1],
+          [row, col + 1],
+        ])
+          if (r >= 0 && r < 5 && c >= 0 && c < 5) grid[r][c] = !grid[r][c];
+      }
+      function render() {
+        for (const button of buttons)
+          button.setAttribute(
+            "aria-pressed",
+            String(grid[button.dataset.row][button.dataset.col]),
+          );
+        movesEl.textContent = String(history.length);
+        undoEl.disabled = history.length === 0;
+        statusEl.textContent = solved ? "You win!" : "";
+      }
+      function play(row, col) {
+        if (solved) return;
+        toggle(row, col);
+        history.push([row, col]);
+        solved = grid.every((line) => line.every((on) => !on));
+        render();
+      }
+      undoEl.addEventListener("click", () => {
+        const last = history.pop();
+        if (!last) return;
+        toggle(...last);
+        solved = false;
+        render();
+      });
+      function restart() {
+        grid = START.map((line) => [...line].map((c) => c === "1"));
+        history = [];
+        solved = false;
+        render();
+      }
+      document.getElementById("restart").addEventListener("click", restart);
+      restart();
+    </script>
+  </body>
+</html>

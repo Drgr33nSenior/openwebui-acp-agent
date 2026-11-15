@@ -1,0 +1,154 @@
+{
+  "schema": 1,
+  "kind": "long-benchmark-game-playthrough",
+  "marker": "lights-out-hidden-c20c68ad-d35c-4fbf-8011-1bd7a83bed9a",
+  "entry": "index.html",
+  "size": 5,
+  "start": ["11110", "11011", "10101", "11111", "11101"],
+  "checks": [
+    "board-layout",
+    "start-state",
+    "lit-distinct",
+    "corner-move",
+    "edge-move",
+    "undo",
+    "solve",
+    "solved-locked",
+    "restart",
+    "no-page-errors",
+    "self-contained",
+    "screenshots"
+  ],
+  "steps": [
+    {
+      "id": "initial",
+      "action": {
+        "load": true
+      },
+      "screenshot": true,
+      "expect": {
+        "grid": "start",
+        "moves": 0,
+        "undoDisabled": true,
+        "statusExcludes": "Solved"
+      },
+      "checks": ["board-layout", "start-state"]
+    },
+    {
+      "id": "corner",
+      "action": {
+        "clicks": [[0, 0]]
+      },
+      "screenshot": true,
+      "expect": {
+        "toggled": [
+          [0, 0],
+          [0, 1],
+          [1, 0]
+        ],
+        "moves": 1,
+        "undoDisabled": false
+      },
+      "checks": ["corner-move"]
+    },
+    {
+      "id": "edge",
+      "action": {
+        "clicks": [[2, 4]]
+      },
+      "expect": {
+        "toggled": [
+          [2, 4],
+          [1, 4],
+          [3, 4],
+          [2, 3]
+        ],
+        "moves": 2
+      },
+      "checks": ["edge-move"]
+    },
+    {
+      "id": "undo-once",
+      "action": {
+        "button": "undo"
+      },
+      "expect": {
+        "grid": {
+          "sameAs": "corner"
+        },
+        "moves": 1,
+        "undoDisabled": false
+      },
+      "checks": ["undo"]
+    },
+    {
+      "id": "undo-twice",
+      "action": {
+        "button": "undo"
+      },
+      "expect": {
+        "grid": "start",
+        "moves": 0,
+        "undoDisabled": true
+      },
+      "checks": ["undo"]
+    },
+    {
+      "id": "solve",
+      "action": {
+        "clicks": [
+          [4, 1],
+          [2, 2],
+          [0, 1],
+          [3, 4],
+          [1, 3],
+          [2, 0]
+        ]
+      },
+      "screenshot": true,
+      "expect": {
+        "grid": "off",
+        "moves": 6,
+        "statusIncludes": "Solved in 6 moves"
+      },
+      "checks": ["solve"]
+    },
+    {
+      "id": "after-solved",
+      "action": {
+        "clicks": [[2, 2]]
+      },
+      "expect": {
+        "grid": "off",
+        "moves": 6,
+        "statusIncludes": "Solved in 6 moves"
+      },
+      "checks": ["solved-locked"]
+    },
+    {
+      "id": "restart",
+      "action": {
+        "button": "restart"
+      },
+      "screenshot": true,
+      "expect": {
+        "grid": "start",
+        "moves": 0,
+        "undoDisabled": true,
+        "statusExcludes": "Solved"
+      },
+      "checks": ["restart"]
+    }
+  ],
+  "references": {
+    "trusted": "reference",
+    "mutants": {
+      "diagonal": ["edge-move"],
+      "wraps": ["corner-move", "edge-move"],
+      "no-lock": ["solved-locked"],
+      "undo-count": ["undo"],
+      "restart-moves": ["restart"],
+      "solved-text": ["solve"]
+    }
+  }
+}

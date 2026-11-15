@@ -48,6 +48,32 @@ function failuresByTool(report) {
     : "none";
 }
 
+// The PLAN-04 verdict with the hidden play-through checks behind it. A
+// verdict without counts, or no verdict, is shown with its reason.
+function hiddenCell(hidden) {
+  if (hidden === null) return NA;
+  if (!hidden || typeof hidden !== "object") return UNKNOWN;
+  if (typeof hidden.passed === "number")
+    return (
+      (hidden.verdict ? `${hidden.verdict}: ` : "") +
+      `${hidden.passed} passed, ${hidden.failed} failed` +
+      (hidden.unavailable ? `, ${hidden.unavailable} unavailable` : "")
+    );
+  return hidden.verdict
+    ? `${hidden.verdict}${hidden.reason ? ` (${hidden.reason})` : ""}`
+    : UNKNOWN;
+}
+
+function playtestCell(playtest) {
+  if (playtest === null) return NA;
+  if (typeof playtest === "boolean") return playtest ? "yes" : "no";
+  if (!playtest || typeof playtest !== "object") return UNKNOWN;
+  if (playtest.observed === true)
+    return playtest.afterLastEdit === false ? "yes (before last edit)" : "yes";
+  if (playtest.observed === false) return "no";
+  return `${UNKNOWN}${playtest.reason ? ` (${playtest.reason})` : ""}`;
+}
+
 export function summaryRow(label, report, wrapper = null, delta = null) {
   const suite = report.finalSuite;
   const hidden = report.hiddenChecks;
@@ -57,12 +83,7 @@ export function summaryRow(label, report, wrapper = null, delta = null) {
   return {
     label,
     build: label.split("-")[0],
-    hidden:
-      hidden === null
-        ? NA
-        : hidden && typeof hidden.passed === "number"
-          ? `${hidden.passed} passed, ${hidden.failed} failed`
-          : UNKNOWN,
+    hidden: hiddenCell(hidden),
     suite:
       typeof suite?.passed === "number"
         ? `${suite.passed}/${suite.expected}`
@@ -83,14 +104,7 @@ export function summaryRow(label, report, wrapper = null, delta = null) {
         ? `${view.calls} (${view.failed} failed)`
         : "no"
       : UNKNOWN,
-    playtest:
-      playtest === null
-        ? NA
-        : typeof playtest === "boolean"
-          ? playtest
-            ? "yes"
-            : "no"
-          : UNKNOWN,
+    playtest: playtestCell(playtest),
     prefill: counter(delta, "prefill_effective_tokens_total", "input"),
     cacheHit: counter(delta, "prefill_effective_tokens_total", "device_hit"),
     decode: counter(delta, "realtime_tokens_total", "decode"),
