@@ -89,38 +89,71 @@ budget, it sends `/checkpoints clear` first. The workspace and state stay in a
 scratch directory, which the runner prints. Results go to
 `$LONG_BENCHMARK_RESULTS/LABEL`; a label that already has a report is refused.
 
-On a shared inference server, start runs through the wrapper. Every site
-setting comes from the environment and has no default:
+On a shared inference server, start runs through the wrapper. It checks two
+separate services: SGLang, and service-tools, the separate MCP, media and
+research service. Every site setting comes from the environment and has no
+default. service-tools has its own settings; none is derived from the SGLang
+ones.
 
-| Variable                      | Meaning                                                                 |
-| ----------------------------- | ----------------------------------------------------------------------- |
-| `LONG_BENCHMARK_SSH`          | ssh destination (`user@host` or a host alias) that can run `kubectl`    |
-| `LONG_BENCHMARK_NAMESPACE`    | Kubernetes namespace of the SGLang service                              |
-| `LONG_BENCHMARK_SERVICE`      | SGLang service name                                                     |
-| `LONG_BENCHMARK_METRICS_PORT` | SGLang port that serves `/metrics`                                      |
-| `LONG_BENCHMARK_RESULTS`      | Absolute results directory, outside the checkout                        |
-| `LONG_BENCHMARK_NOT_BEFORE`   | Optional. Earliest start, ISO time with `Z` or an offset                |
-| `LONG_BENCHMARK_IDLE_SECONDS` | Optional. Quiet period before the start; default 300, minimum 60        |
+| Variable                         | Meaning                                                              |
+| -------------------------------- | -------------------------------------------------------------------- |
+| `LONG_BENCHMARK_SSH`             | ssh destination (`user@host` or a host alias) that can run `kubectl` |
+| `LONG_BENCHMARK_NAMESPACE`       | Kubernetes namespace of the SGLang service                           |
+| `LONG_BENCHMARK_SERVICE`         | SGLang service name                                                  |
+| `LONG_BENCHMARK_METRICS_PORT`    | SGLang port that serves `/metrics`                                   |
+| `LONG_BENCHMARK_TOOLS_NAMESPACE` | Kubernetes namespace of the service-tools service                    |
+| `LONG_BENCHMARK_TOOLS_SERVICE`   | service-tools service name                                           |
+| `LONG_BENCHMARK_TOOLS_PORT`      | service-tools port that serves `/health` and `/metrics`              |
+| `LONG_BENCHMARK_RESULTS`         | Absolute results directory, outside the checkout                     |
+| `LONG_BENCHMARK_NOT_BEFORE`      | Optional. Earliest start, ISO time with `Z` or an offset             |
+| `LONG_BENCHMARK_IDLE_SECONDS`    | Optional. Quiet period before the start; default 300, minimum 60     |
 
 ```sh
 LONG_BENCHMARK_SSH=... LONG_BENCHMARK_NAMESPACE=... LONG_BENCHMARK_SERVICE=... \
-LONG_BENCHMARK_METRICS_PORT=... LONG_BENCHMARK_RESULTS=/absolute/results \
+LONG_BENCHMARK_METRICS_PORT=... LONG_BENCHMARK_TOOLS_NAMESPACE=... \
+LONG_BENCHMARK_TOOLS_SERVICE=... LONG_BENCHMARK_TOOLS_PORT=... \
+LONG_BENCHMARK_RESULTS=/absolute/results \
 LONG_BENCHMARK_NOT_BEFORE=2026-11-16T20:00:00Z \
   node test/manual-long-benchmark-wait.mjs new-1 /path/to/agent-checkout 30
 ```
 
-Over ssh the wrapper only runs `kubectl get svc` and reads `/metrics`. It starts
-the runner only when all of the following hold:
+Each sample is one ssh command that only reads. It runs `kubectl get svc` for
+both service addresses and `kubectl get endpointslices` for service-tools. It
+then reads SGLang `/metrics` and service-tools `/health` and `/metrics` with
+`curl`. A sample is idle only when all of the following hold:
+
+| Source                     | Idle when                                                                                                                                                                    |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SGLang `/metrics`          | `num_running_reqs` and `num_queue_reqs` are both zero (rank 0 when ranks are labelled)                                                                                       |
+| service-tools endpoints    | exactly one endpoint, and it is ready, so every read reaches the same process                                                                                                |
+| service-tools `/health`    | `status` is `process-ready`; `image_active` is 0; `image_busy`, `image_recovery_required` and `video_active` are false; `deep_research.active` and `kv_tail.jobs` are 0 or the feature is disabled |
+| service-tools `/metrics`   | the total of all `workstation_assistant_*` counters and histogram counts has not changed since the previous sample                                                          |
+
+service-tools reports no in-flight gauge for short calls such as web search,
+memory, retrieval and handoffs. Its counters start at zero and only grow while
+the process runs. A changed total therefore means calls finished, or the
+process restarted, since the last sample. Calls still in progress at both
+samples are not visible. The gateway's active-request gauge belongs to a
+different service and is not used.
+
+A sample is unavailable, never idle, if:
+
+- any read fails;
+- a request gauge is missing;
+- there is not exactly one ready service-tools endpoint;
+- a `/health` field is missing or has an unexpected type;
+- the service-tools `/metrics` page lacks its families.
+
+An unavailable or busy sample restarts the quiet period. The wrapper starts the
+runner only when:
 
 - the local time is between 20:00 and 07:00, and the run can end, with its
   timeout and a five-minute margin, before 07:00;
 - the not-before time, if set, has passed (the wrapper waits for it);
-- SGLang has reported zero running and zero queued requests in every 30-second
-  sample for the whole quiet period.
+- every 30-second sample for the whole quiet period was idle.
 
-A sample that cannot be read or lacks either request gauge is treated as busy,
-never as idle, and restarts the quiet period. If the window closes first, the
-wrapper exits with status 3, so a loop over labels can stop:
+If the window closes first, the wrapper exits with status 3, so a loop over
+labels can stop:
 
 ```sh
 for label in base-1 new-1 base-2 new-2; do
@@ -129,11 +162,22 @@ for label in base-1 new-1 base-2 new-2; do
 done
 ```
 
-During the run the wrapper samples the server every 15 seconds
-(`running-samples.txt`) and records SGLang counter changes
-(`sglang-delta.json`). It writes `wrapper.json` with the runner's exit status
-and whether other load was seen: more than one running request or any queued
-request.
+During the run the wrapper samples both services every 15 seconds
+(`running-samples.txt`). It saves service-tools `/health` before and after the
+run (`tools-health-*.json`) and SGLang counter changes (`sglang-delta.json`).
+It writes `wrapper.json` with the runner's exit status and whether other load
+was seen. Other load means:
+
+- on SGLang, more than one running request or any queued request;
+- on service-tools, any in-flight work or counter change, since the
+  benchmarked agent does not call service-tools.
+
+The self-test covers the parsing, the idle, busy and unavailable decisions and
+the start rules with synthetic metrics, health and endpoint output. It also
+checks that the remote command passes `sh -n` and uses only read operations.
+The ssh, `kubectl` and `curl` reads have not been run against a real cluster.
+If a network policy blocks the ssh host from service-tools, every sample is
+unavailable and the wrapper never starts.
 
 ### Report and summary
 

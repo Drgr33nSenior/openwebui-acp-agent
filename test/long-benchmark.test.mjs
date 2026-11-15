@@ -85,6 +85,17 @@ test(
   },
 );
 
+const SITE = {
+  LONG_BENCHMARK_SSH: "bench@server.example",
+  LONG_BENCHMARK_NAMESPACE: "inference",
+  LONG_BENCHMARK_SERVICE: "sglang",
+  LONG_BENCHMARK_METRICS_PORT: "30000",
+  LONG_BENCHMARK_TOOLS_NAMESPACE: "assistant",
+  LONG_BENCHMARK_TOOLS_SERVICE: "service-tools",
+  LONG_BENCHMARK_TOOLS_PORT: "8000",
+  LONG_BENCHMARK_RESULTS: join(temporary, "results"),
+};
+
 test("site settings come only from the environment and are validated", () => {
   assert.throws(
     () => wait.settingsFromEnv({}),
@@ -94,23 +105,53 @@ test("site settings come only from the environment and are validated", () => {
         "LONG_BENCHMARK_NAMESPACE",
         "LONG_BENCHMARK_SERVICE",
         "LONG_BENCHMARK_METRICS_PORT",
+        "LONG_BENCHMARK_TOOLS_NAMESPACE",
+        "LONG_BENCHMARK_TOOLS_SERVICE",
+        "LONG_BENCHMARK_TOOLS_PORT",
         "LONG_BENCHMARK_RESULTS",
       ].every((name) => error.message.includes(`${name} is not set`)),
   );
-  const valid = {
-    LONG_BENCHMARK_SSH: "bench@server.example",
-    LONG_BENCHMARK_NAMESPACE: "inference",
-    LONG_BENCHMARK_SERVICE: "sglang",
-    LONG_BENCHMARK_METRICS_PORT: "30000",
-    LONG_BENCHMARK_RESULTS: join(temporary, "results"),
-  };
-  const settings = wait.settingsFromEnv(valid);
+  // The service-tools settings are separate: SGLang settings alone fail.
+  const sglangOnly = { ...SITE };
+  for (const name of Object.keys(sglangOnly))
+    if (name.startsWith("LONG_BENCHMARK_TOOLS_")) delete sglangOnly[name];
+  assert.throws(
+    () => wait.settingsFromEnv(sglangOnly),
+    /LONG_BENCHMARK_TOOLS_NAMESPACE is not set; LONG_BENCHMARK_TOOLS_SERVICE is not set; LONG_BENCHMARK_TOOLS_PORT is not set/,
+  );
+  const settings = wait.settingsFromEnv(SITE);
   assert.equal(settings.idleSeconds, 300);
   assert.equal(settings.notBefore, null);
-  assert.equal(
-    wait.remoteCommand(settings),
-    'ip=$(kubectl -n inference get svc sglang -o jsonpath={.spec.clusterIP}) && curl -sf --max-time 10 "http://$ip:30000/metrics"',
+  assert.deepEqual(
+    [settings.toolsNamespace, settings.toolsService, settings.toolsPort],
+    ["assistant", "service-tools", 8000],
   );
+  const command = wait.remoteCommand(settings);
+  assert.equal(
+    command,
+    [
+      "sg=$(kubectl -n inference get svc sglang -o jsonpath='{.spec.clusterIP}')",
+      "st=$(kubectl -n assistant get svc service-tools -o jsonpath='{.spec.clusterIP}')",
+      "echo '### sglang-metrics'",
+      'curl -sf --max-time 10 "http://$sg:30000/metrics"',
+      "echo '### tools-endpoints'",
+      "kubectl -n assistant get endpointslices -l kubernetes.io/service-name=service-tools -o jsonpath='{range .items[*].endpoints[*]}{.conditions.ready}{\"\\n\"}{end}'",
+      "echo '### tools-health'",
+      'curl -sf --max-time 10 "http://$st:8000/health"',
+      "echo",
+      "echo '### tools-metrics'",
+      'curl -sf --max-time 10 "http://$st:8000/metrics"',
+      "echo '### end'",
+    ].join(" && "),
+  );
+  // Only reads: no kubectl verb other than get, no curl method or data.
+  assert.deepEqual(
+    [...command.matchAll(/kubectl -n \S+ (\S+)/g)].map((m) => m[1]),
+    ["get", "get", "get"],
+  );
+  assert.doesNotMatch(command, /curl[^&]*( -X| -d| --data| -T)/);
+  if (process.platform !== "win32")
+    assert.equal(spawnSync("sh", ["-n", "-c", command]).status, 0);
   for (const [name, value] of [
     ["LONG_BENCHMARK_SSH", "-oProxyCommand=touch"],
     ["LONG_BENCHMARK_SSH", "host;id"],
@@ -121,18 +162,23 @@ test("site settings come only from the environment and are validated", () => {
     ["LONG_BENCHMARK_METRICS_PORT", "0"],
     ["LONG_BENCHMARK_METRICS_PORT", "70000"],
     ["LONG_BENCHMARK_METRICS_PORT", "80 && id"],
+    ["LONG_BENCHMARK_TOOLS_NAMESPACE", "a'b"],
+    ["LONG_BENCHMARK_TOOLS_SERVICE", "svc$(id)"],
+    ["LONG_BENCHMARK_TOOLS_SERVICE", "a,b"],
+    ["LONG_BENCHMARK_TOOLS_PORT", "8000;id"],
+    ["LONG_BENCHMARK_TOOLS_PORT", "65536"],
     ["LONG_BENCHMARK_RESULTS", "relative/results"],
     ["LONG_BENCHMARK_IDLE_SECONDS", "10"],
     ["LONG_BENCHMARK_NOT_BEFORE", "2026-11-16T20:00:00"],
     ["LONG_BENCHMARK_NOT_BEFORE", "tomorrow"],
   ])
     assert.throws(
-      () => wait.settingsFromEnv({ ...valid, [name]: value }),
+      () => wait.settingsFromEnv({ ...SITE, [name]: value }),
       new RegExp(name),
       `${name}=${value}`,
     );
   const later = wait.settingsFromEnv({
-    ...valid,
+    ...SITE,
     LONG_BENCHMARK_NOT_BEFORE: "2026-11-16T20:00:00Z",
     LONG_BENCHMARK_IDLE_SECONDS: "600",
   });
@@ -167,8 +213,57 @@ const METRICS = [
   'sglang:realtime_tokens_total{mode="decode",tp_rank="0"} 50.0',
   'sglang:other_metric{tp_rank="0"} 7.0',
 ].join("\n");
+const BUSY_METRICS = METRICS.replace(
+  'num_running_reqs{model_name="m",tp_rank="0"} 0.0',
+  'num_running_reqs{model_name="m",tp_rank="0"} 1.0',
+).replace(
+  'num_queue_reqs{model_name="m",tp_rank="0"} 0.0',
+  'num_queue_reqs{model_name="m",tp_rank="0"} 3.0',
+);
+// Synthetic service-tools /health, shaped like the stack's ServiceTools.health.
+const health = (changes = {}) =>
+  JSON.stringify({
+    status: "process-ready",
+    image_busy: false,
+    image_active: 0,
+    image_slots: 1,
+    image_recovery_required: false,
+    video_active: false,
+    image_profile: "profile",
+    workflow_sha256: "0".repeat(64),
+    kv_tail: { enabled: true, backed: true, jobs: 0, last: null },
+    retrieval: { reranker_state: "active" },
+    deep_research: { enabled: true, active: 0, limit: 1 },
+    web_search: { status: "disabled" },
+    ...changes,
+  });
+// Synthetic service-tools /metrics: seeded counters and a histogram.
+const toolsMetrics = (calls = 0, kvTail = 0) =>
+  [
+    "# HELP workstation_assistant_web_requests_total Web tool calls.",
+    "# TYPE workstation_assistant_web_requests_total counter",
+    `workstation_assistant_web_requests_total{outcome="ok",tool="search"} ${calls}`,
+    'workstation_assistant_web_requests_total{outcome="error",tool="search"} 0',
+    "# TYPE workstation_assistant_kv_tail_duration_seconds histogram",
+    `workstation_assistant_kv_tail_duration_seconds_bucket{op="grow",le="1"} ${kvTail}`,
+    `workstation_assistant_kv_tail_duration_seconds_sum{op="grow"} ${kvTail * 0.5}`,
+    `workstation_assistant_kv_tail_duration_seconds_count{op="grow"} ${kvTail}`,
+    "# TYPE workstation_assistant_kv_tail_state gauge",
+    'workstation_assistant_kv_tail_state{state="ready"} 1',
+    "",
+  ].join("\n");
+// The remote command's output: each part after its marker.
+const remote = ({
+  sglang = METRICS,
+  endpoints = "true\n",
+  toolsHealth = health(),
+  tools = toolsMetrics(),
+} = {}) =>
+  `### sglang-metrics\n${sglang}\n### tools-endpoints\n${endpoints}` +
+  `### tools-health\n${toolsHealth}\n### tools-metrics\n${tools}### end\n`;
+const sample = (parts) => wait.parseSample(remote(parts));
 
-test("metrics parsing never reads missing data as idle", () => {
+test("SGLang metrics parsing never reads missing data as idle", () => {
   const idle = wait.parseMetrics(METRICS);
   assert.equal(idle.running, 0);
   assert.equal(idle.queued, 0);
@@ -187,10 +282,8 @@ test("metrics parsing never reads missing data as idle", () => {
     'sglang:num_running_reqs{tp_rank="0"} NaN\nsglang:num_queue_reqs{tp_rank="0"} 0',
   ])
     assert.equal(wait.parseMetrics(text), null, String(text).slice(0, 40));
-  const busy = wait.parseMetrics(
-    'sglang:num_running_reqs{a="b"} 1\nsglang:num_queue_reqs{a="b"} 2\n',
-  );
-  assert.deepEqual([busy.running, busy.queued], [1, 2]);
+  const busy = wait.parseMetrics(BUSY_METRICS);
+  assert.deepEqual([busy.running, busy.queued], [1, 3]);
   const after = wait.parseMetrics(
     METRICS.replace(
       'mode="input",tp_rank="0"} 1000.0',
@@ -202,19 +295,181 @@ test("metrics parsing never reads missing data as idle", () => {
     "realtime_tokens_total:decode": 0,
   });
   assert.equal(wait.counterDelta(idle, null), null);
-  assert.deepEqual(wait.contention([null, null]), {
+});
+
+test("service-tools health and counters: busy, idle and ambiguous", () => {
+  assert.deepEqual(wait.parseToolsHealth(health()), []);
+  assert.deepEqual(
+    wait.parseToolsHealth(
+      health({
+        kv_tail: { enabled: false },
+        deep_research: { enabled: false },
+      }),
+    ),
+    [],
+  );
+  for (const [changes, reasons] of [
+    [{ image_active: 1, image_busy: true }, ["image_active=1", "image_busy"]],
+    [{ image_recovery_required: true }, ["image_recovery_required"]],
+    [{ video_active: true }, ["video_active"]],
+    [
+      { deep_research: { enabled: true, active: 2, limit: 2 } },
+      ["deep_research.active=2"],
+    ],
+    [{ kv_tail: { enabled: true, jobs: 1 } }, ["kv_tail.jobs=1"]],
+  ])
+    assert.deepEqual(wait.parseToolsHealth(health(changes)), reasons);
+  for (const text of [
+    "",
+    "not json",
+    "[]",
+    "null",
+    health({ status: "starting" }),
+    health({ image_active: "0" }),
+    health({ image_active: -1 }),
+    health({ video_active: 0 }),
+    health({ image_recovery_required: undefined }),
+    health({ deep_research: { enabled: true, limit: 1 } }),
+    health({ deep_research: undefined }),
+    health({ kv_tail: { enabled: "yes" } }),
+  ])
+    assert.equal(wait.parseToolsHealth(text), null, text.slice(0, 60));
+  assert.deepEqual(wait.parseToolsCounters(toolsMetrics(4, 2)), {
+    total: 6,
+    series: 3,
+  });
+  for (const text of [
+    "",
+    toolsMetrics().replaceAll(/^# TYPE .*\n/gm, ""),
+    "# TYPE workstation_assistant_web_requests_total counter\n",
+    toolsMetrics().replace("} 0\n", "} NaN\n"),
+    toolsMetrics().replace("} 0\n", "} -1\n"),
+  ])
+    assert.equal(wait.parseToolsCounters(text), null, text.slice(0, 60));
+});
+
+test("a combined sample is unavailable unless every part is clear", () => {
+  const idle = sample();
+  assert.equal(idle.unavailable, undefined);
+  assert.deepEqual(
+    [idle.running, idle.queued, idle.tools.busy, idle.tools.counterTotal],
+    [0, 0, [], 0],
+  );
+  assert.deepEqual(wait.activity(idle, null), { state: "idle", reasons: [] });
+  for (const [text, code, reason] of [
+    ["", 255, "remote read failed before any data"],
+    [
+      `### sglang-metrics\n${METRICS}\n### tools-endpoints\ntrue\n### tools-health\n`,
+      7,
+      "remote read failed after tools-health",
+    ],
+    [
+      remote().replace("### end\n", ""),
+      0,
+      "remote read failed after tools-metrics",
+    ],
+    [remote(), 1, "remote read failed after end"],
+    [remote({ sglang: "" }), 0, "SGLang request gauges missing"],
+    [
+      remote({ endpoints: "" }),
+      0,
+      'service-tools must have exactly one ready endpoint, got [""]',
+    ],
+    [
+      remote({ endpoints: "\n" }),
+      0,
+      'service-tools must have exactly one ready endpoint, got [""]',
+    ],
+    [
+      remote({ endpoints: "false\n" }),
+      0,
+      'service-tools must have exactly one ready endpoint, got ["false"]',
+    ],
+    [
+      remote({ endpoints: "true\ntrue\n" }),
+      0,
+      'service-tools must have exactly one ready endpoint, got ["true","true"]',
+    ],
+    [
+      remote({ toolsHealth: health({ video_active: null }) }),
+      0,
+      "service-tools /health ambiguous",
+    ],
+    [
+      remote({ tools: "404 page not found\n" }),
+      0,
+      "service-tools /metrics unreadable",
+    ],
+  ]) {
+    const parsed = wait.parseSample(text, code);
+    assert.deepEqual(parsed, { unavailable: reason });
+    assert.deepEqual(wait.activity(parsed, idle), {
+      state: "unavailable",
+      reasons: [reason],
+    });
+  }
+  // Busy from either service, each named separately.
+  assert.deepEqual(wait.activity(sample({ sglang: BUSY_METRICS }), idle), {
+    state: "busy",
+    reasons: ["sglang running=1 queued=3"],
+  });
+  assert.deepEqual(
+    wait.activity(
+      sample({ toolsHealth: health({ video_active: true }) }),
+      idle,
+    ),
+    { state: "busy", reasons: ["service-tools video_active"] },
+  );
+  // Short tool calls finish between samples; only the counters show them.
+  assert.deepEqual(wait.activity(sample({ tools: toolsMetrics(1) }), idle), {
+    state: "busy",
+    reasons: ["service-tools counters 0 -> 1"],
+  });
+  // A restart resets the counters: also not idle.
+  assert.deepEqual(
+    wait.activity(sample(), sample({ tools: toolsMetrics(5) })),
+    { state: "busy", reasons: ["service-tools counters 5 -> 0"] },
+  );
+  // During our own run one running SGLang request is ours.
+  const own = sample({
+    sglang: METRICS.replace(
+      'num_running_reqs{model_name="m",tp_rank="0"} 0.0',
+      'num_running_reqs{model_name="m",tp_rank="0"} 1.0',
+    ),
+  });
+  assert.equal(wait.activity(own, idle).state, "busy");
+  assert.equal(wait.activity(own, idle, 1).state, "idle");
+
+  assert.deepEqual(wait.contention([null, { unavailable: "x" }]), {
     samples: 2,
     unavailable: 2,
     maxRunning: null,
     maxQueued: null,
+    sglangContended: null,
+    toolsActive: null,
     contended: null,
+    kinds: [],
   });
-  assert.equal(
-    wait.contention([idle, { running: 1, queued: 0 }]).contended,
-    false,
+  assert.deepEqual(wait.contention([own, own, { unavailable: "x" }], idle), {
+    samples: 3,
+    unavailable: 1,
+    maxRunning: 1,
+    maxQueued: 0,
+    sglangContended: false,
+    toolsActive: false,
+    contended: false,
+    kinds: [],
+  });
+  const toolsDuringRun = wait.contention(
+    [own, sample({ tools: toolsMetrics(0, 1) })],
+    idle,
   );
+  assert.equal(toolsDuringRun.sglangContended, false);
+  assert.equal(toolsDuringRun.toolsActive, true);
+  assert.equal(toolsDuringRun.contended, true);
+  assert.deepEqual(toolsDuringRun.kinds, ["service-tools"]);
   assert.equal(
-    wait.contention([{ running: 2, queued: 0 }, null]).contended,
+    wait.contention([sample({ sglang: BUSY_METRICS })], idle).sglangContended,
     true,
   );
 });
@@ -239,7 +494,8 @@ function clock(start, script) {
 }
 const at = (hour, minute = 0, day = 15) =>
   new Date(2026, 10, day, hour, minute, 0, 0);
-const IDLE = { running: 0, queued: 0, counters: {}, lines: [] };
+const IDLE = sample();
+const UNAVAILABLE = wait.parseSample("", 255);
 
 test("the wrapper waits for the window, a quiet period and real metrics", async () => {
   assert.equal(wait.inWindow(at(19, 59)), false);
@@ -261,8 +517,8 @@ test("the wrapper waits for the window, a quiet period and real metrics", async 
   assert.deepEqual(result, { started: false, reason: "outside 20:00-07:00" });
   assert.equal(c.calls(), 0);
 
-  // Metrics never available: never starts, gives up when the window closes.
-  c = clock(at(23), () => null);
+  // Never readable: never starts, gives up when the window closes.
+  c = clock(at(23), () => UNAVAILABLE);
   result = await wait.waitForIdle({
     ...c.options,
     timeoutMinutes: 30,
@@ -273,28 +529,54 @@ test("the wrapper waits for the window, a quiet period and real metrics", async 
     reason: "too close to 07:00 to finish",
   });
   assert(c.calls() > 100);
-  assert(c.log.every((l) => l === "metrics unavailable; not treated as idle"));
-
-  // Busy, then idle with a gap of unavailable metrics: the quiet period
-  // restarts after the gap and the run starts only once it is complete.
-  const pattern = ["busy", "busy", "idle", "idle", "none", "idle"];
-  c = clock(at(21), (n) =>
-    pattern[n] === "busy"
-      ? { running: 1, queued: 3, counters: {}, lines: [] }
-      : pattern[n] === "none"
-        ? null
-        : IDLE,
+  assert(
+    c.log.every(
+      (l) =>
+        l ===
+        "unavailable (remote read failed before any data); not treated as idle",
+    ),
   );
+
+  // SGLang idle all night but service-tools never readable: never starts.
+  c = clock(at(23), () => sample({ endpoints: "true\ntrue\n" }));
+  result = await wait.waitForIdle({
+    ...c.options,
+    timeoutMinutes: 30,
+    idleSeconds: 300,
+  });
+  assert.equal(result.started, false);
+
+  // SGLang busy, then service-tools busy, a gap, a finished tool call, then
+  // idle: each resets the quiet period, which must then complete.
+  const script = [
+    sample({ sglang: BUSY_METRICS }),
+    sample({ toolsHealth: health({ image_active: 1, image_busy: true }) }),
+    IDLE,
+    IDLE,
+    UNAVAILABLE,
+    IDLE,
+    sample({ tools: toolsMetrics(1) }),
+    sample({ tools: toolsMetrics(1) }),
+  ];
+  c = clock(at(21), (n) => script[Math.min(n, script.length - 1)]);
   result = await wait.waitForIdle({
     ...c.options,
     timeoutMinutes: 30,
     idleSeconds: 300,
   });
   assert.equal(result.started, true);
-  // Quiet from sample 5 (index 5): 300 s more at 30 s intervals = 10 polls.
-  assert.equal(c.calls(), 16);
-  assert.equal(c.log[0], "busy (running=1 queued=3)");
-  assert(c.log.includes("metrics unavailable; not treated as idle"));
+  // Quiet from sample 7 (index 7): 300 s more at 30 s intervals = 10 polls.
+  assert.equal(c.calls(), 18);
+  assert.deepEqual(c.log.slice(0, 2), [
+    "busy (sglang running=1 queued=3)",
+    "busy (service-tools image_active=1; service-tools image_busy)",
+  ]);
+  assert(c.log.includes("busy (service-tools counters 0 -> 1)"));
+  assert(
+    c.log.includes(
+      "unavailable (remote read failed before any data); not treated as idle",
+    ),
+  );
 
   // Not-before: waits (also from the daytime) without reading metrics, then
   // applies the normal checks.
@@ -618,6 +900,7 @@ test("the wrapper refuses to start without site settings", async () => {
   );
   assert.equal(run.status, 2);
   assert.match(run.stderr, /LONG_BENCHMARK_SSH is not set/);
+  assert.match(run.stderr, /LONG_BENCHMARK_TOOLS_SERVICE is not set/);
   assert.match(run.stderr, /LONG_BENCHMARK_RESULTS is not set/);
   await assert.rejects(readFile(marker));
 });
