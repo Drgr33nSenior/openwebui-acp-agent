@@ -210,9 +210,10 @@ Use `edit_file` for small changes to an existing file:
 Read the file first. `old_string` must be nonempty and match exactly once,
 including whitespace and line endings. Copy it from the file text without
 `read_file`'s line-number prefixes. When an `old_string` that matches nothing
-would match once every line's prefix is removed, the error says to remove them;
-a `write_file` `before` that equals the file once prefixes are removed gets the
-same answer. The agent does not strip them itself: a file line can start with
+would match once every line's prefix is removed, the error says to remove them.
+`write_file` `content` in which every line carries a prefix and the numbers run
+consecutively (pasted `read_file` output) is refused the same way. The agent
+does not strip them itself: a file line can start with
 digits and an arrow, and a `new_string` mixes copied numbered lines with new
 ones, so a silent rewrite could change text the model did not mean to change.
 Zero or multiple matches return the count and ask for current text with enough
@@ -234,19 +235,70 @@ from a plain whitespace split and is never executed, because quoting could chang
 its meaning. An existing absolute path that contains a space is still allowed.
 
 A call that omits a required argument and adds undeclared ones, such as
-`edit_file` with `write_file`'s `before` and `after`, is rejected with those
-field names. Nothing runs and no alias is applied.
+`edit_file` with `before` and `after`, is rejected with those field names.
+Nothing runs and no alias is applied.
 
-Use `write_file` with `before: null` to create a file. For a deliberate whole-file
-rewrite, supply the complete current text in `before` and replacement in `after`.
-An existing file larger than 8 KB (8,192 bytes) is refused before approval:
-`write_file replaces whole files; this file is N KB, so a full rewrite risks being
-cut off by the output limit. Use edit_file for targeted changes ...`. Nothing is
-written and no approval is requested. `write_file` sends the file twice (`before`
-and `after`), so 8 KB is about 16 KB or 4-5k tokens, well inside the default
+`write_file` creates a file or replaces a small one. `content` is the complete
+new file text:
+
+```json
+{ "path": "src/new_module.py", "content": "def main():\n    pass\n" }
+```
+
+A path that does not exist is created; its folder must already exist. Missing
+targets get these messages instead of a raw `ENOENT` (for a write into a missing
+folder, then for `edit_file` on a missing file):
+
+```text
+The folder for PATH does not exist; create the folder first, then write the file. Nothing was written.
+PATH does not exist; create it with write_file. Nothing was written.
+```
+
+The model does not send the current file. The agent checks staleness itself:
+for each file, the session records a SHA-256 of the text `read_file` last
+returned, or the text the agent last wrote. An existing file is replaced only
+when its current text (unsaved editor text when the client provides it) has
+that hash. Otherwise the call is refused before approval, and nothing is
+written. A file never read in the session, and one changed since (by the user,
+the editor, a command or another process), get these messages:
+
+```text
+PATH already exists and you have not read it in this session. Read it with read_file before replacing it, or change it with edit_file. Nothing was written.
+PATH changed since you last read or wrote it (in the editor, by a command or by another process). Read it with read_file again before replacing it, so its current content is not lost. Nothing was written.
+```
+
+Any `read_file` page counts as a read; the hash is always of the whole file.
+Files `write_file` may replace are at most 8 KB, which `read_file` returns whole
+by default, so a page is only seen when the model asked for a range. The check
+is about staleness, as `before` was, not about what the model remembers: a
+masked or compacted read still counts while the file is unchanged. A successful
+`edit_file` keeps the record current only when the file was current in it
+before the edit; an edit without a read records nothing. `/undo` and `/rewind`
+change files without updating records, so the next replacement needs a read.
+
+Records are saved with the session as hashed paths and hashes (at most 512, the
+oldest dropped first), so a restored session can replace a file it read before
+the restart if the file is unchanged. `/rewind` clears them, because reads in the
+discarded turns are no longer in the conversation, and a fork starts with none.
+`/export` to an existing file records the file it reads just before proposing
+the export.
+
+Older transcripts and models used to them send `{path, before, after}`. Such a
+call is accepted: `after` is the content and `before` is ignored, with the same
+checks; the result ends with `Note: write_file takes {path, content}; before is
+no longer needed and was ignored.` When `content` is present, a stray `after`
+or `before` is dropped like any undeclared field of a complete call.
+
+An existing file larger than 8 KB (8,192 bytes) is refused before approval,
+before the read check: `write_file replaces whole files; this file is N KB, so a
+full rewrite risks being cut off by the output limit. Use edit_file for targeted
+changes ...`. Nothing is written and no approval is requested. A rewrite at the
+limit is about 8 KB of output, 2-3k tokens, well inside the default
 12,288-token reply. There is no opt-out: several `edit_file` calls can make any
 change. New files and files up to 8 KB are unaffected. Build large files as a
-small skeleton, then extend them through small `edit_file` calls. Both tools show the full proposed diff and use the same workspace rules,
+small skeleton, then extend them through small `edit_file` calls.
+
+Both tools show the full proposed diff and use the same workspace rules,
 approvals, checkpoints and undo support. A full undo history drops its oldest
 checkpoints instead of refusing the edit (see
 [checkpoints](sessions.md#checkpoints-and-instructions)). A file changed during

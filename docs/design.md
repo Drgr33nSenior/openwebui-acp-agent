@@ -77,6 +77,11 @@ stale-content recheck, client filesystem or atomic local write, and persistence.
 Both tools recheck scoped instructions after approval. New or changed instructions
 return to the model before a model-proposed write. The existing explicitly
 approved manual-export path retains its instruction-gate exception.
+`write_file` carries only the new content. The shared helper refuses to replace
+an existing file unless its current text matches the hash the session recorded
+at the agent's last read (any `read_file` page) or write of that file; the
+recorded hashes persist with the session as hashed paths and are cleared by
+`/rewind` (see [tools](tools.md#text-file-edits)).
 Only an actual successful file change adds a verification target and advances
 the file mutation revision. No-op and rejected changes do neither.
 `read_file` numbers its lines; an edit argument copied with those numbers is

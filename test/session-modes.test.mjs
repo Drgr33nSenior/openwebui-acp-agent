@@ -168,7 +168,7 @@ const option = (result, id) =>
 const toolNames = (request) =>
   (request.tools ?? []).map((t) => t.function.name);
 const mutating = (path) => [
-  call("write_file", { path, before: "old", after: "new" }),
+  call("write_file", { path, content: "new" }),
   call("edit_file", { path, old_string: "old", new_string: "new" }),
   call("run_command", { executable: "touch", args: ["created.txt"] }),
 ];

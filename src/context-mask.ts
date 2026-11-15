@@ -65,7 +65,8 @@ const ELIDED_FIELDS = [
   "new_string",
 ];
 const ELIDED_PREFIX = "[elided from context: ";
-// A placeholder must never be written to a file as if it were content.
+// A placeholder must never be written to a file as if it were content. The
+// prefix is unchanged across versions, so older stubs are still recognized.
 export const isElidedPlaceholder = (value: unknown) =>
   typeof value === "string" && value.startsWith(ELIDED_PREFIX);
 
@@ -183,7 +184,7 @@ function elideArguments(call: Call): Call {
     if (typeof value !== "string" || value.length <= ARGUMENT_MIN_CHARS)
       continue;
     args[field] =
-      `${ELIDED_PREFIX}${value.length} chars; read the file for its current content]`;
+      `${ELIDED_PREFIX}${value.length} chars; not file text; never copy this into a tool call; read the file to see it]`;
     changed = true;
   }
   return changed

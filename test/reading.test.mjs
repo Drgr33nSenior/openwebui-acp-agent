@@ -21,6 +21,7 @@ const { writeJson, configSchema } = await import("../dist/config.js");
 const {
   pageText,
   withoutLineNumbers,
+  isNumberedCopy,
   searchLine,
   globMatch,
   SearchResults,
@@ -227,6 +228,12 @@ test("line-number prefixes are recognized only when every line has one", () => {
   assert.equal(withoutLineNumbers("12→a"), "a");
   assert.equal(withoutLineNumbers("12→a\nb"), undefined);
   assert.equal(withoutLineNumbers("a"), undefined);
+  // A copy of read_file output: every line numbered, consecutively.
+  assert.equal(isNumberedCopy("1→a\n2→b\n"), true);
+  assert.equal(isNumberedCopy("401→a\n402→\n403→c"), true);
+  assert.equal(isNumberedCopy("1→a\n3→b\n"), false);
+  assert.equal(isNumberedCopy("1→a\nb\n"), false);
+  assert.equal(isNumberedCopy("plain text\n"), false);
   assert.equal(withoutLineNumbers("12\ta"), undefined);
 });
 
@@ -328,10 +335,17 @@ test("read_file pages through the agent and edit_file works with or without copi
         },
         "clean",
       ),
+      call("read_file", { path: "small.py" }, "small"),
+      // write_file content copied from read_file output, numbers and all.
       call(
         "write_file",
-        { path: "small.py", before: "1→a = 1\n2→b = 2\n", after: "a = 3\n" },
+        { path: "small.py", content: "1→a = 3\n2→b = 2\n" },
         "prefixed-write",
+      ),
+      call(
+        "write_file",
+        { path: "fresh.py", content: "1→x = 1\n2→y = 2" },
+        "prefixed-create",
       ),
       call("run_command", { executable: "python3", args: ["big.py"] }, "run"),
     ];
@@ -353,7 +367,12 @@ test("read_file pages through the agent and edit_file works with or without copi
       /old_string includes line numbers; remove read_file's line-number prefixes \(for example "12→"\).*Nothing was written/,
     );
     assert.equal(result("clean").split(";")[0], "File updated");
-    assert.match(result("prefixed-write"), /before includes line numbers/);
+    for (const id of ["prefixed-write", "prefixed-create"])
+      assert.match(
+        result(id),
+        /content includes line numbers; remove read_file's line-number prefixes.*Nothing was written/,
+      );
+    await assert.rejects(readFile(join(c.cwd, "fresh.py")), /ENOENT/);
     assert.equal(
       await readFile(join(c.cwd, "small.py"), "utf8"),
       "a = 1\nb = 2\n",
@@ -642,6 +661,7 @@ test("edit_file and run_command descriptions each carry valid example calls", as
       description("write_file"),
       /small existing file \(up to 8 KB; larger files are refused, use edit_file\)/,
     );
+    assert.doesNotMatch(description("write_file"), /before|after/);
     assert.deepEqual(examples("run_command"), [
       { executable: "python3", args: ["-m", "pytest"] },
       { executable: "sh", args: ["-c", "make | tail"] },
