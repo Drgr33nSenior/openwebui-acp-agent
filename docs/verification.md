@@ -19,6 +19,12 @@ The GitHub repository transfer preserved the repository ID and the existing
 with the original SHA-256 digest. No renamed release or npm package was
 published, and the installed IDE agents were not replaced by this branch.
 
+After merging current main `1d4546f` (including T3 support) into the branding
+branch, lint, typecheck and Prettier passed. The combined suite passed **565
+tests, 557 passed, eight skips, zero failures**. An initial combined run failed
+the benchmark's command-output positive control despite a completed command;
+its focused rerun and the full rerun passed. No test or sandbox rule changed.
+
 ## Automated checks
 
 Use the pinned Node release from `.node-version` and a private temporary
