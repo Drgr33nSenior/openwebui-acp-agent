@@ -1000,9 +1000,9 @@ test(
       });
       assert.equal(report.toolFailuresTotal, 4);
       // Failures are grouped by tool and failure, never by command output.
-      // How the sandboxed suite run fails depends on the platform: a test
-      // failure (exit code 1) where the sandbox runs python3, or a sandbox
-      // refusal where it does not.
+      // Both sandboxed suite runs execute and fail their tests (exit code 1).
+      // macOS 26 CI once refused them at sandbox initialization below this
+      // test's nested TMPDIR (see test/sandbox-socket-path.test.mjs).
       const commandKeys = Object.entries(report.toolFailures).filter(([key]) =>
         key.startsWith("run_command: "),
       );
@@ -1014,8 +1014,7 @@ test(
       );
       for (const [key] of commandKeys)
         assert.doesNotMatch(key, /Ran \d+ tests|={10}|\.F\.|"output"/, keys);
-      // Linux CI runs python3 inside the sandbox: both runs fail their tests.
-      if (python && process.platform === "linux")
+      if (python)
         assert.deepEqual(commandKeys, [["run_command: exit code 1", 2]], keys);
       assert.deepEqual(report.viewImage, { calls: 1, failed: 1 });
       assert.deepEqual(report.tokens, {
