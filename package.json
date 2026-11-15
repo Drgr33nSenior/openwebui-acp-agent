@@ -1,17 +1,18 @@
 {
-  "name": "openwebui-acp-agent",
+  "name": "openmettle-acp",
   "version": "0.6.0",
-  "description": "Unofficial Open WebUI coding agent for JetBrains and compatible ACP clients",
+  "description": "OpenMettle ACP coding agent for compatible clients, powered by Open WebUI",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Drgr33nSenior/openwebui-acp-agent.git"
+    "url": "git+https://github.com/OpenMettle/openmettle-acp.git"
   },
-  "homepage": "https://github.com/Drgr33nSenior/openwebui-acp-agent#readme",
-  "bugs": "https://github.com/Drgr33nSenior/openwebui-acp-agent/issues",
+  "homepage": "https://github.com/OpenMettle/openmettle-acp#readme",
+  "bugs": "https://github.com/OpenMettle/openmettle-acp/issues",
   "author": "Drgr33nSenior",
   "license": "MIT",
   "type": "module",
   "bin": {
+    "openmettle-acp": "dist/cli.js",
     "openwebui-acp-agent": "dist/cli.js"
   },
   "files": [

@@ -12,7 +12,16 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { checkRuntimeDependency } from "./runtime-dependency-check.mjs";
-const installed = resolve(process.argv[2], "node_modules/openwebui-acp-agent");
+const installed = resolve(process.argv[2], "node_modules/openmettle-acp");
+if (process.platform !== "win32") {
+  const cli = await realpath(join(installed, "dist/cli.js"));
+  for (const name of ["openmettle-acp", "openwebui-acp-agent"])
+    assert.equal(
+      await realpath(resolve(process.argv[2], "node_modules/.bin", name)),
+      cli,
+      `Installed ${name} alias must launch the same agent`,
+    );
+}
 await checkRuntimeDependency(installed);
 const browser = join(installed, "browser");
 const browserLock = JSON.parse(
@@ -70,6 +79,8 @@ try {
   const response = messages.find((m) => m.id === 1);
   assert.equal(response.result.protocolVersion, 1);
   assert.equal(response.result.agentInfo.version, "0.6.0");
+  assert.equal(response.result.agentInfo.name, "openmettle-acp");
+  assert.equal(response.result.agentInfo.title, "OpenMettle ACP");
   assert.equal(response.result.authMethods[0].type, "terminal");
   assert.deepEqual(response.result.agentCapabilities.auth.logout, {});
   assert.deepEqual(
