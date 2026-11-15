@@ -18,6 +18,11 @@
 - Add `/rewind` to return to an earlier turn. It restores the agent's own edits
   from the discarded turns through checkpoints, with one diff approval. It never
   overwrites later changes. `--keep-files` rewinds only the conversation.
+- Undo history no longer blocks editing. When the twenty-checkpoint or byte
+  budget is full, the oldest checkpoints are dropped to make room and one notice
+  per turn says so. The byte budget rises from 500 KB to 2 MB. `/rewind` refuses
+  to restore files for turns whose edits lost their checkpoints; `--keep-files`
+  still works for them, and also no longer fails on an edit-chain gap.
 - Add the **Steer current turn** prompt mode (`/queue steer`). A message sent
   while busy joins the running turn after its current tool step, or is queued
   if the turn ends first. It needs a client that sends prompts while busy.

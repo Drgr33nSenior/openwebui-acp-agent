@@ -9,6 +9,8 @@ import {
   checkpointSummaries,
   checkpointsSchema,
   CHECKPOINT_LIMIT,
+  CHECKPOINT_BYTES,
+  CHECKPOINT_TEXT_CHARS,
   CheckpointError,
 } from "../dist/checkpoints.js";
 
@@ -140,22 +142,74 @@ test("checkpoint failures expose fixed actionable messages without supplied valu
     });
 });
 
-test("checkpoint capacity is checked before edits and UTF-8 storage remains bounded", () => {
+test("recording evicts the oldest checkpoints by count instead of refusing an edit", () => {
   let records = [];
   for (let i = 0; i < CHECKPOINT_LIMIT; i++) {
     const record = prepare(records, String(i), String(i + 1), `file-${i}.txt`);
     records = recordCheckpoint(records, record);
   }
-  assert.throws(
-    () => prepare(records),
-    /Checkpoint limit reached.*checkpoints clear/,
-  );
+  const full = records;
+  const next = prepare(records);
+  assert.equal(next.status, "applied");
+  records = recordCheckpoint(records, next);
+  assert.equal(full.length, CHECKPOINT_LIMIT, "input is not modified");
   assert.equal(records.length, CHECKPOINT_LIMIT);
-  const unicode = "🌍".repeat(40000);
-  const large = prepare([], unicode, unicode + "a");
-  assert.throws(
-    () => prepare([large], unicode, unicode + "b", "b.txt"),
-    /storage budget/,
+  assert.deepEqual(
+    records.map((r) => r.id),
+    [...full.slice(1).map((r) => r.id), next.id],
   );
-  assert.equal(large.status, "applied");
+  // Undo after eviction reaches only what remains.
+  let remaining = records;
+  for (let i = 0; i < CHECKPOINT_LIMIT; i++)
+    remaining = markCheckpointUndone(remaining, selectCheckpoint(remaining).id);
+  assert.throws(() => selectCheckpoint(remaining), /No applied checkpoint/);
+  assert(!remaining.some((r) => r.path === "file-0.txt"));
+  assert.throws(
+    () => recordCheckpoint(records, records[0]),
+    /Duplicate checkpoint/,
+  );
+});
+
+test("recording evicts the oldest checkpoints by bytes and keeps UTF-8 storage bounded", () => {
+  const size = (records) => Buffer.byteLength(JSON.stringify(records));
+  // About 384 KB each: 96,000 UTF-16 units, 192 KB of UTF-8, per side.
+  const unicode = "🌍".repeat(48000);
+  let records = [];
+  const ids = [];
+  for (let i = 0; i < 6; i++) {
+    const record = prepare(records, unicode + i, unicode + "x" + i, `f${i}`);
+    records = recordCheckpoint(records, record);
+    ids.push(record.id);
+    assert(size(records) <= CHECKPOINT_BYTES);
+  }
+  assert(size([records[0]]) > 380_000);
+  // Five fit in 2 MB; the sixth evicted the first.
+  assert.deepEqual(
+    records.map((r) => r.id),
+    ids.slice(1),
+  );
+  // A small edit evicts only as much as it needs.
+  const small = prepare(records, "a", "b", "small.txt");
+  const after = recordCheckpoint(records, small);
+  assert.deepEqual(
+    after.map((r) => r.id),
+    [...ids.slice(1), small.id],
+  );
+  assert(CHECKPOINT_BYTES >= 2_000_000);
+});
+
+test("text too large to checkpoint returns no checkpoint instead of refusing", () => {
+  const large = "x".repeat(CHECKPOINT_TEXT_CHARS + 1);
+  assert.equal(prepare([], large, large + "y"), null);
+  assert.equal(prepare([], "small", large), null);
+  assert.equal(prepare([], null, large, "new.txt"), null);
+  // The largest text that is kept still fits the byte budget on its own,
+  // even when every character needs a six-byte JSON escape.
+  const escaped = "\u0001".repeat(CHECKPOINT_TEXT_CHARS);
+  const kept = prepare([], escaped, escaped.slice(1));
+  assert.equal(kept.status, "applied");
+  assert(Buffer.byteLength(JSON.stringify([kept])) <= CHECKPOINT_BYTES);
+  // Path, binary and credential checks still refuse.
+  assert.throws(() => prepare([], large, large + "y", "../x"), /Invalid/);
+  assert.throws(() => prepare([], large, large + "\0"), /Binary/);
 });

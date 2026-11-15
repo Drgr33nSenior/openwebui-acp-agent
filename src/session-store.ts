@@ -421,7 +421,7 @@ export async function exportStoredSession(
 // Saving never fails because the transcript grew. When a record would exceed
 // its byte limit, the STORED copy is trimmed deterministically, oldest first;
 // the live session keeps its full transcript. Checkpoints are never trimmed:
-// they must stay exact and have their own 500 KB budget.
+// they must stay exact and have their own 2 MB budget.
 //
 // Never touched: system messages, the AGENTS.md guidance message, the compaction
 // summary, the request and steering messages compaction pins, and (until every
@@ -490,6 +490,7 @@ type Fittable = {
   compaction: CompactionState;
   contextMask?: ContextMask;
   checkpointTurns?: Record<string, number>;
+  unrestorableTurn?: number;
   failedToolCalls?: string[];
 };
 
@@ -515,6 +516,7 @@ export function fitSessionRecord<T extends Fittable>(
   let compaction = input.compaction;
   let contextMask = input.contextMask;
   let checkpointTurns = input.checkpointTurns;
+  let unrestorableTurn = input.unrestorableTurn;
   let trimmed = 0;
 
   const kept = () => {
@@ -620,6 +622,15 @@ export function fitSessionRecord<T extends Fittable>(
           turnMap.get(turn) ?? UNTRACKED_TURN,
         ]),
       );
+    // A kept turn at or before the old limit (such as a pinned request) is
+    // still unrestorable under its new number.
+    if (unrestorableTurn)
+      unrestorableTurn = Math.max(
+        UNTRACKED_TURN,
+        ...[...turnMap]
+          .filter(([turn]) => turn <= unrestorableTurn!)
+          .map(([, moved]) => moved),
+      );
     trimmed += messages.length - next.length;
     messages = next;
     if (compaction.through > 0) compaction = { ...compaction, through };
@@ -638,6 +649,7 @@ export function fitSessionRecord<T extends Fittable>(
       messages,
       compaction,
       checkpointTurns,
+      ...(unrestorableTurn !== undefined ? { unrestorableTurn } : {}),
       ...(contextMask ? { contextMask } : {}),
     });
     return true;
@@ -691,11 +703,12 @@ export function fitSessionRecord<T extends Fittable>(
     compaction,
     ...(contextMask ? { contextMask } : {}),
     ...(checkpointTurns ? { checkpointTurns } : {}),
+    ...(unrestorableTurn !== undefined ? { unrestorableTurn } : {}),
     ...(input.failedToolCalls
       ? { failedToolCalls: input.failedToolCalls.filter((id) => ids.has(id)) }
       : {}),
   };
-  // Every remaining field has its own small bound (checkpoints 500 KB, summary
+  // Every remaining field has its own small bound (checkpoints 2 MB, summary
   // 16000 characters, guidance 64 KB), so this cannot be reached in practice.
   if (byteSize(record) > limit || messages.length > SESSION_MESSAGE_LIMIT)
     throw new Error("Session record cannot be reduced to its storage limit");

@@ -370,6 +370,11 @@ type Session = {
   checkpoints: Checkpoint[];
   // Turn that created each checkpoint, for /rewind. Never grants anything.
   checkpointTurns: CheckpointTurns;
+  // Latest turn with an agent edit that has no checkpoint (evicted or too
+  // large); /rewind refuses to restore files to before it.
+  unrestorableTurn: number;
+  // Undo history lost during the current turn, reported once when it ends.
+  checkpointNotice?: { removed: number; through: number; tooLarge: string[] };
   // Tool calls reported as failed, so session/load replays their real status.
   failedToolCalls: Set<string>;
   // Whether the user was told that the saved copy was trimmed (once per session).
@@ -768,6 +773,7 @@ export function createAgent(
       workflow: s.workflow,
       promptMode: s.promptMode,
       checkpointTurns,
+      unrestorableTurn: s.unrestorableTurn,
       failedToolCalls: failedCalls(s),
       plan: planSchema.parse(
         s.plan.map((entry) => ({
@@ -795,6 +801,52 @@ export function createAgent(
       s,
       `\n\n[Older tool output was trimmed from this session's saved copy to keep it within ${SESSION_RECORD_BYTES / 1_000_000} MB. This conversation is unchanged until you reopen it; reopened history shows trimmed entries with a marker. File checkpoints for /undo and /rewind are kept exactly.]\n`,
     );
+  };
+  // Records undo history an edit cost: checkpoints evicted to make room, or an
+  // edit too large to checkpoint. Reported once when the turn ends.
+  const loseCheckpoints = (
+    s: Session,
+    evicted: Checkpoint[],
+    tooLarge?: string,
+  ) => {
+    if (!evicted.length && !tooLarge) return;
+    const turn = userTurns(s.messages).length;
+    const through = Math.max(
+      tooLarge ? turn : UNTRACKED_TURN,
+      ...evicted
+        .filter((c) => c.status === "applied")
+        .map((c) => s.checkpointTurns[c.id] ?? turn),
+    );
+    for (const c of evicted) delete s.checkpointTurns[c.id];
+    s.unrestorableTurn = Math.max(s.unrestorableTurn, through);
+    const notice = (s.checkpointNotice ??= {
+      removed: 0,
+      through: UNTRACKED_TURN,
+      tooLarge: [],
+    });
+    notice.removed += evicted.length;
+    if (evicted.length) notice.through = Math.max(notice.through, through);
+    if (tooLarge && !notice.tooLarge.includes(tooLarge))
+      notice.tooLarge.push(tooLarge);
+  };
+  const checkpointNotice = async (client: AgentContext, s: Session) => {
+    const notice = s.checkpointNotice;
+    if (!notice) return;
+    s.checkpointNotice = undefined;
+    const lines: string[] = [];
+    if (notice.removed)
+      lines.push(
+        `Older undo checkpoints were dropped to make room (${notice.removed} removed); /undo and /rewind can no longer restore agent edits ${notice.through ? `from turn ${notice.through} or earlier` : `made before ${s.checkpoints[0]?.createdAt ?? "now"}`}.`,
+      );
+    if (notice.tooLarge.length) {
+      const one = notice.tooLarge.length === 1;
+      const shown = notice.tooLarge.slice(0, 3).join(", ");
+      const more = notice.tooLarge.length - 3;
+      lines.push(
+        `${one ? "An edit was" : "Edits were"} too large for an undo checkpoint (${shown}${more > 0 ? ` and ${more} more` : ""}); /undo and /rewind cannot restore ${one ? "it" : "them"}.`,
+      );
+    }
+    await text(client, s, `\n\n[${lines.join(" ")}]\n`);
   };
   const reserveEditStorage = async (s: Session, checkpoints: Checkpoint[]) => {
     // The fitted record always meets the per-session limit; this rejects known
@@ -1349,14 +1401,19 @@ export function createAgent(
       after = proposal.after;
     }
     if (before === after) return "No change needed";
+    const relativePath = relative(s.root, path).replaceAll("\\", "/");
     const checkpoint = prepareCheckpoint(
       s.checkpoints,
-      relative(s.root, path).replaceAll("\\", "/"),
+      relativePath,
       before,
       after,
       (value) => s.backend.redact(value),
     );
-    const nextCheckpoints = recordCheckpoint(s.checkpoints, checkpoint);
+    // Undo history never blocks an edit: the oldest checkpoints make room.
+    const previous = s.checkpoints;
+    const nextCheckpoints = checkpoint
+      ? recordCheckpoint(previous, checkpoint)
+      : previous;
     await reserveEditStorage(s, nextCheckpoints);
     const check = await approve(
       client,
@@ -1403,10 +1460,17 @@ export function createAgent(
       await atomicEdit(s.root, proposal.path, before, after);
     }
     changedFiles?.add(path);
+    loseCheckpoints(
+      s,
+      previous.filter((c) => !nextCheckpoints.some((n) => n.id === c.id)),
+      checkpoint ? undefined : relativePath,
+    );
     s.checkpoints = nextCheckpoints;
     await save(s);
     return {
-      text: "File updated; checkpoint " + checkpoint.id,
+      text: checkpoint
+        ? "File updated; checkpoint " + checkpoint.id
+        : "File updated without an undo checkpoint (too large); /undo and /rewind cannot restore this edit",
       content: [{ type: "diff", path, oldText: before, newText: after }],
     };
   };
@@ -1543,7 +1607,16 @@ export function createAgent(
   ) => {
     if (s.jobs.hasRunning)
       throw new Error("Stop background jobs before rewinding: /jobs stop <id>");
-    const plan = rewindPlan(s.messages, s.checkpoints, s.checkpointTurns, turn);
+    const plan = rewindPlan(
+      s.messages,
+      s.checkpoints,
+      s.checkpointTurns,
+      turn,
+      {
+        keepFiles,
+        unrestorable: s.unrestorableTurn,
+      },
+    );
     const changes: Array<{
       path: string;
       absolute: string;
@@ -1690,6 +1763,11 @@ export function createAgent(
       // Kept edits now predate every later turn and remain available to /undo.
       for (const id of plan.rewound)
         s.checkpointTurns[id] = Math.max(UNTRACKED_TURN, turn - 1);
+      // Edits without checkpoints in the discarded turns move with them.
+      s.unrestorableTurn = Math.min(
+        s.unrestorableTurn,
+        Math.max(UNTRACKED_TURN, turn - 1),
+      );
     } else
       s.checkpoints = s.checkpoints.filter((c) => !plan.rewound.includes(c.id));
     const discarded = s.messages.length - plan.cut;
@@ -2450,6 +2528,7 @@ export function createAgent(
       preview: new Preview(),
       checkpoints: [],
       checkpointTurns: {},
+      unrestorableTurn: UNTRACKED_TURN,
       failedToolCalls: new Set(),
       instructions: [],
       mask: NO_MASK,
@@ -2524,6 +2603,12 @@ export function createAgent(
         createdAt: z.string().optional(),
         checkpoints: checkpointsSchema.default([]),
         checkpointTurns: checkpointTurnsSchema.default({}),
+        unrestorableTurn: z
+          .number()
+          .int()
+          .min(0)
+          .max(100_000)
+          .default(UNTRACKED_TURN),
         failedToolCalls: z
           .array(z.string().max(1000))
           .max(SESSION_MESSAGE_LIMIT)
@@ -2650,6 +2735,7 @@ export function createAgent(
         saved.checkpoints,
         UNTRACKED_TURN,
       ),
+      unrestorableTurn: saved.unrestorableTurn,
       failedToolCalls: new Set(saved.failedToolCalls),
       instructions: [],
       messages: restoreHistory(saved.messages),
@@ -2984,6 +3070,7 @@ export function createAgent(
           try {
             const response = await run({ ...context, signal });
             await storageNotice(context.client, s);
+            await checkpointNotice(context.client, s);
             return response;
           } finally {
             try {
@@ -3209,7 +3296,10 @@ export function createAgent(
                       (t) =>
                         `${t.turn}. ${t.preview || "(empty)"}${t.agentEdits ? ` [${t.agentEdits} agent edit${t.agentEdits === 1 ? "" : "s"}]` : ""}`,
                     )
-                    .join("\n")
+                    .join("\n") +
+                  (s.unrestorableTurn
+                    ? `\n${s.unrestorableTurn === 1 ? "Turn 1 has" : `Turns 1-${s.unrestorableTurn} have`} agent edits without undo checkpoints; rewinding to them needs --keep-files.`
+                    : "")
               : "No turns to rewind.",
           );
           return { stopReason: "end_turn" };

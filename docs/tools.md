@@ -160,9 +160,12 @@ Use `write_file` with `before: null` to create a file. For a deliberate whole-fi
 rewrite, supply the complete current text in `before` and replacement in `after`.
 Build large files as a small skeleton, then extend them through small `edit_file`
 calls. Both tools show the full proposed diff and use the same workspace rules,
-approvals, checkpoints and undo support. A file changed during approval is not
-overwritten. When client file methods are available, edits preserve unsaved
-editor content; client denial never causes a local write fallback.
+approvals, checkpoints and undo support. A full undo history drops its oldest
+checkpoints instead of refusing the edit (see
+[checkpoints](sessions.md#checkpoints-and-instructions)). A file changed during
+approval is not overwritten. When client file methods are available, edits
+preserve unsaved editor content; client denial never causes a local write
+fallback.
 
 Both tools report the change as ACP `diff` content (absolute path, complete old
 and new text, `oldText: null` for a new file) on the approval request and on the
