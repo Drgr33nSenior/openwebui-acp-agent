@@ -134,7 +134,12 @@ async function client({ cwd, load, choose = () => "once", editor } = {}) {
   };
 }
 async function edit(c, after = "new") {
-  pending = [[call("write_file", { path: "a.txt", before: "old", after })]];
+  pending = [
+    [
+      call("read_file", { path: "a.txt" }, "read-before-edit"),
+      call("write_file", { path: "a.txt", content: after }),
+    ],
+  ];
   await c.prompt("Make the fixture edit");
 }
 test("session browsing and explicit titles require no inference or workspace activation", async () => {
@@ -507,19 +512,20 @@ test("nested instructions are scoped, refreshed and precede a first proposed edi
       [
         call(
           "write_file",
-          { path: "src/code.txt", before: "before", after: "after" },
+          { path: "src/code.txt", content: "after" },
           "first-proposal",
         ),
         call(
           "write_file",
-          { path: "src/code.txt", before: "before", after: "batch-bypass" },
+          { path: "src/code.txt", content: "batch-bypass" },
           "same-batch-proposal",
         ),
       ],
       [
+        call("read_file", { path: "src/code.txt" }, "read-before-retry"),
         call(
           "write_file",
-          { path: "src/code.txt", before: "before", after: "after" },
+          { path: "src/code.txt", content: "after" },
           "retry-proposal",
         ),
       ],
@@ -600,11 +606,8 @@ test("checkpoints preserve unsaved editor text and undo rechecks client content 
   try {
     pending = [
       [
-        call("write_file", {
-          path: "a.txt",
-          before: "unsaved original",
-          after: "agent replacement",
-        }),
+        call("read_file", { path: "a.txt" }, "read-unsaved"),
+        call("write_file", { path: "a.txt", content: "agent replacement" }),
       ],
     ];
     await c.prompt("Apply an editor-aware change");
@@ -726,7 +729,10 @@ test("root instruction snapshots redact configured credentials before retention 
       ),
     );
     pending = [
-      [call("write_file", { path: "a.txt", before: "old", after: "new" })],
+      [
+        call("read_file", { path: "a.txt" }, "read-before-edit"),
+        call("write_file", { path: "a.txt", content: "new" }),
+      ],
     ];
     await c.prompt("Apply the requested edit");
     assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "new");

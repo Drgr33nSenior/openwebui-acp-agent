@@ -20,6 +20,10 @@ const { createAgent } = await import("../dist/agent.js");
 const { configSchema, writeJson, readJson } = await import("../dist/config.js");
 const { command } = await import("../dist/commands.js");
 const { contextMessages } = await import("../dist/compaction.js");
+const { fileViewKey, recordFileView } = await import("../dist/edits.js");
+// As if read_file had returned the file: write_file replaces only read files.
+const markRead = (c, path, text) =>
+  recordFileView(c.state().fileViews, fileViewKey(path), text);
 
 const requests = [];
 let respond;
@@ -423,13 +427,14 @@ test(
         return late.promise;
       },
     });
+    markRead(c, "a.txt", "original");
     respond = (request, res) => {
       const last = request.messages.at(-1);
       if (last.role === "tool") return reply(res, "operation not approved");
       reply(res, null, [
         call(
           "write_file",
-          { path: "a.txt", before: "original", after: "must remain unapplied" },
+          { path: "a.txt", content: "must remain unapplied" },
           latestUser(request) === "first" ? "old-edit" : "new-edit",
         ),
       ]);
@@ -590,6 +595,7 @@ test(
         return ++editApprovals === 1 ? "once" : "deny";
       },
     });
+    markRead(c, "a.txt", "original");
     respond = (request, res) => {
       const replacement = latestUser(request) === "replacement";
       if (request.messages.at(-1).role === "tool") {
@@ -605,8 +611,7 @@ test(
           "write_file",
           {
             path: "a.txt",
-            before: replacement ? "edited" : "original",
-            after: replacement ? "unapproved replacement" : "edited",
+            content: replacement ? "unapproved replacement" : "edited",
           },
           replacement ? "replacement-edit" : "completed-edit",
         ),
@@ -1073,6 +1078,7 @@ test(
       },
     });
     await queueMode(c);
+    markRead(c, "a.txt", "original");
     respond = (request, res) => {
       if (request.messages.at(-1).role === "tool")
         return reply(res, "edit result recorded");
@@ -1080,11 +1086,7 @@ test(
       reply(res, null, [
         call(
           "write_file",
-          {
-            path: "a.txt",
-            before: first ? "original" : "edited",
-            after: first ? "edited" : "denied edit",
-          },
+          { path: "a.txt", content: first ? "edited" : "denied edit" },
           first ? "first-edit" : "second-edit",
         ),
       ]);

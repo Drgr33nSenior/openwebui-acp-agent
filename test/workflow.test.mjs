@@ -169,6 +169,7 @@ function history() {
       tool_calls: [
         call(
           "write_file",
+          // A transcript from before content-only writes keeps its old form.
           { path: "a.txt", before: "old", after: "historical" },
           "past-edit",
         ),
@@ -226,11 +227,7 @@ test("Plan mode enforces read-only tools before forged mutations and never conne
       [
         call("update_plan", { entries: plan }),
         call("read_file", { path: "a.txt" }),
-        call("write_file", {
-          path: "a.txt",
-          before: "unchanged",
-          after: "bad",
-        }),
+        call("write_file", { path: "a.txt", content: "bad" }),
         call("run_command", { executable: "fixture", args: [] }),
         call("mcp_fixture_danger", {}),
         call("openwebui_task", {}),
@@ -425,13 +422,7 @@ test("invalid summary cannot execute tools or replace retained context", async (
     reply(res, {
       role: "assistant",
       content: "Do this",
-      tool_calls: [
-        call("write_file", {
-          path: "a.txt",
-          before: "unchanged",
-          after: "bad",
-        }),
-      ],
+      tool_calls: [call("write_file", { path: "a.txt", content: "bad" })],
     });
   try {
     c.state().messages = history();
@@ -544,11 +535,7 @@ function fullContextReply(
   res.setHeader("Content-Type", "application/json");
   const attempted = call(
     "write_file",
-    {
-      path: "a.txt",
-      before: "unchanged",
-      after: "must not execute",
-    },
+    { path: "a.txt", content: "must not execute" },
     "incomplete-edit",
   );
   if (malformed) attempted.function.arguments = "{";

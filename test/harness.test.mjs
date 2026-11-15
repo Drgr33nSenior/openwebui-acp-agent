@@ -372,13 +372,7 @@ test("cut-off tool calls re-ask with small-edit advice and never run the partial
       (res) =>
         response(
           res,
-          calls(
-            call("write_file", {
-              path: "a.txt",
-              before: "original",
-              after: "not executed",
-            }),
-          ),
+          calls(call("write_file", { path: "a.txt", content: "not executed" })),
           "length",
         ),
     ];
@@ -465,16 +459,11 @@ test("coercion converts only declared JSON containers/null and removes explicitl
   );
 });
 
-test("specific schema and stale-edit errors reach the model; actual prompt and AGENTS guidance remain separate", async () => {
+test("specific schema and unread-file errors reach the model; actual prompt and AGENTS guidance remain separate", async () => {
   replies = [
     calls(call("read_file", { path: 42 })),
-    calls(
-      call("write_file", {
-        path: "a.txt",
-        before: "outdated",
-        after: "changed",
-      }),
-    ),
+    // a.txt exists but was never read: refused before approval.
+    calls(call("write_file", { path: "a.txt", content: "changed" })),
   ];
   const c = await client();
   try {
@@ -483,16 +472,36 @@ test("specific schema and stale-edit errors reach the model; actual prompt and A
     assert.match(toolResults(requests[1])[0], /expected string|Invalid input/i);
     assert.match(
       toolResults(requests[2]).at(-1),
-      /Stale edit proposal.*\nRe-read the file/,
-    );
-    assert.match(
-      toolResults(requests[2]).at(-1),
-      /Prefer a small edit_file change.*unique old_string/,
+      /^Tool failed: a\.txt already exists and you have not read it in this session\. Read it with read_file before replacing it.*Nothing was written\./,
     );
     assert.match(
       requests[0].tools.find((t) => t.function.name === "write_file").function
         .description,
-      /entire current file.*final newline/,
+      /content is the complete new file text.*requires reading it with read_file first/,
+    );
+    assert.deepEqual(
+      Object.keys(
+        requests[0].tools.find((t) => t.function.name === "write_file").function
+          .parameters.properties,
+      ),
+      ["path", "content"],
+    );
+    // A stale write (file changed during approval) still gets the re-read hint.
+    assert.match(
+      toolFailure(
+        new Error("Stale edit: editor changed during approval"),
+        (s) => s,
+        ["write_file"],
+      ),
+      /Re-read the file\. Then send write_file the complete new file text as content/,
+    );
+    assert.match(
+      toolFailure(
+        new Error("Stale edit: editor changed during approval"),
+        (s) => s,
+        ["write_file", "edit_file"],
+      ),
+      /Prefer a small edit_file change.*unique old_string/,
     );
     assert.equal(requests[0].messages[0].content, codingInstruction);
     assert.ok(
@@ -511,11 +520,8 @@ test("specific schema and stale-edit errors reach the model; actual prompt and A
 test("permission denial remains distinct, is not a tool bug and never suggests retry", async () => {
   replies = [
     calls(
-      call("write_file", {
-        path: "a.txt",
-        before: "original",
-        after: "changed",
-      }),
+      call("read_file", { path: "a.txt" }, "read"),
+      call("write_file", { path: "a.txt", content: "changed" }),
     ),
   ];
   const c = await client({
@@ -523,7 +529,7 @@ test("permission denial remains distinct, is not a tool bug and never suggests r
   });
   try {
     await c.prompt();
-    const result = toolResults(requests[1])[0];
+    const result = toolResults(requests[1]).at(-1);
     assert.match(result, /^Permission declined by the user/);
     assert.match(result, /Do not retry/);
     assert.doesNotMatch(result, /Tool failed|re-read/i);
@@ -635,18 +641,11 @@ for (const kind of ["truncated", "malformed"]) {
 
 test("a malformed later call cannot replay an earlier mutation", async () => {
   replies = [
-    calls(
-      call("write_file", {
-        path: "a.txt",
-        before: "original",
-        after: "unsafe",
-      }),
-      {
-        id: "bad",
-        type: "function",
-        function: { name: "read_file", arguments: "{" },
-      },
-    ),
+    calls(call("write_file", { path: "a.txt", content: "unsafe" }), {
+      id: "bad",
+      type: "function",
+      function: { name: "read_file", arguments: "{" },
+    }),
   ];
   const c = await client();
   try {
@@ -668,8 +667,7 @@ test("parser coercions execute through the original validator; non-coercible val
     calls(
       call("write_file", {
         path: "new.txt",
-        before: "null",
-        after: "new",
+        content: "new",
         stray: "ignored",
       }),
       call("run_command", { executable: "/bin/echo", args: '["one"]' }),
@@ -703,11 +701,7 @@ test("round limit reports completed edits and remaining plan without another mod
   );
   replies = [
     calls(
-      call("write_file", {
-        path: "a.txt",
-        before: "original",
-        after: "changed",
-      }),
+      call("write_file", { path: "b.txt", content: "changed" }),
       call("update_plan", {
         entries: [
           {
@@ -724,7 +718,7 @@ test("round limit reports completed edits and remaining plan without another mod
     assert.equal((await c.prompt()).stopReason, "max_turn_requests");
     assert.equal(requests.length, 1);
     assert.match(text(c), /Tool calls that returned results: write_file: 1/);
-    assert.match(text(c), /Files updated: a.txt/);
+    assert.match(text(c), /Files updated: b.txt/);
     assert.match(text(c), /Remaining: Run project checks/);
     assert.equal(c.state().messages.at(-1).role, "assistant");
   } finally {

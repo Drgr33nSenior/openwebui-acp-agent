@@ -111,6 +111,23 @@ No changes after [0.6.0](0.6.0.md).
   asks for a visual check when an interactive-app file changed after the last
   viewed screenshot. See the
   [pygame recipe](../runtime-verification.md#play-testing-interactive-apps).
+- `write_file` takes `{path, content}`: the new file text only. The model no
+  longer retypes the current file as `before`, which failed on large files with
+  stale-edit and invalid-argument errors. The agent records a hash of each file
+  as `read_file` last returned it (any page) or as it last wrote it, and replaces
+  an existing file only when its current text still matches. An unread file or
+  one changed since (editor, command, another process) is refused before
+  approval with a "read it first" message. The 8 KB limit, approvals, diffs,
+  checkpoints, undo and the after-approval recheck are unchanged. Records are
+  saved with the session (hashed paths only), cleared by `/rewind` and not
+  copied to forks. Older `{path, before, after}` calls still work: `after` is
+  the content and `before` is ignored, with a note in the result.
+- Elided write arguments now read `[elided from context: N chars; not file
+text; never copy this into a tool call; read the file to see it]`; a copied
+  placeholder is still refused, and the message points to `read_file`.
+  `write_file` content made entirely of `read_file`-numbered lines is refused.
+- `edit_file` on a missing file says to create it with `write_file`, and a
+  write into a missing folder says so, instead of a raw `ENOENT` error.
 
 See [verification](../verification.md), [session modes](../sessions.md#session-modes),
 [ACP v2 readiness](../design.md#acp-v2-readiness) and the

@@ -19,10 +19,18 @@ import {
   interactiveFile,
 } from "./harness.js";
 import {
+  FILE_VIEW_LIMIT,
   WRITE_FILE_MAX_EXISTING_BYTES,
+  type FileViews,
+  fileViewHash,
+  fileViewKey,
   firstChangedLine,
   largeRewriteRefusal,
+  missingEditTarget,
+  missingParentFolder,
+  recordFileView,
   replaceText,
+  unseenRewriteRefusal,
 } from "./edits.js";
 import {
   LINE_MARK,
@@ -34,6 +42,7 @@ import {
   SEARCH_RESULTS,
   SearchResults,
   globMatch,
+  isNumberedCopy,
   pageText,
   withoutLineNumbers,
 } from "./reading.js";
@@ -329,8 +338,7 @@ const schemas = {
   write_file: z
     .object({
       path: z.string(),
-      before: z.string().nullable(),
-      after: z.string().max(100000),
+      content: z.string().max(100000),
     })
     .strict(),
   edit_file: z
@@ -356,6 +364,18 @@ const schemas = {
   list_checkpoints: z.object({}).strict(),
   undo_edit: z.object({ id: z.string().default("latest") }).strict(),
 };
+// write_file's arguments before content-only writes. Older transcripts, and
+// models copying them, still send these: after is taken as content and before is
+// ignored, because the agent now checks staleness itself (see applyFileEdit).
+const legacyWriteSchema = z
+  .object({
+    path: z.string(),
+    before: z.string().nullable().optional(),
+    after: z.string().max(100000),
+  })
+  .strict();
+const LEGACY_WRITE_NOTE =
+  "\nNote: write_file takes {path, content}; before is no longer needed and was ignored.";
 const inspectionTools = new Set([
   "list_files",
   "read_file",
@@ -376,7 +396,7 @@ const definitions = Object.entries(schemas).map(([name, schema]) => ({
         "List workspace files, honouring .gitignore and skipping generated environments, caches and build output (for example .venv, __pycache__, dist, build, target). Large listings are capped and report how many entries were omitted; pass path, a workspace-relative directory, to list a subtree.",
       read_file: `Read a text file as numbered lines "N${LINE_MARK}text"; the "N${LINE_MARK}" prefix is not file content. Files up to ${READ_WHOLE_BYTES / 1024} KB return whole; larger files return ${READ_PAGE_LINES} lines per page. offset is the 1-based first line, limit the number of lines; the footer gives the range and the next offset.`,
       search_text: `Search for literal, case-sensitive text in the files list_files would return. Returns up to max_results (default ${SEARCH_RESULTS}) "path:line: text" lines and counts the rest. Narrow with path (a subdirectory or a single file) or glob ("*.py" matches names anywhere, "src/**/*.ts" matches paths).`,
-      write_file: `Create a file with before=null or rewrite a small existing file (up to ${WRITE_FILE_MAX_EXISTING_BYTES / 1024} KB; larger files are refused, use edit_file). before must be the entire current file, including whitespace and the final newline, without read_file's line-number prefixes; after is the entire replacement. Read first. Prefer edit_file for changes to existing files. Create large files as a small skeleton, then extend with small edits.`,
+      write_file: `Create a file, or replace a small existing file (up to ${WRITE_FILE_MAX_EXISTING_BYTES / 1024} KB; larger files are refused, use edit_file). content is the complete new file text, without read_file's line-number prefixes. Replacing an existing file requires reading it with read_file first; if it changed since your last read, read it again. Prefer edit_file for changes to existing files. Create large files as a small skeleton, then extend with small edits.`,
       edit_file: `Replace literal text in an existing file; read it first. old_string must occur exactly once (include surrounding lines) unless replace_all=true. Copy it from the file text without read_file's "N${LINE_MARK}" prefixes, keeping indentation and line endings. Example: {"path":"src/app.py","old_string":"    return total - bonus\\n","new_string":"    return total + bonus\\n"}. The resulting file must stay within 100,000 characters.`,
       list_jobs:
         "List this session's bounded command jobs; jobs are not restarted on restore",
@@ -422,6 +442,9 @@ type Session = {
   checkpointNotice?: { removed: number; through: number; tooLarge: string[] };
   // Tool calls reported as failed, so session/load replays their real status.
   failedToolCalls: Set<string>;
+  // Content hashes of files the agent last read or wrote, by hashed path.
+  // write_file replaces an existing file only when its current text matches.
+  fileViews: FileViews;
   // Whether the user was told that the saved copy was trimmed (once per session).
   storageNotice?: "pending" | "sent";
   instructions: ProjectInstruction[];
@@ -823,6 +846,7 @@ export function createAgent(
       checkpointTurns,
       unrestorableTurn: s.unrestorableTurn,
       failedToolCalls: failedCalls(s),
+      fileViews: Object.fromEntries(s.fileViews),
       plan: planSchema.parse(
         s.plan.map((entry) => ({
           ...entry,
@@ -1387,6 +1411,8 @@ export function createAgent(
     if (changed) s.instructionReviewRequired = true;
     return changed;
   };
+  const viewKey = (s: Session, path: string) =>
+    fileViewKey(relative(s.root, resolve(s.root, path)).replaceAll("\\", "/"));
   // Both file tools share the complete protection, consent and checkpoint path.
   const applyFileEdit = async (
     client: AgentContext,
@@ -1402,7 +1428,24 @@ export function createAgent(
       throw new SandboxError(
         "File writes are disabled by the read-only sandbox setting",
       );
-    await refreshInstructions(client, s, proposal.path, signal);
+    const editing = "old_string" in proposal;
+    const missing = (e: unknown) => {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      return null;
+    };
+    // A missing folder fails path checks with ENOENT (instruction discovery
+    // and target() both check every existing component): say what is missing.
+    const missingPath = (e: unknown): never => {
+      missing(e);
+      throw new Error(
+        editing
+          ? missingEditTarget(proposal.path)
+          : missingParentFolder(proposal.path),
+      );
+    };
+    await refreshInstructions(client, s, proposal.path, signal).catch(
+      missingPath,
+    );
     if (s.instructionReviewRequired && !forceOnce)
       return {
         failed: true,
@@ -1410,20 +1453,12 @@ export function createAgent(
           "Project instructions changed or were newly discovered. Read and follow these scoped instructions, then propose the edit again; nothing was written.\n" +
           instructionContext(s.instructions),
       };
-    const path = await target(s.root, proposal.path, true);
-    const before = await read(client, s, proposal.path).catch((e) => {
-      if (
-        (e as NodeJS.ErrnoException).code === "ENOENT" &&
-        "before" in proposal &&
-        proposal.before === null
-      )
-        return null;
-      throw e;
-    });
+    const path = await target(s.root, proposal.path, true).catch(missingPath);
+    const key = viewKey(s, proposal.path);
+    const before = await read(client, s, proposal.path).catch(missing);
     let after: string;
-    if ("old_string" in proposal) {
-      if (before === null)
-        throw new Error("edit_file requires an existing file");
+    if (editing) {
+      if (before === null) throw new Error(missingEditTarget(proposal.path));
       try {
         after = replaceText(
           before,
@@ -1440,22 +1475,30 @@ export function createAgent(
         throw error;
       }
     } else {
-      const refusal = before === null ? undefined : largeRewriteRefusal(before);
+      // Refused before approval: an existing file over the size limit, or one
+      // the agent has not read, or that changed after its last read or write.
+      const refusal =
+        before === null
+          ? undefined
+          : (largeRewriteRefusal(before) ??
+            unseenRewriteRefusal(s.fileViews, key, before, proposal.path));
       if (refusal) throw new Error(refusal);
-      if (before !== proposal.before) {
-        if (
-          before !== null &&
-          proposal.before !== null &&
-          withoutLineNumbers(proposal.before) === before
-        )
-          throw new Error(
-            `before includes line numbers; ${LINE_NUMBER_HINT}, in before and after. Nothing was written.`,
-          );
-        throw new Error("Stale edit proposal");
-      }
-      after = proposal.after;
+      if (isNumberedCopy(proposal.content))
+        throw new Error(
+          `content includes line numbers; ${LINE_NUMBER_HINT}. Nothing was written.`,
+        );
+      after = proposal.content;
     }
-    if (before === after) return "No change needed";
+    // What the agent knows after this call: all of a write, and an edit only
+    // when the file was current in its view before the edit.
+    const remember = () => {
+      if (!editing || s.fileViews.get(key) === fileViewHash(before!))
+        recordFileView(s.fileViews, key, after);
+    };
+    if (before === after) {
+      remember();
+      return "No change needed";
+    }
     const relativePath = relative(s.root, path).replaceAll("\\", "/");
     const checkpoint = prepareCheckpoint(
       s.checkpoints,
@@ -1515,6 +1558,7 @@ export function createAgent(
       await atomicEdit(s.root, proposal.path, before, after);
     }
     changedFiles?.add(path);
+    remember();
     loseCheckpoints(
       s,
       previous.filter((c) => !nextCheckpoints.some((n) => n.id === c.id)),
@@ -1829,6 +1873,9 @@ export function createAgent(
     s.messages.splice(plan.cut);
     s.compaction = truncatedCompaction(s.compaction, plan.cut);
     s.mask = clampMask(s.mask, plan.cut);
+    // Reads in the discarded turns are gone and files may have been restored:
+    // a whole-file write needs a fresh read after a rewind.
+    s.fileViews.clear();
     s.contextUsage = undefined;
     const hadPlan = s.plan.length > 0;
     s.plan = [];
@@ -1995,7 +2042,18 @@ export function createAgent(
       throw new Error(
         "Unknown tool; model must support caller-executed function calling",
       );
-    const a = parseToolArguments(schema as z.ZodType, args) as any;
+    // A write_file call in the old {path, before, after} form.
+    const legacyWrite =
+      name === "write_file" &&
+      args !== null &&
+      typeof args === "object" &&
+      !Object.hasOwn(args, "content") &&
+      Object.hasOwn(args, "after");
+    const a = legacyWrite
+      ? (({ path, after }) => ({ path, content: after }))(
+          parseToolArguments(legacyWriteSchema, args),
+        )
+      : (parseToolArguments(schema as z.ZodType, args) as any);
     if (name === "stop_preview") return s.preview.stop(a.id);
     if (name === "start_preview") {
       if (s.administrator.rules.allowPreviews === false)
@@ -2044,8 +2102,12 @@ export function createAgent(
       });
     if (name === "list_files")
       return listing(await files(s.root, a.path), a.path);
-    if (name === "read_file")
-      return pageText(await read(client, s, a.path), a.offset, a.limit);
+    if (name === "read_file") {
+      const text = await read(client, s, a.path);
+      // Any page counts: the record is of the whole file's current text.
+      recordFileView(s.fileViews, viewKey(s, a.path), text);
+      return pageText(text, a.offset, a.limit);
+    }
     if (name === "view_image") {
       if (!imagesOffered(s))
         throw new Error("view_image is not available for this model");
@@ -2082,12 +2144,25 @@ export function createAgent(
     }
     if (name === "write_file" || name === "edit_file") {
       // Older calls in context show elided arguments; a copied placeholder
-      // must never become file content.
+      // must never become file content. A legacy before is ignored, so only
+      // the arguments that are used are checked.
       if (Object.values(a).some(isElidedPlaceholder))
         throw new Error(
-          "An argument is a context placeholder, not file text. Read the file and send the actual text; nothing was written.",
+          `An argument is a context placeholder ("[elided from context: …]"), not file text; it only marks where older tool-call text was removed. Read the file with read_file and send its actual text. Nothing was written.`,
         );
-      return applyFileEdit(client, s, a, signal, c.id, changedFiles, forceOnce);
+      const result = await applyFileEdit(
+        client,
+        s,
+        a,
+        signal,
+        c.id,
+        changedFiles,
+        forceOnce,
+      );
+      if (!legacyWrite) return result;
+      return typeof result === "string"
+        ? result + LEGACY_WRITE_NOTE
+        : { ...result, text: result.text + LEGACY_WRITE_NOTE };
     }
     if (name === "run_command") {
       await rejectCommandLine(a.executable, a.args);
@@ -2607,6 +2682,7 @@ export function createAgent(
       checkpointTurns: {},
       unrestorableTurn: UNTRACKED_TURN,
       failedToolCalls: new Set(),
+      fileViews: new Map(),
       instructions: [],
       mask: NO_MASK,
       images: new WeakMap(),
@@ -2691,6 +2767,16 @@ export function createAgent(
           .array(z.string().max(1000))
           .max(SESSION_MESSAGE_LIMIT)
           .default([]),
+        // Only lets write_file skip a re-read; an unreadable map is dropped
+        // rather than refusing the session.
+        fileViews: z
+          .record(
+            z.string().regex(/^[a-f0-9]{64}$/),
+            z.string().regex(/^[a-f0-9]{64}$/),
+          )
+          .refine((views) => Object.keys(views).length <= FILE_VIEW_LIMIT)
+          .catch({})
+          .default({}),
         root: z.string(),
         url: z.string(),
         header: z.string().default("Authorization"),
@@ -2815,6 +2901,7 @@ export function createAgent(
       ),
       unrestorableTurn: saved.unrestorableTurn,
       failedToolCalls: new Set(saved.failedToolCalls),
+      fileViews: new Map(Object.entries(saved.fileViews)),
       instructions: [],
       messages: restoreHistory(saved.messages),
       compaction: saved.compaction,
@@ -3717,11 +3804,14 @@ export function createAgent(
             if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
             throw e;
           });
+          // The user named the file; this read is what the export replaces.
+          if (before !== null)
+            recordFileView(s.fileViews, viewKey(s, path), before);
           await manualTool(
             client,
             s,
             "write_file",
-            { path, before, after: output },
+            { path, content: output },
             signal,
             prompt,
           );

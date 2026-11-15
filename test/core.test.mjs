@@ -316,11 +316,8 @@ test("ACP coding loop approves before edit, correlates results, persists and doe
             role: "assistant",
             content: null,
             tool_calls: [
-              call("write_file", {
-                path: "a.txt",
-                before: "new",
-                after: "approved",
-              }),
+              call("read_file", { path: "a.txt" }, "read-1"),
+              call("write_file", { path: "a.txt", content: "approved" }),
             ],
           }
         : { role: "assistant", content: "Done" },
@@ -914,11 +911,9 @@ test("client filesystem preserves unsaved content and refuses stale approval", a
             role: "assistant",
             content: null,
             tool_calls: [
-              call("write_file", {
-                path: "a.txt",
-                before: "unsaved",
-                after: "replacement",
-              }),
+              // Reads the unsaved editor text, so the write is not refused as unseen.
+              call("read_file", { path: "a.txt" }, "read-1"),
+              call("write_file", { path: "a.txt", content: "replacement" }),
             ],
           }
         : { role: "assistant", content: "done" },

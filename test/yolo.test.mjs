@@ -171,7 +171,8 @@ test("YOLO selector defers consent until a workspace prompt, then skips arbitrar
     assert.equal(requests.length, 0);
     assert.equal(c.state().sandbox, "workspace");
     await invoke(c, [
-      call("write_file", { path: "a.txt", before: "old", after: "new" }),
+      call("read_file", { path: "a.txt" }),
+      call("write_file", { path: "a.txt", content: "new" }),
       run(
         `require('node:fs').writeFileSync(${JSON.stringify(outside)}, 'explicit full-access fixture')`,
       ),
@@ -259,9 +260,7 @@ test("Stop during YOLO confirmation ignores late approval and a replacement stay
     assert.equal(c.state().permissions.currentMode, "scoped");
     assert.equal(c.state().sandbox, "workspace");
     assert.equal(requests.length, 0);
-    await invoke(c, [
-      call("write_file", { path: "a.txt", before: null, after: "new" }),
-    ]);
+    await invoke(c, [call("write_file", { path: "a.txt", content: "new" })]);
     assert(c.approvals.some((p) => p.toolCall.title.startsWith("Write ")));
   } finally {
     release?.("deny");
@@ -487,7 +486,8 @@ test("administrator alwaysAsk still prompts for edits, undo and arbitrary comman
     await writeFile(join(c.cwd, "a.txt"), "old");
     await enabled(c);
     await invoke(c, [
-      call("write_file", { path: "a.txt", before: "old", after: "new" }),
+      call("read_file", { path: "a.txt" }),
+      call("write_file", { path: "a.txt", content: "new" }),
       run("console.log('fixture')"),
     ]);
     await c.prompt("/undo");
@@ -506,21 +506,22 @@ test("YOLO retains schema validation, stale-file checks, path boundaries and Pla
   try {
     await writeFile(join(c.cwd, "a.txt"), "old");
     await enabled(c);
+    await invoke(c, [call("read_file", { path: "a.txt" })]);
+    // Changed after the agent's read: the write is refused even in YOLO.
+    await writeFile(join(c.cwd, "a.txt"), "user edit");
     await invoke(c, [
-      call("write_file", { path: "a.txt", before: "wrong", after: "bad" }),
-      call(
-        "write_file",
-        { path: "../escape.txt", before: null, after: "bad" },
-        "escape",
-      ),
+      call("write_file", { path: "a.txt", content: "bad" }),
+      call("write_file", { path: "../escape.txt", content: "bad" }, "escape"),
       call("run_command", { executable: false }, "malformed"),
     ]);
-    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "old");
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "user edit");
     assert(
       c
         .state()
         .messages.some(
-          (m) => m.role === "tool" && /Stale edit/.test(m.content),
+          (m) =>
+            m.role === "tool" &&
+            /changed since you last read or wrote it/.test(m.content),
         ),
     );
     await c.set("workflow", "plan");
@@ -730,18 +731,14 @@ test("automatic project checks use confirmed YOLO but plain full access still re
   const c = await client({ cwd });
   try {
     await c.set("sandbox", "full_access");
-    await invoke(c, [
-      call("write_file", { path: "a.txt", before: null, after: "first" }),
-    ]);
+    await invoke(c, [call("write_file", { path: "a.txt", content: "first" })]);
     await assert.rejects(access(checked));
     assert(
       c.updates.some((u) => /Select an OS sandbox/.test(JSON.stringify(u))),
     );
     await c.set("permissions", "yolo");
     const before = c.approvals.length;
-    await invoke(c, [
-      call("write_file", { path: "a.txt", before: "first", after: "second" }),
-    ]);
+    await invoke(c, [call("write_file", { path: "a.txt", content: "second" })]);
     assert.equal(await readFile(checked, "utf8"), "checked");
     assert.equal(c.approvals.length, before + 1);
   } finally {
