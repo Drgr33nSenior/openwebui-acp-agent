@@ -451,3 +451,60 @@ test("both editing tools enforce newly discovered and changed-during-approval in
       }
     }
 });
+
+test("write_file refuses existing files over 8 KB before approval and still writes new and small files", async () => {
+  const c = await client();
+  try {
+    const big = "start" + "x".repeat(8188);
+    await writeFile(join(c.cwd, "big.txt"), big);
+    await writeFile(join(c.cwd, "edge.txt"), "y".repeat(8192));
+    pending = [
+      call(
+        "write_file",
+        { path: "big.txt", before: big, after: "short" },
+        "w1",
+      ),
+      call(
+        "write_file",
+        { path: "new.txt", before: null, after: "fresh" },
+        "w2",
+      ),
+      call(
+        "write_file",
+        { path: "a.txt", before: "head\r\nold\r\ntail\r\n", after: "small" },
+        "w3",
+      ),
+      call(
+        "write_file",
+        { path: "edge.txt", before: "y".repeat(8192), after: "ok" },
+        "w4",
+      ),
+      call(
+        "edit_file",
+        { path: "big.txt", old_string: "start", new_string: "begin" },
+        "e1",
+      ),
+    ];
+    await c.prompt();
+    const [refused] = results();
+    assert.match(
+      refused,
+      /write_file replaces whole files; this file is 8 KB.*cut off by the output limit\. Use edit_file for targeted changes.*Nothing was written/,
+    );
+    assert.equal(await readFile(join(c.cwd, "new.txt"), "utf8"), "fresh");
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "small");
+    assert.equal(await readFile(join(c.cwd, "edge.txt"), "utf8"), "ok");
+    assert.equal(
+      await readFile(join(c.cwd, "big.txt"), "utf8"),
+      "begin" + "x".repeat(8188),
+    );
+    // Three write_file approvals (new, small, edge) plus one edit_file; none for the refusal.
+    assert.equal(
+      c.approvals.filter((p) => p.toolCall.kind === "edit").length,
+      4,
+    );
+    assert.equal(c.state().checkpoints.length, 4);
+  } finally {
+    await c.close();
+  }
+});

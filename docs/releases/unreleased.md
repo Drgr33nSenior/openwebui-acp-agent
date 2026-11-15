@@ -88,6 +88,10 @@ No changes after [0.6.0](0.6.0.md).
   negation lists one again), returns at most 500 entries or 16 KB with a count of
   the rest, and accepts a `path` to list a subdirectory. `search_text` still
   searches every file.
+- `write_file` refuses to rewrite an existing file larger than 8 KB before any
+  approval, telling the model to use `edit_file`. Nothing is written. New files
+  and files up to 8 KB are unaffected. This avoids a whole-file rewrite being
+  cut off by the output limit mid tool call.
 
 See [verification](../verification.md), [session modes](../sessions.md#session-modes),
 [ACP v2 readiness](../design.md#acp-v2-readiness) and the

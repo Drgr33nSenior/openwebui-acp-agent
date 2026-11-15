@@ -1,3 +1,15 @@
+// An existing file above this size is changed with edit_file. write_file sends
+// the whole file twice (before and after), so a rewrite at the limit is about
+// 16 KB, roughly 4-5k tokens: well inside the default 12,288-token reply even
+// with reasoning. Larger rewrites risk a cut-off tool call that never runs.
+export const WRITE_FILE_MAX_EXISTING_BYTES = 8192;
+
+export function largeRewriteRefusal(before: string): string | undefined {
+  const bytes = Buffer.byteLength(before);
+  if (bytes <= WRITE_FILE_MAX_EXISTING_BYTES) return undefined;
+  return `write_file replaces whole files; this file is ${Math.round(bytes / 1024)} KB, so a full rewrite risks being cut off by the output limit. Use edit_file for targeted changes (several small calls are fine). write_file is for new files and small files (up to ${WRITE_FILE_MAX_EXISTING_BYTES / 1024} KB). Nothing was written.`;
+}
+
 // Literal replacement only: no regex, newline normalization or fuzzy matching.
 export function replaceText(
   current: string,
