@@ -282,6 +282,13 @@ AGENTS.md lookup stays within the root and is refreshed before edits. No project
 file loads executable configuration, credentials or trust policy.
 
 Secrets use the OS store or explicitly supplied process environment credentials.
+The verified macOS T3 Code Electron bridge descriptor uses a direct loopback
+HTTP MCP connection, with the same supplied authorization header. It is mapped
+only for ACP-supplied definitions; workspace and connection approval precede
+access, administrator rules cover both definitions, and every remote tool keeps
+its existing approvals. The desktop process never runs unsandboxed. See
+[T3 compatibility](t3.md) for the inspected descriptor and version evidence.
+
 Private state uses bounded, validated 0600 files in 0700 directories. Trust/grant
 writes re-read under a lock and atomically replace files without losing unrelated
 records. Malformed/symlinked stores fail closed. Native Windows persistence is

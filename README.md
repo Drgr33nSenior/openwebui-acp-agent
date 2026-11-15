@@ -48,6 +48,7 @@ JetBrains registration has this form; preserve your other entries:
 
 `npm root --global` shows the global `node_modules` directory. This release is distributed through [GitHub Releases](https://github.com/OpenMettle/openmettle-acp/releases/tag/v0.6.0); no npm account is needed.
 See the [0.6.0 release notes](docs/releases/0.6.0.md) for changes since 0.5.0.
+For T3 Code desktop setup and the tested scope, see [T3 compatibility](docs/t3.md).
 The [ACP registry manifest](registry/agent.json) is a proposal for future catalog
 distribution. Its npm target is not published, and it is not an installable
 catalog entry for this release. This project does not ship a JetBrains
