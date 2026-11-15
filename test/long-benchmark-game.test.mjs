@@ -505,6 +505,12 @@ test(
       reason: "preconditions not met",
     });
     assert.equal(report.unpromptedPlaytest.observed, null);
+    // Report the actual isolation failure before checking dependent preconditions.
+    assert.equal(
+      report.isolation.established,
+      true,
+      report.isolation.findings.join("; "),
+    );
     assert.deepEqual(
       report.preconditions.map((p) => p.split(" ")[0]),
       [
@@ -514,11 +520,6 @@ test(
       ],
     );
     // The probes ran through the real agent and sandbox on this platform.
-    assert.equal(
-      report.isolation.established,
-      true,
-      report.isolation.findings.join("; "),
-    );
     for (const [id, r] of Object.entries(report.isolation.results))
       assert.equal(r.ok, r.kind === "control", id);
     const text = await readFile(
