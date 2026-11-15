@@ -51,6 +51,128 @@ It needs no model and writes only to a temporary directory. Run it with the
 pinned Node release, once per build to compare:
 `node test/manual-context-benchmark.mjs CHECKOUT`.
 
+## Long-session benchmark
+
+The long-session benchmark gives a built agent a synthetic Python project and
+records how the session went. It uses a real model, so it is excluded from
+ordinary tests and runs only when started explicitly.
+
+| File                                     | Purpose                                                                    |
+| ---------------------------------------- | -------------------------------------------------------------------------- |
+| `test/manual-long-benchmark-fixture.mjs` | Deterministic project: 14 modules, 28 seeded bugs, 126 unittest tests      |
+| `test/manual-long-benchmark.mjs`         | Runner: one ACP session against the agent built in a checkout              |
+| `test/manual-long-benchmark-wait.mjs`    | Wrapper for a shared server: overnight window and idle check, then runner  |
+| `test/manual-long-benchmark-summary.mjs` | Markdown table of runs, with a mean row per build                          |
+| `test/long-benchmark.test.mjs`           | Offline self-test, part of `npm test`; uses a scripted fake Open WebUI     |
+
+### Offline self-test
+
+`node --test test/long-benchmark.test.mjs` needs a built checkout and, for the
+fixture checks, `python3`. It checks that the fixture is deterministic, that
+its buggy version fails exactly the 28 seeded tests and that its fixed version
+passes all 126. It also runs the runner against a loopback fake model that
+plays a fixed sequence of tool calls, and checks the report, the summary,
+wrapper settings validation, metrics parsing and the start rules. It contacts
+no model or remote host. It uses a synthetic key and temporary state.
+
+### Live run
+
+The runner copies only non-secret fields (`url`, `model`, `header` and the
+timeouts) from the agent's `config.json` into fresh scratch state and sets 100
+rounds per prompt. The child agent authenticates normally: through the OS
+credential store, or through `OPENWEBUI_API_KEY` if that variable is already
+set. The runner never reads or copies `auth-state.json`. It approves workspace
+activation, edits and commands inside the workspace sandbox, and denies anything
+else. When a turn ends at the tool-call limit, it sends "Continue with the
+remaining work." up to eight times. When an edit is blocked by the checkpoint
+budget, it sends `/checkpoints clear` first. The workspace and state stay in a
+scratch directory, which the runner prints. Results go to
+`$LONG_BENCHMARK_RESULTS/LABEL`; a label that already has a report is refused.
+
+On a shared inference server, start runs through the wrapper. Every site
+setting comes from the environment and has no default:
+
+| Variable                      | Meaning                                                                 |
+| ----------------------------- | ----------------------------------------------------------------------- |
+| `LONG_BENCHMARK_SSH`          | ssh destination (`user@host` or a host alias) that can run `kubectl`    |
+| `LONG_BENCHMARK_NAMESPACE`    | Kubernetes namespace of the SGLang service                              |
+| `LONG_BENCHMARK_SERVICE`      | SGLang service name                                                     |
+| `LONG_BENCHMARK_METRICS_PORT` | SGLang port that serves `/metrics`                                      |
+| `LONG_BENCHMARK_RESULTS`      | Absolute results directory, outside the checkout                        |
+| `LONG_BENCHMARK_NOT_BEFORE`   | Optional. Earliest start, ISO time with `Z` or an offset                |
+| `LONG_BENCHMARK_IDLE_SECONDS` | Optional. Quiet period before the start; default 300, minimum 60        |
+
+```sh
+LONG_BENCHMARK_SSH=... LONG_BENCHMARK_NAMESPACE=... LONG_BENCHMARK_SERVICE=... \
+LONG_BENCHMARK_METRICS_PORT=... LONG_BENCHMARK_RESULTS=/absolute/results \
+LONG_BENCHMARK_NOT_BEFORE=2026-11-16T20:00:00Z \
+  node test/manual-long-benchmark-wait.mjs new-1 /path/to/agent-checkout 30
+```
+
+Over ssh the wrapper only runs `kubectl get svc` and reads `/metrics`. It starts
+the runner only when all of the following hold:
+
+- the local time is between 20:00 and 07:00, and the run can end, with its
+  timeout and a five-minute margin, before 07:00;
+- the not-before time, if set, has passed (the wrapper waits for it);
+- SGLang has reported zero running and zero queued requests in every 30-second
+  sample for the whole quiet period.
+
+A sample that cannot be read or lacks either request gauge is treated as busy,
+never as idle, and restarts the quiet period. If the window closes first, the
+wrapper exits with status 3, so a loop over labels can stop:
+
+```sh
+for label in base-1 new-1 base-2 new-2; do
+  case $label in base-*) dir=/path/to/base ;; *) dir=/path/to/new ;; esac
+  node test/manual-long-benchmark-wait.mjs "$label" "$dir" 30 || [ $? -ne 3 ] || break
+done
+```
+
+During the run the wrapper samples the server every 15 seconds
+(`running-samples.txt`) and records SGLang counter changes
+(`sglang-delta.json`). It writes `wrapper.json` with the runner's exit status
+and whether other load was seen: more than one running request or any queued
+request.
+
+### Report and summary
+
+`report.json` records, per run:
+
+- **Hidden checks**: `null` (not applicable) for this task, whose tests are
+  visible to the agent. After the session the runner runs the suite itself
+  (`finalSuite`) and checks that the data tables and tests are unchanged.
+- **Rounds**: coding requests minus single recoveries (`logicalRounds`), plus
+  summary requests and turns.
+- **Failed tool calls**: total, by tool (`toolFailuresByTool`), by tool and
+  failure (`toolFailures`, with command exits grouped by exit code), non-zero
+  command exits and checkpoint blocks.
+- **Tokens**: prompt, completion and reasoning tokens as the server reported
+  them, read from a copy of each response, with the number of requests that
+  reported each count. Nothing is estimated.
+- **Identity**: model ID, rounds, request timeouts, agent commit and version.
+  The backend address is not recorded.
+- **Wall time** (`elapsedMs`), peak and latest context usage, compactions and
+  mask batches.
+- **`view_image`**: calls and failed calls.
+- **Unprompted play-test**: `null` (not applicable) for this task.
+- Reads, repeat reads, edits, test runs and whether the full suite ran after
+  the last edit.
+
+```sh
+node test/manual-long-benchmark-summary.mjs /absolute/results/base-1 /absolute/results/new-1
+```
+
+The summary shows `n/a` for values that do not apply to the task and `unknown`
+for values the run did not record, such as token counts some requests did not
+report or metrics from a run without the wrapper. A token sum with partial
+coverage is shown as a lower bound. Means use only known values and state how
+many runs they cover. Reports from earlier versions of the runner can be
+summarised; their new fields show as `unknown`.
+
+The interactive game task with hidden acceptance checks is not part of this
+kit yet. It depends on the shared acceptance contract.
+
 ## YOLO permissions
 
 `test/yolo.test.mjs` checks one-time confirmation, rejected/invalid/late decisions,
