@@ -19,9 +19,13 @@ export type JobInfo = {
   outputChars: number;
 };
 export type JobPoll = JobInfo & { output: string; nextOffset: number };
+// onProcess registers the started process (a new process-group leader) while
+// the job runs. Only unsandboxed runners report one: their listeners are
+// reachable on host loopback; a sandboxed process cannot bind host ports.
 export type JobRunner = (
   signal: AbortSignal,
   onOutput: OutputCallback,
+  onProcess: (pid: number) => void,
 ) => Promise<string>;
 type Options = {
   timeoutMs?: number;
@@ -33,6 +37,7 @@ type Options = {
 };
 type Job = {
   info: JobInfo;
+  pid?: number;
   output: string;
   reported: boolean;
   controller: AbortController;
@@ -79,6 +84,14 @@ export class Jobs {
 
   get hasRunning() {
     return [...this.jobs.values()].some((j) => j.info.state === "running");
+  }
+
+  // Process-group leaders of running jobs that reported one. Used only to
+  // recognize this session's own loopback listeners; never persisted.
+  processRoots(): number[] {
+    return [...this.jobs.values()].flatMap((j) =>
+      j.info.state === "running" && j.pid !== undefined ? [j.pid] : [],
+    );
   }
 
   list(): JobInfo[] {
@@ -190,7 +203,10 @@ export class Jobs {
     job.done = Promise.resolve()
       .then(async () => {
         controller.signal.throwIfAborted();
-        const raw = await run(controller.signal, output);
+        const raw = await run(controller.signal, output, (pid) => {
+          if (job.info.state === "running" && Number.isSafeInteger(pid))
+            job.pid = pid;
+        });
         if (raw.length > OUTPUT_BYTES * 8)
           throw new Error("Job result exceeds limits");
         const result = resultSchema.parse(JSON.parse(raw));
@@ -218,6 +234,7 @@ export class Jobs {
         job.info.outputChars = job.output.length;
       })
       .finally(async () => {
+        job.pid = undefined;
         clearTimeout(timer);
         clearTimeout(progress);
         options.signal?.removeEventListener("abort", abort);

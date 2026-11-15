@@ -114,6 +114,8 @@ export async function command(
   signal: AbortSignal,
   limits = { timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS, outputBytes: 100000 },
   onOutput?: OutputCallback,
+  // Called with the child's PID, which leads its own process group on POSIX.
+  onSpawn?: (pid: number) => void,
 ) {
   signal.throwIfAborted();
   validateCommandTimeout(limits.timeoutMs);
@@ -125,6 +127,7 @@ export async function command(
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
+    if (child.pid) onSpawn?.(child.pid);
     let failed = false;
     const stop = () => {
       failed = true;

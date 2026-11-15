@@ -293,6 +293,9 @@ the compaction summary and pinned requests are never trimmed, and the latest
 three turns only when they alone exceed the limit. Forks exclude live grants,
 processes and checkpoints; exports require an approved workspace write.
 Background jobs belong to one live session and stop with cancellation/revocation.
+A running unsandboxed job's process group is held in memory only to recognize
+its loopback listeners for sandbox network approval; see
+[local development servers](sandbox.md#local-development-servers).
 Job progress updates are coalesced to about one per second and carry a bounded
 output tail. Finished jobs are reported to the model once, as assistant-role
 runtime notes, so compaction keeps the real user request pinned.

@@ -61,7 +61,17 @@ import {
   type ImageRecord,
   type LiveImages,
 } from "./images.js";
-import { mcpSecrets, ideFileProblemsArguments } from "./ide-mcp.js";
+import {
+  mcpSecrets,
+  ideFileProblemsArguments,
+  ideMcpConnection,
+} from "./ide-mcp.js";
+import {
+  controlPorts,
+  excludedLoopbackPort,
+  loopbackAddresses,
+  ownsLoopbackListener,
+} from "./loopback.js";
 import {
   verificationCommands,
   fileProblemsResult,
@@ -1060,6 +1070,12 @@ export function createAgent(
       locations?: { path: string; line?: number }[];
     },
     forceOnce = false,
+    // Loopback network shortcuts: `owned` approves without a prompt when the
+    // destination is this session's own listener; `anyPort` is an extra
+    // session-only option covering other non-excluded loopback ports. Both
+    // follow the same rules as a reused grant: Ask each time, administrator
+    // alwaysAsk and approval advice disable them.
+    loopback?: { owned: boolean; anyPort: Grant },
   ) => {
     signal.throwIfAborted();
     await checkPolicy(s);
@@ -1101,10 +1117,14 @@ export function createAgent(
       !administratorAsks &&
       s.reviewer === "off";
     const reusableGrant = mode === "ask" || forceOnce ? undefined : toolGrant;
+    const loopbackShortcut = reusableGrant ? loopback : undefined;
     const reused =
       reusableGrant &&
       policy &&
       (s.permissions.has(reusableGrant, policy) ||
+        loopbackShortcut?.owned ||
+        (loopbackShortcut &&
+          s.permissions.has(loopbackShortcut.anyPort, policy)) ||
         ((mode === "edits" || mode === "development") &&
           reusableGrant.kind === "edit") ||
         (mode === "development" && reusableGrant.kind === "command"));
@@ -1187,6 +1207,15 @@ export function createAgent(
                             name: `Allow for this session: ${reusableGrant.label}`,
                             kind: "allow_always" as const,
                           },
+                          ...(loopbackShortcut
+                            ? [
+                                {
+                                  optionId: "session-loopback",
+                                  name: "Allow localhost (any port) for this session",
+                                  kind: "allow_always" as const,
+                                },
+                              ]
+                            : []),
                           {
                             optionId: "remember",
                             name: `Remember for this workspace and backend: ${reusableGrant.label}`,
@@ -1208,7 +1237,8 @@ export function createAgent(
     if (
       chosen !== "once" &&
       !(workspace && chosen === "remember") &&
-      !(reusableGrant && (chosen === "session" || chosen === "remember"))
+      !(reusableGrant && (chosen === "session" || chosen === "remember")) &&
+      !(loopbackShortcut && chosen === "session-loopback")
     ) {
       if (!operation)
         await update(client, s, {
@@ -1232,6 +1262,13 @@ export function createAgent(
         await s.permissions.remember(
           reusableGrant,
           chosen,
+          policy!.epoch,
+          signal,
+        );
+      if (loopbackShortcut && chosen === "session-loopback")
+        await s.permissions.remember(
+          loopbackShortcut.anyPort,
+          "session",
           policy!.epoch,
           signal,
         );
@@ -1346,6 +1383,46 @@ export function createAgent(
       throw error;
     }
   };
+  // Loopback destinations only (literal loopback IPs or "localhost" resolving
+  // to loopback), outside the reviewed service ports and the agent's own local
+  // control channels, and only when administrator rules permit the shortcut.
+  const loopbackShortcut = async (
+    s: Session,
+    request: NetworkRequest,
+    sandbox: SandboxMode,
+    signal: AbortSignal,
+  ) => {
+    if (s.administrator.rules.allowLoopbackShortcuts === false) return;
+    const targets = await loopbackAddresses(request.host);
+    if (!targets) return;
+    const control = controlPorts([
+      s.config.url,
+      ...s.servers.flatMap((server) => {
+        try {
+          const connection = ideMcpConnection(server);
+          return "url" in connection ? [connection.url] : [];
+        } catch {
+          return [];
+        }
+      }),
+    ]);
+    if (excludedLoopbackPort(request.port, control)) return;
+    const previewPort = s.preview.port();
+    return {
+      owned: await ownsLoopbackListener({
+        roots: s.jobs.processRoots(),
+        pids: previewPort === request.port ? [process.pid] : [],
+        targets,
+        port: request.port,
+        signal,
+      }),
+      anyPort: grant(
+        "network",
+        { loopback: "any-non-excluded-port", sandbox },
+        "network localhost (any port except reserved service ports)",
+      ),
+    };
+  };
   const networkApproval =
     (client: AgentContext, s: Session, turnSignal: AbortSignal) =>
     async (request: NetworkRequest, processSignal: AbortSignal) => {
@@ -1353,6 +1430,8 @@ export function createAgent(
       try {
         await checkPolicy(s);
         enforceNetwork(s.administrator, request.host, request.port);
+        const sandbox = await sandboxMode(s);
+        const loopback = await loopbackShortcut(s, request, sandbox, signal);
         const check = await approve(
           client,
           s,
@@ -1362,9 +1441,12 @@ export function createAgent(
           [],
           grant(
             "network",
-            { ...request, sandbox: await sandboxMode(s) },
+            { ...request, sandbox },
             `network ${request.host}:${request.port}`,
           ),
+          undefined,
+          false,
+          loopback,
         );
         await check();
         return true;
@@ -2253,6 +2335,7 @@ export function createAgent(
       const run = async (
         requestedSignal: AbortSignal,
         onOutput: (snapshot: string) => void | Promise<void>,
+        onProcess?: (pid: number) => void,
       ) => {
         const runAbort = new AbortController();
         const runSignal = AbortSignal.any([requestedSignal, runAbort.signal]);
@@ -2280,6 +2363,7 @@ export function createAgent(
                 runSignal,
                 limits,
                 onOutput,
+                onProcess,
               )
             : await runSandboxed(
                 a.executable,
@@ -2313,9 +2397,11 @@ export function createAgent(
       };
       if (a.background) {
         const job = s.jobs.start(
-          (jobSignal, onOutput) =>
-            run(jobSignal, (value) =>
-              onOutput(s.backend.redactSnapshot(value)),
+          (jobSignal, onOutput, onProcess) =>
+            run(
+              jobSignal,
+              (value) => onOutput(s.backend.redactSnapshot(value)),
+              onProcess,
             ),
           {
             timeoutMs: a.timeout_ms,

@@ -1376,3 +1376,221 @@ test("remembering a command does not approve a longer execution timeout", async 
     await c.close();
   }
 });
+
+const isNetwork = (p) =>
+  p.toolCall.title.startsWith("Allow sandbox network connection");
+const optionIds = (p) => p.options.map((o) => o.optionId);
+// One sandboxed command per call; each connection asks the agent in order.
+async function loopbackClient(choose = () => "deny", dependencies = {}) {
+  let targets = [];
+  const results = [];
+  const cwd = await workspace();
+  const c = await client(
+    cwd,
+    (p) => (isNetwork(p) ? choose(p) : "once"),
+    [],
+    undefined,
+    0,
+    async (run, signal) => {
+      for (const target of targets)
+        results.push(await run.network(target, signal));
+    },
+    dependencies,
+  );
+  return {
+    c,
+    cwd,
+    networkPrompts: () => c.approvals.filter(isNetwork),
+    connect: async (...next) => {
+      targets = next;
+      results.length = 0;
+      await invoke(c, [call("run_command", { executable: "ls", args: [] })]);
+      return [...results];
+    },
+  };
+}
+// An unsandboxed background job (explicit escalation) that serves loopback.
+async function startOwnServer({ c, cwd }) {
+  await invoke(c, [
+    call("run_command", {
+      executable: process.execPath,
+      args: [
+        "-e",
+        "const s=require('node:net').createServer(c=>c.end()).listen(0,'127.0.0.1',()=>require('node:fs').writeFileSync('port.txt',String(s.address().port)));setInterval(()=>{},1000)",
+      ],
+      background: true,
+      timeout_ms: 60000,
+      sandbox_permissions: "require_escalated",
+      justification: "fixture development server",
+    }),
+  ]);
+  const end = Date.now() + 10000;
+  for (;;) {
+    const text = await readFile(join(cwd, "port.txt"), "utf8").catch(() => "");
+    if (text) return Number(text);
+    if (Date.now() > end) throw new Error("Fixture server did not start");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+const posixListeners =
+  process.platform === "darwin" || process.platform === "linux";
+
+test(
+  "a sandboxed command reaches the session's own job listener without a prompt; other local listeners still ask",
+  { skip: !posixListeners && "macOS and Linux only" },
+  async () => {
+    const t = await loopbackClient();
+    const other = createServer().listen(0, "127.0.0.1");
+    await new Promise((r) => other.once("listening", r));
+    try {
+      const port = await startOwnServer(t);
+      assert.deepEqual(
+        await t.connect(
+          { host: "127.0.0.1", port },
+          { host: "localhost", port },
+        ),
+        [true, true],
+      );
+      assert.equal(t.networkPrompts().length, 0);
+      // Not this session's process: prompt, with the localhost session option.
+      assert.deepEqual(
+        await t.connect({ host: "127.0.0.1", port: other.address().port }),
+        [false],
+      );
+      assert.equal(t.networkPrompts().length, 1);
+      assert.deepEqual(optionIds(t.networkPrompts()[0]), [
+        "once",
+        "session",
+        "session-loopback",
+        "remember",
+        "deny",
+      ]);
+      assert.equal(
+        t.networkPrompts()[0].options[2].name,
+        "Allow localhost (any port) for this session",
+      );
+      // Ask each time ignores the automatic decision.
+      await setMode(t.c, "ask");
+      assert.deepEqual(await t.connect({ host: "127.0.0.1", port }), [false]);
+      assert.equal(t.networkPrompts().length, 2);
+      assert.deepEqual(optionIds(t.networkPrompts()[1]), ["once", "deny"]);
+    } finally {
+      other.close();
+      await t.c.close();
+    }
+  },
+);
+
+test("the session localhost grant covers loopback ports but not reserved, control-channel or remote destinations", async () => {
+  const t = await loopbackClient((p) =>
+    p.toolCall.title.includes("127.0.0.1:41001") ? "session-loopback" : "deny",
+  );
+  try {
+    assert.deepEqual(await t.connect({ host: "127.0.0.1", port: 41001 }), [
+      true,
+    ]);
+    assert.deepEqual(
+      await t.connect(
+        { host: "127.0.0.1", port: 41002 },
+        { host: "localhost", port: 41003 },
+        { host: "::1", port: 41004 },
+        { host: "127.0.0.9", port: 41005 },
+      ),
+      [true, true, true, true],
+    );
+    assert.equal(t.networkPrompts().length, 1);
+    const fixturePort = server.address().port;
+    assert.deepEqual(
+      await t.connect(
+        { host: "127.0.0.1", port: 5432 },
+        { host: "localhost", port: 63342 },
+        { host: "127.0.0.1", port: 2375 },
+        { host: "127.0.0.1", port: fixturePort },
+        { host: "example.test", port: 41006 },
+        { host: "127.1", port: 41007 },
+        { host: "app.localhost", port: 41008 },
+      ),
+      [false, false, false, false, false, false, false],
+    );
+    const later = t.networkPrompts().slice(1);
+    assert.equal(later.length, 7);
+    for (const p of later)
+      assert.deepEqual(optionIds(p), ["once", "session", "remember", "deny"]);
+    assert.equal(
+      (await status(t.c)).toolGrants.session.filter((g) =>
+        g.label.startsWith("network localhost (any port"),
+      ).length,
+      1,
+    );
+    // Revocation clears it like any session grant.
+    await t.c.prompt("/permissions revoke-tools");
+    assert.deepEqual(await t.connect({ host: "127.0.0.1", port: 41002 }), [
+      false,
+    ]);
+    assert.equal(t.networkPrompts().length, 9);
+  } finally {
+    await t.c.close();
+  }
+});
+
+test(
+  "administrator rules override loopback shortcuts",
+  { skip: !posixListeners && "macOS and Linux only" },
+  async () => {
+    for (const [rules, expectedOptions] of [
+      [
+        { allowLoopbackShortcuts: false },
+        ["once", "session", "remember", "deny"],
+      ],
+      [{ alwaysAsk: ["network"] }, ["once", "deny"]],
+    ]) {
+      const p = snapshotPolicy({ version: 1, ...rules });
+      const t = await loopbackClient(() => "deny", {
+        loadPolicy: async () => p,
+      });
+      try {
+        const port = await startOwnServer(t);
+        assert.deepEqual(
+          await t.connect(
+            { host: "127.0.0.1", port },
+            { host: "127.0.0.1", port: 41010 },
+          ),
+          [false, false],
+          JSON.stringify(rules),
+        );
+        if (!expectedOptions) assert.equal(t.networkPrompts().length, 0);
+        else {
+          assert.equal(t.networkPrompts().length, 2);
+          for (const prompt of t.networkPrompts())
+            assert.deepEqual(optionIds(prompt), expectedOptions);
+        }
+      } finally {
+        await t.c.close();
+      }
+    }
+  },
+);
+
+test("administrator network destinations bound the session localhost grant", async () => {
+  // A destination policy also forbids unsandboxed jobs, so no own listener exists.
+  const p = snapshotPolicy({
+    version: 1,
+    networkDestinations: [{ host: "127.0.0.1", port: 41020 }],
+  });
+  const t = await loopbackClient(() => "session-loopback", {
+    loadPolicy: async () => p,
+  });
+  try {
+    assert.deepEqual(
+      await t.connect(
+        { host: "127.0.0.1", port: 41020 },
+        { host: "127.0.0.1", port: 41021 },
+        { host: "localhost", port: 41020 },
+      ),
+      [true, false, false],
+    );
+    assert.equal(t.networkPrompts().length, 1);
+  } finally {
+    await t.c.close();
+  }
+});

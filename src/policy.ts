@@ -46,6 +46,7 @@ export const policySchema = z
     allowStdioMcp: z.boolean().optional(),
     allowServerTools: z.boolean().optional(),
     allowPreviews: z.boolean().optional(),
+    allowLoopbackShortcuts: z.boolean().optional(),
     allowScopeExpansion: z.boolean().optional(),
     networkDestinations: z
       .array(

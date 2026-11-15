@@ -111,6 +111,16 @@ No changes after [0.6.0](0.6.0.md).
   asks for a visual check when an interactive-app file changed after the last
   viewed screenshot. See the
   [pygame recipe](../runtime-verification.md#play-testing-interactive-apps).
+- Stop repeated "Allow sandbox network connection" prompts for local servers.
+  A sandboxed connection to a loopback port served by this session's own
+  unsandboxed background job (or its static preview) is approved without a
+  prompt, and the network prompt for other loopback destinations adds **Allow
+  localhost (any port) for this session**. Reserved service ports (JetBrains
+  IDE, Docker API, debuggers, common databases, local model servers) and the
+  agent's own local Open WebUI/MCP ports still prompt each time. Remote
+  destinations, YOLO and administrator rules are unchanged; the new
+  `allowLoopbackShortcuts: false` policy field disables both shortcuts. See
+  [local development servers](../sandbox.md#local-development-servers).
 - `write_file` takes `{path, content}`: the new file text only. The model no
   longer retypes the current file as `before`, which failed on large files with
   stale-edit and invalid-argument errors. The agent records a hash of each file

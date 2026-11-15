@@ -96,6 +96,11 @@ export class Preview {
   info() {
     return this.live?.info;
   }
+  // The active listener's loopback port, once it is serving.
+  port(): number | undefined {
+    const address = this.live?.info ? this.live.server?.address() : undefined;
+    return address && typeof address === "object" ? address.port : undefined;
+  }
 
   async start(
     root: string,

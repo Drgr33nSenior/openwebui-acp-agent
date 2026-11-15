@@ -515,6 +515,29 @@ acceptance was repeated for this candidate. The existing browser container was
 not changed; the CI browser job tests its own disposable container. Windows CI
 checks unsupported-platform behavior, not native Windows support.
 
+## Loopback network shortcuts
+
+`test/loopback.test.mjs` checks the loopback address rules (literal addresses,
+`localhost` with a fake resolver, refused aliases such as `127.1` and
+`app.localhost`), reserved and control-channel ports, and the macOS `ps`/`lsof`
+and Linux `/proc` parsers for both byte orders. It also starts a real listener
+in a grandchild of a process-group leader and checks ownership, a non-owned
+listener, another loopback address, a stopped job, cancellation and Windows.
+`test/permissions.test.mjs` runs the ACP flow: an unsandboxed background job's
+server reached without a prompt, a non-owned listener and Ask each time still
+prompting, the session localhost option covering other loopback ports but not
+reserved, Open WebUI, remote or alias destinations, revocation, and the
+administrator controls `allowLoopbackShortcuts`, `alwaysAsk` and
+`networkDestinations`. YOLO runs commands without the proxy and is unchanged;
+the existing YOLO tests cover it.
+
+On macOS 27.0 with Node 26.11.1, lint, typecheck, build, Prettier and
+`npm test` passed: **532 tests, 526 passed, six Linux-only skips, zero
+failures**. `npm pack`, installation into a fresh prefix,
+`test/package-install.mjs` and both production dependency audits passed with
+zero vulnerabilities. The Linux `/proc` path ran only in CI. The JetBrains
+prompt rendering of the new option was not checked in a live IDE.
+
 ## Compatibility
 
 | Component                            | Scope                                                                                                |
