@@ -812,8 +812,24 @@ test(
         view_image: 1,
       });
       assert.equal(report.toolFailuresTotal, 4);
-      if (python)
-        assert.equal(report.toolFailures["run_command: exit code 1"], 2);
+      // Failures are grouped by tool and failure, never by command output.
+      // How the sandboxed suite run fails depends on the platform: a test
+      // failure (exit code 1) where the sandbox runs python3, or a sandbox
+      // refusal where it does not.
+      const commandKeys = Object.entries(report.toolFailures).filter(([key]) =>
+        key.startsWith("run_command: "),
+      );
+      const keys = JSON.stringify(report.toolFailures);
+      assert.equal(
+        commandKeys.reduce((n, [, count]) => n + count, 0),
+        2,
+        keys,
+      );
+      for (const [key] of commandKeys)
+        assert.doesNotMatch(key, /Ran \d+ tests|={10}|\.F\.|"output"/, keys);
+      // Linux CI runs python3 inside the sandbox: both runs fail their tests.
+      if (python && process.platform === "linux")
+        assert.deepEqual(commandKeys, [["run_command: exit code 1", 2]], keys);
       assert.deepEqual(report.viewImage, { calls: 1, failed: 1 });
       assert.deepEqual(report.tokens, {
         requests: 7,
