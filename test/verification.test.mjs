@@ -28,6 +28,7 @@ assert.equal(
 );
 const { snapshotPolicy } = await import("../dist/policy.js");
 const { changeTrust } = await import("../dist/workspace.js");
+const { fileViewKey, recordFileView } = await import("../dist/edits.js");
 const {
   verificationSchema,
   fileProblemsResult,
@@ -79,8 +80,10 @@ const tool = (name, args, id = name) => ({
   type: "function",
   function: { name, arguments: JSON.stringify(args) },
 });
-const edit = (after, before = "original", path = "a.txt", id = "edit") =>
-  tool("write_file", { path, before, after }, id);
+// These fixtures concern verification, not reads: a.txt counts as read (see
+// client()), and a later write follows the agent's own previous write.
+const edit = (after, path = "a.txt", id = "edit") =>
+  tool("write_file", { path, content: after }, id);
 const problem = (description = "Fixture syntax error", severity = "ERROR") => ({
   severity,
   description,
@@ -217,6 +220,12 @@ async function client({
     cwd,
     mcpServers: fixture ? [generic ? fixture.generic : fixture.descriptor] : [],
   });
+  // As if read_file had returned a.txt before the scripted edits.
+  recordFileView(
+    agent.sessions.get(sessionId).fileViews,
+    fileViewKey("a.txt"),
+    "original",
+  );
   return {
     cwd,
     fixture,
@@ -286,7 +295,7 @@ test("post-edit IDE errors feed a bounded fixing round with paired history and n
       case 1:
         return reply(res, "Initial edit finished.");
       case 2:
-        return reply(res, null, [edit("fixed", "broken", "a.txt", "fix")]);
+        return reply(res, null, [edit("fixed", "a.txt", "fix")]);
       default:
         return reply(res, "Corrected.");
     }
@@ -405,8 +414,8 @@ test("verification caps files, deduplicates diagnostics and bounds normalized ou
     round++ === 0
       ? reply(res, null, [
           edit("a"),
-          edit("b", null, "b.txt", "b"),
-          edit("c", null, "c.txt", "c"),
+          edit("b", "b.txt", "b"),
+          edit("c", "c.txt", "c"),
         ])
       : reply(res, "Done.");
   try {
@@ -558,7 +567,7 @@ test(
     let round = 0;
     respond = (_request, res) =>
       round++ === 0
-        ? reply(res, null, [edit("changed"), edit("b", null, "b.txt", "b")])
+        ? reply(res, null, [edit("changed"), edit("b", "b.txt", "b")])
         : reply(res, "Done.");
     let pending;
     try {
@@ -660,7 +669,7 @@ test("maxDiagnostics bounds problems across files and says how many were omitted
   let round = 0;
   respond = (_request, res) =>
     round++ === 0
-      ? reply(res, null, [edit("a"), edit("b", null, "b.txt", "b")])
+      ? reply(res, null, [edit("a"), edit("b", "b.txt", "b")])
       : reply(res, "Done.");
   try {
     assert.equal((await c.prompt()).stopReason, "end_turn");
@@ -776,7 +785,7 @@ test("failed project checks reach the model and are checked again after its repa
       case 1:
         return reply(res, "Done.");
       case 2:
-        return reply(res, null, [edit("fixed", "broken", "a.txt", "repair")]);
+        return reply(res, null, [edit("fixed", "a.txt", "repair")]);
       default:
         return reply(res, "Fixed.");
     }
@@ -921,7 +930,7 @@ test("a timed-out diagnostic with errors is not replayed or treated as current a
       case 1:
         return reply(res, "Done.");
       case 2:
-        return reply(res, null, [edit("fixed", "broken", "a.txt", "repair")]);
+        return reply(res, null, [edit("fixed", "a.txt", "repair")]);
       default:
         return reply(res, "Fixed.");
     }
@@ -1072,7 +1081,7 @@ test("malformed repair replies recover once without repeating edits or spending 
         return reply(res, "Initial edit finished.");
       case 2:
         return reply(res, null, [
-          edit("must not execute", "broken", "a.txt", "unexecuted"),
+          edit("must not execute", "a.txt", "unexecuted"),
           {
             id: "malformed",
             type: "function",
@@ -1080,7 +1089,7 @@ test("malformed repair replies recover once without repeating edits or spending 
           },
         ]);
       case 3:
-        return reply(res, null, [edit("fixed", "broken", "a.txt", "fix")]);
+        return reply(res, null, [edit("fixed", "a.txt", "fix")]);
       default:
         return reply(res, "Corrected.");
     }
@@ -1133,7 +1142,7 @@ test("verification calls share the 64-call budget and limit summaries retain unr
       default:
         return reply(res, null, [
           tool("read_file", { path: "a.txt" }, "last-read"),
-          edit("must not execute", "broken", "a.txt", "over-budget"),
+          edit("must not execute", "a.txt", "over-budget"),
         ]);
     }
   };

@@ -302,11 +302,10 @@ for (const lifetime of ["once", "session", "remember"]) {
     const c = await client(cwd, (p) => (isTool(p) ? lifetime : "once"));
     try {
       await invoke(c, [
-        call("write_file", { path: "a.txt", before: "old", after: "one" }),
+        call("read_file", { path: "a.txt" }),
+        call("write_file", { path: "a.txt", content: "one" }),
       ]);
-      await invoke(c, [
-        call("write_file", { path: "a.txt", before: "one", after: "two" }),
-      ]);
+      await invoke(c, [call("write_file", { path: "a.txt", content: "two" })]);
       const approvals = c.approvals.filter(isTool);
       assert.equal(approvals.length, lifetime === "once" ? 2 : 1);
       assert.deepEqual(
@@ -348,8 +347,9 @@ for (const lifetime of ["once", "session", "remember"]) {
     }
     const loaded = await client(cwd, () => "once", [], c.id);
     try {
+      // No read after restore: the session saved what the agent last wrote.
       await invoke(loaded, [
-        call("write_file", { path: "a.txt", before: "two", after: "three" }),
+        call("write_file", { path: "a.txt", content: "three" }),
       ]);
       assert.equal(
         loaded.approvals.filter(isTool).length,
@@ -359,7 +359,7 @@ for (const lifetime of ["once", "session", "remember"]) {
       assert(loaded.approvals.some((p) => !isTool(p)));
       await loaded.prompt("/permissions revoke-tools");
       await invoke(loaded, [
-        call("write_file", { path: "a.txt", before: "three", after: "four" }),
+        call("write_file", { path: "a.txt", content: "four" }),
       ]);
       assert.equal(
         loaded.approvals.filter(isTool).length,
@@ -412,7 +412,8 @@ test("filesystem read-only overrides automatic edits; sandbox changes do not reu
     assert.equal(c.approvals.filter(isTool).length, 2);
     await setMode(c, "edits");
     await invoke(c, [
-      call("write_file", { path: "a.txt", before: "old", after: "bad" }),
+      call("read_file", { path: "a.txt" }),
+      call("write_file", { path: "a.txt", content: "bad" }),
     ]);
     assert.equal(await readFile(join(cwd, "a.txt"), "utf8"), "old");
   } finally {
@@ -527,16 +528,13 @@ test("remembered edits still reject stale content and paths outside the workspac
     c = await client(cwd, (p) => (isTool(p) ? "remember" : "once"));
   try {
     await invoke(c, [
-      call("write_file", { path: "a.txt", before: "old", after: "one" }),
+      call("read_file", { path: "a.txt" }),
+      call("write_file", { path: "a.txt", content: "one" }),
     ]);
     await writeFile(join(cwd, "a.txt"), "user edit");
     await invoke(c, [
-      call("write_file", { path: "a.txt", before: "one", after: "bad" }),
-      call("write_file", {
-        path: "../outside.txt",
-        before: null,
-        after: "bad",
-      }),
+      call("write_file", { path: "a.txt", content: "bad" }),
+      call("write_file", { path: "../outside.txt", content: "bad" }),
     ]);
     assert.equal(await readFile(join(cwd, "a.txt"), "utf8"), "user edit");
     assert.equal(c.updates.filter((u) => u.status === "failed").length, 2);
@@ -634,7 +632,8 @@ for (const outcome of ["deny", "invalid", "cancel", "revoke"]) {
     });
     try {
       const turn = invoke(c, [
-        call("write_file", { path: "a.txt", before: "old", after: "bad" }),
+        call("read_file", { path: "a.txt" }),
+        call("write_file", { path: "a.txt", content: "bad" }),
       ]);
       if (["cancel", "revoke"].includes(outcome)) {
         await entered;
@@ -928,7 +927,8 @@ test("Development mode approves different eligible commands and edits, but still
     await invoke(c, [
       call("run_command", { executable: "gh", args: ["pr", "list"] }),
       call("run_command", { executable: "gh", args: ["issue", "list"] }),
-      call("write_file", { path: "a.txt", before: "old", after: "new" }),
+      call("read_file", { path: "a.txt" }),
+      call("write_file", { path: "a.txt", content: "new" }),
     ]);
     assert.equal(c.approvals.filter(isTool).length, 0);
     assert.equal(c.approvals.filter((p) => !isTool(p)).length, 1); // Workspace activation still required.
@@ -958,7 +958,8 @@ test("Automatic edit mode leaves commands under scoped approval", async () => {
   try {
     await setMode(c, "edits");
     await invoke(c, [
-      call("write_file", { path: "a.txt", before: "old", after: "new" }),
+      call("read_file", { path: "a.txt" }),
+      call("write_file", { path: "a.txt", content: "new" }),
       call("run_command", { executable: "gh", args: ["pr", "list"] }),
     ]);
     assert.equal(c.approvals.filter(isTool).length, 1);
@@ -974,11 +975,12 @@ test("Read-only mode blocks writes, commands and MCP startup even with remembere
     c = await client(cwd, (p) => (isTool(p) ? "remember" : "once"));
   try {
     await invoke(c, [
-      call("write_file", { path: "a.txt", before: "old", after: "new" }),
+      call("read_file", { path: "a.txt" }),
+      call("write_file", { path: "a.txt", content: "new" }),
     ]);
     await setMode(c, "read_only");
     await invoke(c, [
-      call("write_file", { path: "a.txt", before: "new", after: "bad" }),
+      call("write_file", { path: "a.txt", content: "bad" }),
       call("run_command", { executable: "ls", args: [] }),
     ]);
     assert.equal(await readFile(join(cwd, "a.txt"), "utf8"), "new");

@@ -14,6 +14,7 @@ const { createAgent } = await import("../dist/agent.js");
 const { configSchema, writeJson, readJson, SESSION_RECORD_BYTES, directory } =
   await import("../dist/config.js");
 const { Turns } = await import("../dist/turns.js");
+const { fileViewKey, recordFileView } = await import("../dist/edits.js");
 const { Jobs, jobStatusText } = await import("../dist/jobs.js");
 const {
   userTurns,
@@ -173,23 +174,17 @@ async function client({
 // Two turns, each with one approved agent edit to a.txt. `between` runs
 // after the first turn.
 async function twoEdits(c, between = () => {}) {
+  // As if read_file had returned a.txt, without adding messages to the turn.
+  recordFileView(c.state().fileViews, fileViewKey("a.txt"), "original");
   respond = (request, res) => {
     if (afterTool(request)) return reply(res, `done ${latestUser(request)}`);
     if (latestUser(request) === "first edit")
       return reply(res, null, [
-        call(
-          "write_file",
-          { path: "a.txt", before: "original", after: "one" },
-          "w1",
-        ),
+        call("write_file", { path: "a.txt", content: "one" }, "w1"),
       ]);
     if (latestUser(request) === "second edit")
       return reply(res, null, [
-        call(
-          "write_file",
-          { path: "a.txt", before: "one", after: "two" },
-          "w2",
-        ),
+        call("write_file", { path: "a.txt", content: "two" }, "w2"),
       ]);
     reply(res, "unexpected");
   };
@@ -786,11 +781,7 @@ test("rewinding an agent-created file needs a safe delete", async () => {
     afterTool(request)
       ? reply(res, "created")
       : reply(res, null, [
-          call(
-            "write_file",
-            { path: "new.txt", before: null, after: "fresh" },
-            "c1",
-          ),
+          call("write_file", { path: "new.txt", content: "fresh" }, "c1"),
         ]);
   try {
     await c.prompt("create a file");
@@ -836,11 +827,7 @@ test("full undo history drops the oldest checkpoints instead of blocking edits",
     respond = (request, res) => {
       if (afterTool(request)) return reply(res, "edited");
       reply(res, null, [
-        call(
-          "write_file",
-          { path: "a.txt", before: "two", after: "three" },
-          "w3",
-        ),
+        call("write_file", { path: "a.txt", content: "three" }, "w3"),
         call(
           "edit_file",
           { path: "b.txt", old_string: "bee", new_string: "b2" },

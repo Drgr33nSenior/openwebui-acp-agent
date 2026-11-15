@@ -81,6 +81,18 @@ export function withoutLineNumbers(text: string) {
   return lines.map((line) => line.replace(prefixed, "")).join("\n");
 }
 
+// Every line carries a read_file prefix and the numbers run consecutively:
+// read_file output sent as file text. Only used to refuse a write, never to
+// rewrite it, for the same reason as above.
+export function isNumberedCopy(text: string) {
+  if (withoutLineNumbers(text) === undefined) return false;
+  const numbers = text
+    .split("\n")
+    .filter((line, i, lines) => line || i < lines.length - 1)
+    .map((line) => Number(/^\d+/.exec(line)![0]));
+  return numbers.every((n, i) => !i || n === numbers[i - 1]! + 1);
+}
+
 export const LINE_NUMBER_HINT = `remove read_file's line-number prefixes (for example "12${LINE_MARK}") and use only the file's text`;
 
 export const SEARCH_RESULTS = 50;

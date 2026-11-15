@@ -105,7 +105,8 @@ const edit = (n) => () => {
     },
   };
 };
-// A whole-file rewrite: before is the current file, as write_file requires.
+// A whole-file rewrite in write_file's older {before, after} form, which every
+// checkout accepts (newer ones ignore before), so runs stay comparable.
 const rewrite = (n) => async (cwd) => {
   const before = await readFile(join(cwd, file(n)), "utf8");
   return {

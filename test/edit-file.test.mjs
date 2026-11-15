@@ -74,9 +74,11 @@ const results = () =>
   requests.flatMap((r) =>
     r.messages.filter((m) => m.role === "tool").map((m) => m.content),
   );
-async function client({ choose = () => "once", editor } = {}) {
-  const cwd = await realpath(await mkdtemp(join(temporary, "project-")));
-  await writeFile(join(cwd, "a.txt"), "head\r\nold\r\ntail\r\n");
+async function client({ choose = () => "once", editor, cwd, load } = {}) {
+  if (!cwd) {
+    cwd = await realpath(await mkdtemp(join(temporary, "project-")));
+    await writeFile(join(cwd, "a.txt"), "head\r\nold\r\ntail\r\n");
+  }
   const app = new ClientApp(),
     agent = createAgent(),
     approvals = [],
@@ -106,10 +108,16 @@ async function client({ choose = () => "once", editor } = {}) {
       ? { fs: { readTextFile: true, writeTextFile: true } }
       : {},
   });
-  const { sessionId } = await connection.agent.request("session/new", {
-    cwd,
-    mcpServers: [],
-  });
+  const sessionId =
+    load ??
+    (await connection.agent.request("session/new", { cwd, mcpServers: [] }))
+      .sessionId;
+  if (load)
+    await connection.agent.request("session/load", {
+      sessionId,
+      cwd,
+      mcpServers: [],
+    });
   return {
     cwd,
     approvals,
@@ -270,11 +278,9 @@ test("edit_file and write_file both refuse read-only modes and protected/outside
         const args = (path) =>
           tool === "edit_file"
             ? { path, old_string: "old", new_string: "new" }
-            : {
-                path,
-                before: mode === "paths" ? "old" : "head\r\nold\r\ntail\r\n",
-                after: "new",
-              };
+            : { path, content: "new" };
+        // A read first, so a write_file refusal is the mode's, not a missing read.
+        const read = (path) => call("read_file", { path }, "read-" + path);
         if (mode === "paths") {
           const outside = join(temporary, "outside.txt");
           await writeFile(outside, "old");
@@ -288,8 +294,8 @@ test("edit_file and write_file both refuse read-only modes and protected/outside
             "../outside.txt",
             outside,
             "escape.txt",
-          ].map((path) => call(tool, args(path)));
-        } else pending = [call(tool, args("a.txt"))];
+          ].flatMap((path) => [read(path), call(tool, args(path))]);
+        } else pending = [read("a.txt"), call(tool, args("a.txt"))];
         await c.prompt();
         assert.equal(
           c.approvals.filter((p) => p.toolCall.kind === "edit").length,
@@ -431,11 +437,14 @@ test("both editing tools enforce newly discovered and changed-during-approval in
         if (!during)
           await writeFile(join(c.cwd, "sub/AGENTS.md"), "Scoped instructions");
         pending = [
+          ...(tool === "write_file" && during
+            ? [call("read_file", { path: "sub/a.txt" }, "r1")]
+            : []),
           call(
             tool,
             tool === "edit_file"
               ? { path: "sub/a.txt", old_string: "old", new_string: "new" }
-              : { path: "sub/a.txt", before: "old", after: "new" },
+              : { path: "sub/a.txt", content: "new" },
           ),
         ];
         await c.prompt();
@@ -459,26 +468,14 @@ test("write_file refuses existing files over 8 KB before approval and still writ
     await writeFile(join(c.cwd, "big.txt"), big);
     await writeFile(join(c.cwd, "edge.txt"), "y".repeat(8192));
     pending = [
-      call(
-        "write_file",
-        { path: "big.txt", before: big, after: "short" },
-        "w1",
-      ),
-      call(
-        "write_file",
-        { path: "new.txt", before: null, after: "fresh" },
-        "w2",
-      ),
-      call(
-        "write_file",
-        { path: "a.txt", before: "head\r\nold\r\ntail\r\n", after: "small" },
-        "w3",
-      ),
-      call(
-        "write_file",
-        { path: "edge.txt", before: "y".repeat(8192), after: "ok" },
-        "w4",
-      ),
+      // Reading does not lift the size limit.
+      call("read_file", { path: "big.txt" }, "r1"),
+      call("write_file", { path: "big.txt", content: "short" }, "w1"),
+      call("write_file", { path: "new.txt", content: "fresh" }, "w2"),
+      call("read_file", { path: "a.txt" }, "r3"),
+      call("write_file", { path: "a.txt", content: "small" }, "w3"),
+      call("read_file", { path: "edge.txt" }, "r4"),
+      call("write_file", { path: "edge.txt", content: "ok" }, "w4"),
       call(
         "edit_file",
         { path: "big.txt", old_string: "start", new_string: "begin" },
@@ -486,7 +483,7 @@ test("write_file refuses existing files over 8 KB before approval and still writ
       ),
     ];
     await c.prompt();
-    const [refused] = results();
+    const refused = results().find((r) => r.startsWith("Tool failed"));
     assert.match(
       refused,
       /write_file replaces whole files; this file is 8 KB.*cut off by the output limit\. Use edit_file for targeted changes.*Nothing was written/,
@@ -506,5 +503,298 @@ test("write_file refuses existing files over 8 KB before approval and still writ
     assert.equal(c.state().checkpoints.length, 4);
   } finally {
     await c.close();
+  }
+});
+
+// write_file takes {path, content}. An existing file is replaced only when the
+// agent read it (any page) or wrote it last, and it has not changed since.
+const write = (path, content, id) =>
+  call("write_file", { path, content }, id ?? "write-" + path);
+const read = (path, id, extra = {}) =>
+  call("read_file", { path, ...extra }, id ?? "read-" + path);
+const resultFor = (c, id) =>
+  c.state().messages.findLast((m) => m.role === "tool" && m.tool_call_id === id)
+    ?.content;
+const editApprovals = (c) =>
+  c.approvals.filter((p) => p.toolCall.kind === "edit").length;
+
+test("content-only write_file creates, refuses unread or changed files before approval and replaces after a read", async () => {
+  const c = await client();
+  try {
+    await writeFile(join(c.cwd, "b.txt"), "bee\n");
+    pending = [
+      write("new.txt", "fresh\n", "create"),
+      write("a.txt", "unread", "unread"),
+      read("b.txt", "read-b"),
+      write("b.txt", "bee two\n", "replace"),
+    ];
+    await c.prompt();
+    assert.equal(await readFile(join(c.cwd, "new.txt"), "utf8"), "fresh\n");
+    assert.match(resultFor(c, "create"), /^File updated; checkpoint/);
+    assert.equal(
+      resultFor(c, "unread"),
+      "Tool failed: a.txt already exists and you have not read it in this session. Read it with read_file before replacing it, or change it with edit_file. Nothing was written.\nInspect the error and any partial effects before proposing a correction. Do not retry a denied action.",
+    );
+    assert.equal(
+      await readFile(join(c.cwd, "a.txt"), "utf8"),
+      "head\r\nold\r\ntail\r\n",
+    );
+    assert.equal(await readFile(join(c.cwd, "b.txt"), "utf8"), "bee two\n");
+    // Approvals for the creation and the replacement only.
+    assert.equal(editApprovals(c), 2);
+    assert.equal(c.state().checkpoints.length, 2);
+
+    // Changed after the agent's last write (a command, the user, another
+    // process): refused before approval; a fresh read allows it again.
+    await writeFile(join(c.cwd, "b.txt"), "user change\n");
+    pending = [
+      write("b.txt", "agent text\n", "stale"),
+      read("b.txt", "reread"),
+      write("b.txt", "agent text\n", "after-reread"),
+    ];
+    await c.prompt();
+    assert.match(
+      resultFor(c, "stale"),
+      /^Tool failed: b\.txt changed since you last read or wrote it \(in the editor, by a command or by another process\)\. Read it with read_file again before replacing it.*Nothing was written\./,
+    );
+    assert.match(resultFor(c, "after-reread"), /^File updated; checkpoint/);
+    assert.equal(await readFile(join(c.cwd, "b.txt"), "utf8"), "agent text\n");
+    assert.equal(editApprovals(c), 3);
+
+    // Undo still restores through the checkpoint written by the new form.
+    pending = [call("undo_edit", { id: "latest" })];
+    await c.prompt();
+    assert.equal(await readFile(join(c.cwd, "b.txt"), "utf8"), "user change\n");
+    // The undo changed the file after the agent's write: read it again first.
+    pending = [write("b.txt", "again\n", "after-undo")];
+    await c.prompt();
+    assert.match(resultFor(c, "after-undo"), /changed since you last read/);
+  } finally {
+    await c.close();
+  }
+});
+
+test("a page read counts as seen; a blind edit_file does not, a read-based one keeps the view current", async () => {
+  const c = await client();
+  try {
+    await writeFile(join(c.cwd, "p.txt"), "one\ntwo\nthree\n");
+    await writeFile(join(c.cwd, "q.txt"), "alpha\nbeta\n");
+    pending = [
+      // Only line 2 is returned; the record is of the whole file.
+      read("p.txt", "page", { offset: 2, limit: 1 }),
+      write("p.txt", "replaced\n", "after-page"),
+      // edit_file without a read changes q.txt but does not make it seen.
+      call(
+        "edit_file",
+        { path: "q.txt", old_string: "beta", new_string: "gamma" },
+        "blind-edit",
+      ),
+      write("q.txt", "whole\n", "after-blind-edit"),
+      read("q.txt", "read-q"),
+      call(
+        "edit_file",
+        { path: "q.txt", old_string: "gamma", new_string: "delta" },
+        "read-edit",
+      ),
+      write("q.txt", "whole\n", "after-read-edit"),
+    ];
+    await c.prompt();
+    assert.equal(resultFor(c, "page").split("\n")[0], "2→two");
+    assert.match(resultFor(c, "after-page"), /^File updated/);
+    assert.match(
+      resultFor(c, "after-blind-edit"),
+      /q\.txt already exists and you have not read it/,
+    );
+    assert.match(resultFor(c, "after-read-edit"), /^File updated/);
+    assert.equal(await readFile(join(c.cwd, "p.txt"), "utf8"), "replaced\n");
+    assert.equal(await readFile(join(c.cwd, "q.txt"), "utf8"), "whole\n");
+  } finally {
+    await c.close();
+  }
+});
+
+test("write_file through the editor checks unsaved text for changes after the read", async () => {
+  let content = "unsaved\n";
+  const c = await client({
+    editor: {
+      read: async (path) =>
+        path.endsWith("/a.txt") ? content : await readFile(path, "utf8"),
+      write: async (_path, next) => {
+        content = next;
+      },
+    },
+  });
+  try {
+    pending = [read("a.txt")];
+    await c.prompt();
+    content = "typed in the editor\n";
+    pending = [write("a.txt", "agent\n", "stale"), read("a.txt", "again")];
+    await c.prompt();
+    assert.match(resultFor(c, "stale"), /changed since you last read/);
+    assert.equal(content, "typed in the editor\n");
+    pending = [write("a.txt", "agent\n", "current")];
+    await c.prompt();
+    assert.match(resultFor(c, "current"), /^File updated/);
+    assert.equal(content, "agent\n");
+    // The disk copy was never the source of truth.
+    assert.equal(
+      await readFile(join(c.cwd, "a.txt"), "utf8"),
+      "head\r\nold\r\ntail\r\n",
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+test("legacy write_file {before, after}: after is the content, before is ignored, the result names the new form", async () => {
+  const c = await client();
+  try {
+    pending = [
+      // A stale or retyped before no longer fails the write.
+      read("a.txt"),
+      call(
+        "write_file",
+        { path: "a.txt", before: "not the file", after: "legacy\n" },
+        "legacy",
+      ),
+      call(
+        "write_file",
+        { path: "created.txt", before: null, after: "made\n" },
+        "legacy-create",
+      ),
+      // The seen rule still applies to legacy calls.
+      call(
+        "write_file",
+        { path: "unread.txt", before: "x", after: "bad" },
+        "legacy-unread",
+      ),
+      // With content present, a stray after is shed like any undeclared
+      // field of a complete call: content is what gets written.
+      call(
+        "write_file",
+        { path: "a.txt", content: "one", after: "two" },
+        "mixed",
+      ),
+    ];
+    await writeFile(join(c.cwd, "unread.txt"), "x");
+    await c.prompt();
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "one");
+    assert.equal(await readFile(join(c.cwd, "created.txt"), "utf8"), "made\n");
+    assert.equal(await readFile(join(c.cwd, "unread.txt"), "utf8"), "x");
+    for (const id of ["legacy", "legacy-create"])
+      assert.match(
+        resultFor(c, id),
+        /^File updated; checkpoint [^\n]+\nNote: write_file takes \{path, content\}; before is no longer needed and was ignored\.$/,
+      );
+    assert.match(resultFor(c, "legacy-unread"), /you have not read it/);
+    assert.match(resultFor(c, "mixed"), /^File updated; checkpoint [^\n]+$/);
+    assert.equal(c.state().checkpoints[0].after, "legacy\n");
+    assert.equal(editApprovals(c), 3);
+  } finally {
+    await c.close();
+  }
+});
+
+test("missing files and folders get clear messages instead of raw ENOENT", async () => {
+  const c = await client();
+  try {
+    pending = [
+      call(
+        "edit_file",
+        { path: "missing.py", old_string: "a", new_string: "b" },
+        "edit-missing",
+      ),
+      call(
+        "edit_file",
+        { path: "pkg/missing.py", old_string: "a", new_string: "b" },
+        "edit-missing-folder",
+      ),
+      write("pkg/__main__.py", "print(1)\n", "write-missing-folder"),
+      call(
+        "write_file",
+        { path: "__main__.py", before: "print(0)\n", after: "print(1)\n" },
+        "legacy-before-for-new-file",
+      ),
+    ];
+    await c.prompt();
+    for (const id of ["edit-missing", "edit-missing-folder"])
+      assert.match(
+        resultFor(c, id),
+        /^Tool failed: (pkg\/)?missing\.py does not exist; create it with write_file\. Nothing was written\./,
+      );
+    assert.match(
+      resultFor(c, "write-missing-folder"),
+      /^Tool failed: The folder for pkg\/__main__\.py does not exist; create the folder first, then write the file\. Nothing was written\./,
+    );
+    // A before sent for a file that does not exist yet creates it.
+    assert.match(resultFor(c, "legacy-before-for-new-file"), /^File updated/);
+    assert.equal(
+      await readFile(join(c.cwd, "__main__.py"), "utf8"),
+      "print(1)\n",
+    );
+    for (const m of c.state().messages)
+      if (m.role === "tool") assert.doesNotMatch(m.content, /ENOENT|lstat/);
+  } finally {
+    await c.close();
+  }
+});
+
+test("files seen survive a restore; a rewind requires a fresh read", async () => {
+  const c = await client();
+  let loaded;
+  try {
+    pending = [read("a.txt"), write("a.txt", "one\n", "w1")];
+    await c.prompt();
+    assert.match(resultFor(c, "w1"), /^File updated/);
+    const id = c.sessionId;
+    const saved = JSON.parse(
+      await readFile(
+        join(process.env.OPENWEBUI_ACP_HOME, `session-${id}.json`),
+        "utf8",
+      ),
+    );
+    // Hashed paths and content hashes only: no file text or path is stored.
+    const views = Object.entries(saved.fileViews);
+    assert.equal(views.length, 1);
+    for (const [key, value] of views) {
+      assert.match(key, /^[a-f0-9]{64}$/);
+      assert.match(value, /^[a-f0-9]{64}$/);
+    }
+    await c.close();
+    loaded = await client({ cwd: c.cwd, load: id });
+    pending = [write("a.txt", "two\n", "w2")];
+    await loaded.prompt();
+    assert.match(resultFor(loaded, "w2"), /^File updated/);
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "two\n");
+    await loaded.connection.agent.request("session/prompt", {
+      sessionId: id,
+      prompt: [{ type: "text", text: "/rewind 2 --keep-files" }],
+    });
+    pending = [write("a.txt", "three\n", "w3")];
+    await loaded.prompt();
+    assert.match(resultFor(loaded, "w3"), /you have not read it/);
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "two\n");
+  } finally {
+    await loaded?.close();
+  }
+});
+
+test("an unreadable saved file-view map is dropped, not fatal", async () => {
+  const c = await client();
+  pending = [read("a.txt")];
+  await c.prompt();
+  const id = c.sessionId;
+  await c.close();
+  const path = join(process.env.OPENWEBUI_ACP_HOME, `session-${id}.json`);
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  saved.fileViews = { "not-a-hash": "a.txt" };
+  await writeFile(path, JSON.stringify(saved));
+  const loaded = await client({ cwd: c.cwd, load: id });
+  try {
+    pending = [write("a.txt", "x", "w")];
+    await loaded.prompt();
+    assert.match(resultFor(loaded, "w"), /you have not read it/);
+  } finally {
+    await loaded.close();
   }
 });

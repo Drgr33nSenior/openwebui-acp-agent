@@ -332,7 +332,9 @@ test("recorded write and edit arguments are elided to sizes; small edits, other 
         .arguments,
     );
   const stub = (n) =>
-    `[elided from context: ${n} chars; read the file for its current content]`;
+    `[elided from context: ${n} chars; not file text; never copy this into a tool call; read the file to see it]`;
+  // w1 is a write in the pre-0.7 {before, after} form, still found in older
+  // transcripts; both values are elided like content.
   assert.deepEqual(args("w1"), {
     path: "a.ts",
     before: stub(5000),
@@ -989,29 +991,44 @@ test("streamed thinking does not fill the context meter", async () => {
 });
 
 test("a context placeholder copied into a write is refused before anything is written", async () => {
+  // The current stub and the wording of earlier releases share the prefix.
   const placeholder =
+    "[elided from context: 5000 chars; not file text; never copy this into a tool call; read the file to see it]";
+  const older =
     "[elided from context: 5000 chars; read the file for its current content]";
   pending = [
-    tool("w1", "write_file", {
-      path: "new.txt",
-      before: null,
-      after: placeholder,
-    }),
+    tool("w1", "write_file", { path: "new.txt", content: placeholder }),
+    tool("w2", "write_file", { path: "new.txt", before: null, after: older }),
     tool("e1", "edit_file", {
       path: "a.txt",
       old_string: "a.txt",
       new_string: placeholder,
+    }),
+    // A legacy before is ignored, so a placeholder there writes nothing from
+    // it: only the real after text is used.
+    tool("w3", "write_file", {
+      path: "other.txt",
+      before: placeholder,
+      after: "real text\n",
     }),
   ];
   const c = await client();
   try {
     await c.prompt();
     const results = c.state().messages.filter((m) => m.role === "tool");
-    assert.equal(results.length, 2);
-    for (const m of results)
-      assert.match(m.content, /context placeholder.*nothing was written/);
+    assert.equal(results.length, 4);
+    for (const m of results.slice(0, 3))
+      assert.match(
+        m.content,
+        /context placeholder.*not file text.*Read the file with read_file.*Nothing was written/,
+      );
     await assert.rejects(readFile(join(c.cwd, "new.txt")), /ENOENT/);
     assert(!(await readFile(join(c.cwd, "a.txt"), "utf8")).includes("elided"));
+    assert.equal(
+      await readFile(join(c.cwd, "other.txt"), "utf8"),
+      "real text\n",
+    );
+    assert.match(results[3].content, /write_file takes \{path, content\}/);
   } finally {
     await c.close();
   }

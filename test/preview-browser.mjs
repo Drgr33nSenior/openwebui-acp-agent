@@ -77,15 +77,10 @@ const backend = createServer(async (req, res) => {
     switch (stage++) {
       case 0:
         calls = [
-          invoke("write_file", {
-            path: "site/index.html",
-            before: null,
-            after: html,
-          }),
+          invoke("write_file", { path: "site/index.html", content: html }),
           invoke("write_file", {
             path: "site/assets/game.js",
-            before: null,
-            after: javascript,
+            content: javascript,
           }),
         ];
         break;

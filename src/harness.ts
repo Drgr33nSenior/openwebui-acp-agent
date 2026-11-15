@@ -62,7 +62,7 @@ export function runtimeInstruction(
       );
     if (names.has("write_file"))
       guidance.push(
-        "Use write_file for new files (before=null) or rewrites of small existing files; before and after are complete file text." +
+        "Use write_file for new files or rewrites of small existing files; content is the complete new file text. Read an existing file with read_file before replacing it, and again if it may have changed." +
           (names.has("edit_file")
             ? ` Existing files over ${WRITE_FILE_MAX_EXISTING_BYTES / 1024} KB are refused: change them with edit_file. Create large files in parts: write a small skeleton with write_file, then extend it through small edit_file calls.`
             : " Keep each new file or replacement small enough for one reply."),
@@ -281,7 +281,7 @@ export function toolFailure(
         (availableTools.includes("edit_file")
           ? " Prefer a small edit_file change with a unique old_string from the current content."
           : availableTools.includes("write_file")
-            ? " write_file requires complete current and replacement file text, including the final newline."
+            ? " Then send write_file the complete new file text as content, including the final newline."
             : " Use the currently available editing tools.") +
         " Do not overwrite intervening changes."
       : "Inspect the error and any partial effects before proposing a correction. Do not retry a denied action.";
