@@ -2,12 +2,17 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute, posix } from "node:path";
 import { z } from "zod";
 
+// Undo history is bounded: recording a checkpoint evicts the oldest ones until
+// the new one fits, so checkpoint storage never blocks an edit.
 export const CHECKPOINT_LIMIT = 20;
-export const CHECKPOINT_BYTES = 500_000;
+// Two text fields of CHECKPOINT_TEXT_CHARS each serialize to at most 1.2 MB of
+// JSON (six bytes per escaped control character), so every checkpoint fits.
+// The 8 MB session record keeps at least 5.8 MB for the transcript.
+export const CHECKPOINT_BYTES = 2_000_000;
+// Reads and edits already cap file text at this size; prepareCheckpoint returns
+// no checkpoint for larger text rather than refusing the edit.
+export const CHECKPOINT_TEXT_CHARS = 100_000;
 export class CheckpointError extends Error {}
-
-const storageError =
-  "Checkpoint storage budget exceeded; use /checkpoints clear before editing";
 const checkpointPath = z
   .string()
   .min(1)
@@ -26,7 +31,7 @@ const checkpointPath = z
   );
 const textContent = z
   .string()
-  .max(100_000)
+  .max(CHECKPOINT_TEXT_CHARS)
   .refine(
     (value) => !value.includes("\0"),
     "Binary checkpoint content refused",
@@ -53,7 +58,7 @@ export const checkpointsSchema = z
   .refine(
     (records) =>
       Buffer.byteLength(JSON.stringify(records), "utf8") <= CHECKPOINT_BYTES,
-    storageError,
+    "Checkpoint storage budget exceeded",
   );
 
 function validatedRecords(records: Checkpoint[]): Checkpoint[] {
@@ -61,16 +66,6 @@ function validatedRecords(records: Checkpoint[]): Checkpoint[] {
   if (result.success) return result.data;
   // Do not expose Zod errors: unknown field names and supplied values may be
   // sensitive. Only our fixed, actionable messages may leave this module.
-  if (
-    result.error.issues.some(
-      (issue) => issue.code === "too_big" && issue.path.length === 0,
-    )
-  )
-    throw new CheckpointError(
-      `Checkpoint limit reached (${CHECKPOINT_LIMIT}); use /checkpoints clear before editing`,
-    );
-  if (result.error.issues.some((issue) => issue.message === storageError))
-    throw new CheckpointError(storageError);
   if (
     result.error.issues.some(
       (issue) => issue.message === "Duplicate checkpoint IDs",
@@ -85,13 +80,15 @@ function validatedRecords(records: Checkpoint[]): Checkpoint[] {
 // Reversible snapshots must remain exact. Never redact bytes and then use those
 // altered bytes to restore a file. Callers keep snapshots in private state only,
 // exclude sensitive paths, and supply their configured-secret redactor here.
+// Returns null when the text is too large to keep: the caller may still make
+// the edit, but nothing can undo or rewind it.
 export function prepareCheckpoint(
   records: Checkpoint[],
   path: string,
   before: string | null,
   after: string,
   redact: (text: string) => string = (text) => text,
-): Checkpoint {
+): Checkpoint | null {
   validatedRecords(records);
   if (before === after)
     throw new CheckpointError("No file change to checkpoint");
@@ -99,6 +96,15 @@ export function prepareCheckpoint(
     throw new CheckpointError(
       "Cannot checkpoint text containing configured credentials",
     );
+  if (!checkpointPath.safeParse(path).success)
+    throw new CheckpointError("Invalid checkpoint path; nothing changed");
+  if (before?.includes("\0") || after.includes("\0"))
+    throw new CheckpointError("Binary checkpoint content refused");
+  if (
+    (before?.length ?? 0) > CHECKPOINT_TEXT_CHARS ||
+    after.length > CHECKPOINT_TEXT_CHARS
+  )
+    return null;
   const candidate = checkpointSchema.safeParse({
     id: randomUUID(),
     path,
@@ -107,30 +113,41 @@ export function prepareCheckpoint(
     createdAt: new Date().toISOString(),
     status: "applied",
   });
-  if (!candidate.success) {
-    if (
-      candidate.error.issues.some(
-        (issue) => issue.message === "Binary checkpoint content refused",
-      )
-    )
-      throw new CheckpointError("Binary checkpoint content refused");
-    throw new CheckpointError(
-      "Invalid checkpoint path or text size; nothing changed",
-    );
-  }
-  const checkpoint = candidate.data;
-  // Reserve capacity before asking for approval or mutating a workspace file.
-  validatedRecords([...records, checkpoint]);
-  return checkpoint;
+  if (!candidate.success)
+    throw new CheckpointError("Invalid checkpoint; nothing changed");
+  return byteSize(candidate.data) + 2 > CHECKPOINT_BYTES
+    ? null
+    : candidate.data;
 }
 
+const byteSize = (value: unknown) =>
+  Buffer.byteLength(JSON.stringify(value), "utf8");
+
+// Adds an applied checkpoint, evicting the oldest records (first in, first
+// out) until the list fits CHECKPOINT_LIMIT and CHECKPOINT_BYTES. Callers find
+// evicted records by ID. Never refuses for capacity: prepareCheckpoint returns
+// null for a checkpoint that cannot fit on its own.
 export function recordCheckpoint(
   records: Checkpoint[],
   checkpoint: Checkpoint,
 ): Checkpoint[] {
   if (checkpoint.status !== "applied")
     throw new CheckpointError("Only applied edits can be recorded");
-  return validatedRecords([...records, checkpoint]);
+  if (records.some((record) => record.id === checkpoint.id))
+    throw new CheckpointError(
+      "Duplicate checkpoint IDs; saved checkpoints are invalid",
+    );
+  const next = [...validatedRecords(records), checkpoint];
+  // JSON array size: brackets, records and the commas between them.
+  const sizes = next.map(byteSize);
+  let bytes = 1 + sizes.reduce((sum, size) => sum + size + 1, 0);
+  let first = 0;
+  while (
+    first < next.length - 1 &&
+    (next.length - first > CHECKPOINT_LIMIT || bytes > CHECKPOINT_BYTES)
+  )
+    bytes -= sizes[first++]! + 1;
+  return validatedRecords(next.slice(first));
 }
 
 export function selectCheckpoint(

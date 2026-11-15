@@ -542,6 +542,22 @@ test("when trimming is not enough only the summary and latest turns are kept", (
     "00000000-0000-4000-8000-000000000002": 3,
   });
   assert.deepEqual(record.failedToolCalls, []);
+  // The latest turn without undo checkpoints is renumbered conservatively: a
+  // kept pinned request older than it (turn 20, now 1) stays unrestorable.
+  for (const [before, after] of [
+    [0, 0],
+    [10, 0],
+    [20, 1],
+    [25, 1],
+    [28, 2],
+    [30, 4],
+  ])
+    assert.equal(
+      fitSessionRecord({ ...input, unrestorableTurn: before }, 75000).record
+        .unrestorableTurn,
+      after,
+    );
+  assert.equal(record.unrestorableTurn, undefined);
   // Even an impossible-looking limit never throws while the current turn fits.
   const tiny = fitSessionRecord(input, 6000).record;
   assert(size(tiny) <= 6000);

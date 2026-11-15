@@ -338,7 +338,19 @@ until you reopen the session from history. ACP v1 has no history-truncation
 update. The rewind proposal in agent-client-protocol PR 1321 is an unmerged ACP
 v2 draft, so this is a slash command.
 
-Keep at most twenty checkpoints with a combined 500 KB content budget.
+Undo history keeps at most twenty checkpoints with a combined 2 MB content
+budget. It never blocks an edit: when a new checkpoint would exceed either
+limit, the oldest checkpoints are dropped first until it fits. At the end of
+that turn one notice reports it, for example "Older undo checkpoints were
+dropped to make room (2 removed); /undo and /rewind can no longer restore agent
+edits from turn 4 or earlier." `/undo` then reaches only the remaining
+checkpoints. `/rewind N` refuses to restore files when N is at or before the
+latest turn whose edits lost a checkpoint (turn 4 here), because the restore
+would be partial. `/rewind N --keep-files` still rewinds the conversation, and
+`/rewind` lists which turns are affected. File text is limited to 100,000
+characters, so every checkpoint fits the budget on its own. A checkpoint that
+could not would be skipped: the edit is still made, the user is told once, and
+`/undo` and `/rewind` cannot restore it.
 `/checkpoints clear` discards only undo history, not files or transcripts.
 Checkpoints containing configured credentials are refused. Creation undo needs
 a safe delete operation: ACP editor filesystem methods do not provide one.
@@ -414,8 +426,8 @@ the end of that turn. Reopened history shows each trimmed entry with its
 marker, and a resumed model sees the marker instead of the removed text.
 
 File checkpoints are never trimmed. They must stay exact, and their own limit
-(twenty checkpoints, 500 KB) keeps them well within the session limit. A
-reopened session therefore rewinds files from exact content. If whole turns
+(twenty checkpoints, 2 MB) leaves at least 5.8 MB of the 8 MB record for the
+conversation. A reopened session therefore rewinds files from exact content. If whole turns
 were removed, their numbers are gone: `/rewind` lists the remaining turns and
 refuses others. Edits made in removed turns are no longer tied to a turn. Rewind
 leaves them in place and reports them, and they remain available to `/undo`.

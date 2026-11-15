@@ -246,7 +246,13 @@ after a final reply, arrival order, withdrawal, Stop, and queued fallback.
 Commands never join. Rewind tests cover turn listing, one diff approval, restore
 and truncation, the next request's context, and refusal after a later user edit.
 They also cover `--keep-files`, read-only mode, running jobs, bad arguments,
-checkpoint chain gaps and the compaction reset. Created files are removed on
+checkpoint chain gaps (which `--keep-files` ignores) and the compaction reset.
+A full undo history test makes two edits in one turn: both succeed, the two
+oldest checkpoints and their turn tags are dropped, and one notice reports it.
+`/rewind` then refuses to restore files for the affected turns, also after
+reload, `--keep-files` still works, and `/undo` restores only what remains.
+`test/checkpoints.test.mjs` covers eviction by count and by UTF-8 bytes, oldest
+first, and text too large to checkpoint. Created files are removed on
 Linux; elsewhere the test deletes them manually, then rewinds. Job tests cover
 coalesced progress, output size and tail, completion updates, notices only
 with the client capability, and one model report per finished job.
@@ -301,10 +307,10 @@ subsequent provider usage; no estimated percentage or artificial reset is sent.
 within the limit, oldest-first excerpts with intact tool-call pairing, IDs,
 names, paths and failure status, untouched latest turns, system message,
 guidance, summary and pinned request, deterministic output, the fallback that
-keeps only the summary and latest turns (with remapped compaction index and
-turn tags), the 10,000-message limit, a near-8 MB record that saves, lists and
-loads, and a fork fitted by UTF-8 bytes. `test/sessions.test.mjs` adds ACP
-tests: a 9 MB transcript saves under 8 MB with redacted excerpts, the live
+keeps only the summary and latest turns (with remapped compaction index,
+turn tags and latest turn without checkpoints), the 10,000-message limit, a
+near-8 MB record that saves, lists and loads, and a fork fitted by UTF-8
+bytes. `test/sessions.test.mjs` adds ACP tests: a 9 MB transcript saves under 8 MB with redacted excerpts, the live
 transcript is unchanged and the notice appears once; a trimmed session loads
 without inference or approval, replays markers and rewinds files exactly from
 checkpoints; after turns are dropped, `/rewind` refuses missing turn numbers and

@@ -90,16 +90,24 @@ export type RewindPlan = {
   untracked: number;
 };
 
+// `unrestorable` is the latest turn with an agent edit that has no checkpoint
+// (evicted, or too large to keep). Restoring files from that turn or earlier
+// would be partial, so only a conversation rewind (`keepFiles`) is allowed.
 export function rewindPlan(
   messages: Message[],
   checkpoints: Checkpoint[],
   tags: CheckpointTurns,
   turn: number,
+  { keepFiles = false, unrestorable = UNTRACKED_TURN } = {},
 ): RewindPlan {
   const turns = userTurns(messages);
   if (!Number.isSafeInteger(turn) || turn < 1 || turn > turns.length)
     throw new CheckpointError(
       `Choose a turn from 1 to ${turns.length}; /rewind lists them`,
+    );
+  if (!keepFiles && turn <= unrestorable)
+    throw new CheckpointError(
+      `Cannot restore files to before turn ${turn}: undo checkpoints for agent edits in turn ${unrestorable} or earlier were dropped or never kept, so the restore would be partial. Nothing was restored. ${unrestorable < turns.length ? `Rewind to turn ${unrestorable + 1} or later, or use` : "Use"} /rewind ${turn} --keep-files to rewind only the conversation.`,
     );
   const rewound = checkpoints.filter(
     (c) => (tags[c.id] ?? UNTRACKED_TURN) >= turn,
@@ -112,7 +120,7 @@ export function rewindPlan(
         checkpoint,
       ]);
   const files: RewindFile[] = [];
-  for (const [path, chain] of byPath) {
+  for (const [path, chain] of keepFiles ? [] : byPath) {
     // A gap means something else changed the file between two agent edits.
     for (let i = 1; i < chain.length; i++)
       if (chain[i]!.before !== chain[i - 1]!.after)

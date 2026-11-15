@@ -22,8 +22,12 @@ const {
   rewindPlan,
   truncatedCompaction,
 } = await import("../dist/rewind.js");
-const { prepareCheckpoint, recordCheckpoint, CheckpointError } =
-  await import("../dist/checkpoints.js");
+const {
+  prepareCheckpoint,
+  recordCheckpoint,
+  CheckpointError,
+  CHECKPOINT_LIMIT,
+} = await import("../dist/checkpoints.js");
 const { compactionStateSchema, contextMessages, STEERING_PREFIX } =
   await import("../dist/compaction.js");
 
@@ -254,6 +258,27 @@ test("rewind plans restore the earliest agent state and refuse gaps", () => {
   assert.throws(
     () => rewindPlan(messages, records, tags, 2),
     /changed between agent edits/,
+  );
+  // --keep-files rewinds only the conversation, so a gap does not block it.
+  assert.deepEqual(
+    rewindPlan(messages, records, tags, 2, { keepFiles: true }).files,
+    [],
+  );
+  // Turns whose edits lost their checkpoints cannot restore files.
+  assert.throws(
+    () => rewindPlan(messages, records, tags, 2, { unrestorable: 2 }),
+    /Cannot restore files to before turn 2: .*turn 2 or earlier.*Rewind to turn 3 or later.*\/rewind 2 --keep-files/,
+  );
+  assert.equal(
+    rewindPlan(messages, records, tags, 3, { unrestorable: 2 }).files.length,
+    1,
+  );
+  assert.equal(
+    rewindPlan(messages, records, tags, 1, {
+      unrestorable: 3,
+      keepFiles: true,
+    }).rewound.length,
+    4,
   );
   const compaction = compactionStateSchema.parse({
     summary: "s",
@@ -787,6 +812,121 @@ test("rewinding an agent-created file needs a safe delete", async () => {
     }
   } finally {
     await c.close();
+  }
+});
+
+const droppedNotice = /Older undo checkpoints were dropped to make room/g;
+
+test("full undo history drops the oldest checkpoints instead of blocking edits", async () => {
+  const c = await client();
+  try {
+    await twoEdits(c);
+    await writeFile(join(c.cwd, "b.txt"), "bee");
+    const s = c.state();
+    const [first, second] = s.checkpoints;
+    // Undone history from turn 2 fills the remaining slots.
+    while (s.checkpoints.length < CHECKPOINT_LIMIT) {
+      const seed = {
+        ...prepareCheckpoint([], `seed-${s.checkpoints.length}.txt`, null, "s"),
+        status: "undone",
+      };
+      s.checkpoints.push(seed);
+      s.checkpointTurns[seed.id] = 2;
+    }
+    respond = (request, res) => {
+      if (afterTool(request)) return reply(res, "edited");
+      reply(res, null, [
+        call(
+          "write_file",
+          { path: "a.txt", before: "two", after: "three" },
+          "w3",
+        ),
+        call(
+          "edit_file",
+          { path: "b.txt", old_string: "bee", new_string: "b2" },
+          "w4",
+        ),
+      ]);
+    };
+    c.updates.length = 0;
+    assert.equal((await c.prompt("third edit")).stopReason, "end_turn");
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "three");
+    assert.equal(await readFile(join(c.cwd, "b.txt"), "utf8"), "b2");
+    for (const id of ["w3", "w4"])
+      assert.match(
+        s.messages.find((m) => m.tool_call_id === id).content,
+        /^File updated; checkpoint /,
+      );
+    // Each edit evicted the oldest checkpoint: the first and second edits.
+    assert.equal(s.checkpoints.length, CHECKPOINT_LIMIT);
+    const ids = s.checkpoints.map((cp) => cp.id);
+    assert(!ids.includes(first.id) && !ids.includes(second.id));
+    assert.deepEqual(Object.keys(s.checkpointTurns).sort(), [...ids].sort());
+    assert.equal(s.unrestorableTurn, 2);
+    // One notice for the turn, naming both removals.
+    assert.equal(texts(c.updates).match(droppedNotice)?.length, 1);
+    assert.match(
+      texts(c.updates),
+      /\(2 removed\); \/undo and \/rewind can no longer restore agent edits from turn 2 or earlier\./,
+    );
+    assert(!s.messages.some((m) => m.content?.includes("dropped to make")));
+    c.updates.length = 0;
+    await c.prompt("/rewind");
+    assert.equal(texts(c.updates).match(droppedNotice), null);
+    assert.match(
+      texts(c.updates),
+      /Turns 1-2 have agent edits without undo checkpoints; rewinding to them needs --keep-files/,
+    );
+    // Restoring files to before turn 2 would be partial, so nothing happens.
+    const approvals = c.approvals.length;
+    const length = s.messages.length;
+    c.updates.length = 0;
+    await c.prompt("/rewind 2");
+    assert.match(
+      texts(c.updates),
+      /Cannot restore files to before turn 2: .*Nothing was restored/,
+    );
+    assert.equal(c.approvals.length, approvals);
+    assert.equal(s.messages.length, length);
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "three");
+  } finally {
+    await c.close();
+  }
+  const saved = await readJson(`session-${c.id}.json`);
+  assert.equal(saved.unrestorableTurn, 2);
+  assert.equal(saved.checkpoints.length, CHECKPOINT_LIMIT);
+  assert.equal(Object.keys(saved.checkpointTurns).length, CHECKPOINT_LIMIT);
+  const loaded = await client({
+    method: "session/load",
+    sessionId: c.id,
+    cwd: c.cwd,
+  });
+  try {
+    assert.equal(loaded.state().unrestorableTurn, 2);
+    await loaded.prompt("/rewind 1");
+    assert.match(
+      texts(loaded.updates),
+      /Cannot restore files to before turn 1/,
+    );
+    // /undo restores what remains, newest first, then stops.
+    await loaded.prompt("/undo");
+    assert.equal(await readFile(join(c.cwd, "b.txt"), "utf8"), "bee");
+    await loaded.prompt("/undo");
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "two");
+    loaded.updates.length = 0;
+    await loaded.prompt("/undo");
+    assert.match(texts(loaded.updates), /No applied checkpoint found/);
+    assert.equal(await readFile(join(c.cwd, "a.txt"), "utf8"), "two");
+    // A conversation-only rewind still works and moves the limit with it.
+    loaded.updates.length = 0;
+    await loaded.prompt("/rewind 2 --keep-files");
+    assert.match(texts(loaded.updates), /Rewound to before turn 2/);
+    assert.equal(loaded.state().unrestorableTurn, 1);
+    // /checkpoints clear is unchanged.
+    await loaded.prompt("/checkpoints clear");
+    assert.deepEqual(loaded.state().checkpoints, []);
+  } finally {
+    await loaded.close();
   }
 });
 
