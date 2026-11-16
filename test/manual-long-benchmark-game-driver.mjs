@@ -108,8 +108,19 @@ try {
     try {
       if (step.action.load)
         await page.goto(`${ORIGIN}/${entry}`, { timeout: 10000 });
-      for (const [row, col] of step.action.clicks ?? [])
-        await cell(row, col).click({ timeout: 3000 });
+      for (const [row, col] of step.action.clicks ?? []) {
+        // The brief only requires clicks on a solved board to have no effect;
+        // disabling the lights is one way to do that. Playwright waits for a
+        // disabled button to become enabled, so a click on one is recorded as
+        // a click without effect instead of timing out. The expectations
+        // still decide whether the board, moves and status stayed the same.
+        const light = cell(row, col);
+        if ((await light.count()) === 1 && (await light.isDisabled())) {
+          record.disabledClicks = (record.disabledClicks ?? 0) + 1;
+          continue;
+        }
+        await light.click({ timeout: 3000 });
+      }
       if (step.action.button)
         await page.locator(`#${step.action.button}`).click({ timeout: 3000 });
       await settle();

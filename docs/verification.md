@@ -543,6 +543,18 @@ all 12 checks, and each mutant failed its declared check (`diagonal`:
 `solve`, `solved-locked`; `restart-moves`: `restart`; `solved-text`: `solve`,
 `solved-locked`).
 
+The brief only asks that clicks on a solved board have no effect, so a game may
+lock the board by disabling the lights. The driver checks each light before
+clicking it: a disabled light is recorded as a click without effect
+(`disabledClicks`) rather than a Playwright timeout, and the judge decides on
+the observed board, moves and status as usual. The check also plays two games
+derived from the sealed reference (they are not part of the seal):
+`derived:disabled-lock` locks only by disabling the lights and must pass every
+check; `derived:always-disabled` disables the lights from the start and must
+fail `corner-move`, `edge-move` and `solve`. The play-through still clicks only
+the centre light (`data-row` 2, `data-col` 2) after solving, so a game that
+disables just that light while the others still toggle would not be caught.
+
 **Self-test.** `test/long-benchmark-game.test.mjs` checks the seal, the brief,
 the judge against a rule simulator of every mutant, play-test detection and
 probe judging. It refuses a checker without the session bootstrap or with
