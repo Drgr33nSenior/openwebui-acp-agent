@@ -211,6 +211,22 @@ export class Backend {
         .map((m: any) => m.id),
     );
   }
+  // Pure projection shared by request production and all context estimates.
+  requestMessages<T extends WireMessage>(messages: T[]): T[] {
+    return messages.map((message) => {
+      // Preserve identity for live image attachments held in a WeakMap.
+      if (
+        message.reasoning_content === undefined ||
+        (message.role === "assistant" &&
+          this.reasoningReplay.has(this.config.model))
+      )
+        return message;
+      const copy = { ...message };
+      delete copy.reasoning_content;
+      return copy;
+    });
+  }
+
   async models(signal: AbortSignal) {
     return (await this.modelMetadata(signal)).map((m) => m.id);
   }
@@ -230,14 +246,8 @@ export class Backend {
     maxResponseChars = MAX,
     onUsage?: (used: number, prompt?: number) => Promise<void>,
   ): Promise<Message> {
-    messages = messages.map(({ reasoning_content, ...message }) => ({
-      ...message,
-      ...(message.role === "assistant" &&
-      this.reasoningReplay.has(this.config.model) &&
-      reasoning_content !== undefined
-        ? { reasoning_content }
-        : {}),
-    }));
+    const replay = this.reasoningReplay.has(this.config.model);
+    messages = this.requestMessages(messages);
     if (textChars(messages) > MAX)
       throw new Error(
         "Context budget exceeded; start a new session. History retained.",
@@ -276,6 +286,7 @@ export class Backend {
         onUsage,
         active,
         () => arm(undefined, ""),
+        replay,
       );
     } catch (e) {
       if (!signal.aborted && watchdog.signal.reason instanceof StreamTimeout)
@@ -303,6 +314,7 @@ export class Backend {
     onUsage: ((used: number, prompt?: number) => Promise<void>) | undefined,
     active: () => void,
     unbounded: () => void,
+    replay: boolean,
   ): Promise<Message> {
     const r = await this.request("api/chat/completions", signal, {
       model: this.config.model,
@@ -369,21 +381,31 @@ export class Backend {
         choice.finish_reason
       )
         active();
-      for (const field of [d.reasoning_content, d.reasoning])
-        if (field != null && typeof field !== "string")
-          throw new ModelReplyError("malformed", "Malformed reasoning");
-      if (
-        d.reasoning_content != null &&
-        d.reasoning != null &&
-        d.reasoning_content !== d.reasoning
-      )
-        throw new ModelReplyError("malformed", "Conflicting reasoning aliases");
-      const reasoning = d.reasoning_content ?? d.reasoning;
+      if (replay) {
+        for (const field of [d.reasoning_content, d.reasoning])
+          if (field != null && typeof field !== "string")
+            throw new ModelReplyError("malformed", "Malformed reasoning");
+        if (
+          d.reasoning_content != null &&
+          d.reasoning != null &&
+          d.reasoning_content !== d.reasoning
+        )
+          throw new ModelReplyError(
+            "malformed",
+            "Conflicting reasoning aliases",
+          );
+      }
+      const reasoning = replay
+        ? (d.reasoning_content ?? d.reasoning)
+        : typeof d.reasoning_content === "string" && d.reasoning_content
+          ? d.reasoning_content
+          : d.reasoning;
       if (typeof reasoning === "string") {
         thought += reasoning.length;
-        if (thought > MAX)
-          throw new Error("Reasoning retention limit exceeded");
-        reasoningContent += reasoning;
+        if (thought > MAX) {
+          if (replay) throw new Error("Reasoning retention limit exceeded");
+          reasoningContent = "";
+        } else reasoningContent += reasoning;
       }
       if (d.content != null) {
         if (typeof d.content !== "string")
@@ -477,7 +499,12 @@ export class Backend {
     }
     signal.throwIfAborted();
     // Measured once the reply is complete, so the reasoning share is final.
-    const used = completionContextTokens(usage, produced, thought);
+    const used = completionContextTokens(
+      usage,
+      produced,
+      thought,
+      replay && reasoningContent.length > 0,
+    );
     if (used !== undefined) await onUsage?.(used, prompt);
     if (finish === "length") {
       // The coding loop may ask again once; never return a cut-short tool call.
