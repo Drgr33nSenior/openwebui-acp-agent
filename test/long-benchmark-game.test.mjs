@@ -13,6 +13,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import {
   appendFile,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -24,7 +25,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const temporary = await realpath(
   await mkdtemp(join(tmpdir(), "ow-game-test-")),
@@ -37,6 +39,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const checkout = dirname(here);
 const CHECKER = process.env.LONG_BENCHMARK_ACCEPTANCE_CHECKER;
 const BROWSER = process.env.LONG_BENCHMARK_GAME_BROWSER;
+// An absolute directory that receives each enabled run's results (optional).
+const EVIDENCE = process.env.LONG_BENCHMARK_GAME_EVIDENCE;
 const source = await GAME.loadSource();
 const { script } = source;
 
@@ -379,20 +383,39 @@ test("isolation is established only when controls work and nothing leaks", () =>
     "edit-hidden",
     "preview-hidden",
     "command-repository-0",
-    "browser-file",
+    "browser-preview",
+    "browser-control",
+    "browser-link",
+    "browser-tab-link-select",
+    "browser-window",
+    "browser-redirect-look",
+    "browser-back-look",
+    "browser-navigate-file",
+    "browser-new-tab-file",
+    "browser-navigate-other",
   ])
     assert(ids.includes(id), id);
   assert.equal(
     plan.find((p) => p.id === "read-relative").args.path,
     "../acceptance/playthrough.json",
   );
+  // Controls work, denials are refused, page attempts run, page reads show
+  // no hidden content, and the host preview showed the nonce.
   const good = Object.fromEntries(
-    plan.map((p) => [
-      p.id,
-      p.kind === "control"
-        ? { ok: true, text: "nonce-1" }
-        : { ok: false, text: `refused ${JSON.stringify(p.args)}` },
-    ]),
+    plan
+      .filter((p) => p.kind !== "browser-control")
+      .map((p) => [
+        p.id,
+        p.optional
+          ? { skipped: true }
+          : p.kind === "control"
+            ? { ok: true, text: "nonce-1" }
+            : p.kind === "deny"
+              ? { ok: false, text: `refused ${JSON.stringify(p.args)}` }
+              : p.id === "browser-look-host"
+                ? { ok: true, text: '- paragraph: nonce-1\n- link "file link"' }
+                : { ok: true, text: "- paragraph: page" },
+      ]),
   );
   const after = {
     marker: "MARKER",
@@ -425,10 +448,60 @@ test("isolation is established only when controls work and nothing leaks", () =>
   };
   assert.equal(GAME.judgeProbes(plan, brokenControl, after).established, false);
   const missing = { ...good };
-  delete missing["browser-file"];
+  delete missing["browser-navigate-file"];
   assert.deepEqual(GAME.judgeProbes(plan, missing, after).findings, [
-    "browser-file: not executed",
+    "browser-navigate-file: not executed",
   ]);
+  // The browser route: each failure leaves isolation unproven.
+  for (const [change, finding] of [
+    [
+      { "browser-tab-link-look": { ok: true, text: "{ MARKER }" } },
+      "browser-tab-link-look: revealed hidden content",
+    ],
+    [
+      { "browser-look-host": { ok: true, text: "- paragraph: error page" } },
+      "browser-control: the browser did not read the workspace preview, so a denial proves nothing",
+    ],
+    [
+      { "browser-redirect-look": { ok: false, text: "No open pages" } },
+      "browser-redirect-look: the browser state could not be read",
+    ],
+    [
+      { "browser-window-look": { skipped: true } },
+      "browser-window-look: not executed",
+    ],
+    // A policy that let a tab open at the hidden file.
+    [
+      {
+        "browser-new-tab-file": {
+          ok: true,
+          text: "- 1: (current) [](file:///x)",
+        },
+      },
+      "browser-new-tab-file: succeeded",
+    ],
+  ])
+    assert.deepEqual(
+      GAME.judgeProbes(plan, { ...good, ...change }, after).findings,
+      [finding],
+    );
+  // A browser in a container reads the preview through containerUrl.
+  const container = {
+    ...good,
+    "browser-look-host": { ok: true, text: "chrome-error" },
+    "browser-open-container": { ok: true, text: "" },
+    "browser-look-container": { ok: true, text: "nonce-1" },
+  };
+  assert.equal(GAME.judgeProbes(plan, container, after).established, true);
+  // Snapshots may show a link's URL; only content is a leak there.
+  const echoed = {
+    ...good,
+    "browser-link-look-control": {
+      ok: true,
+      text: '- link "file link": /url: file:///scratch/acceptance/playthrough.json',
+    },
+  };
+  assert.equal(GAME.judgeProbes(plan, echoed, after).established, true);
   for (const changed of [
     { sealUnchanged: false },
     { created: ["probe-created"] },
@@ -523,6 +596,50 @@ test("a checker without the supported session protocol is refused", async () => 
       /not an absolute path to task_acceptance\.py/,
     );
 });
+
+test("only the pinned complete checker manifest is accepted", () => {
+  // A manifest with the pinned bootstrap and modules but another module set:
+  // the bootstrap alone never admits a checker.
+  const pinned = {
+    [GAME.CHECKER_SESSION.file]: GAME.CHECKER_SESSION.sha256,
+    ...GAME.CHECKER_MANIFEST.modules,
+  };
+  const other = GAME.manifestMismatch({
+    ...pinned,
+    "coding_eval.py": "0".repeat(64),
+  });
+  assert.match(
+    other,
+    /^the checker manifest \(4 files, SHA-256 [0-9a-f]{64}\) is not the pinned checker \(58 files, c85163f80abe…, stack 59eac79\)$/,
+  );
+  // A changed decision or record module is named.
+  const changed = GAME.manifestMismatch({
+    ...pinned,
+    "run_record.py": "1".repeat(64),
+  });
+  assert.match(changed, /; differing: run_record\.py\)/);
+  assert.match(
+    GAME.manifestMismatch({ ...pinned, "task_acceptance.py": "2".repeat(64) }),
+    /; differing: task_acceptance\.py\)/,
+  );
+  assert.equal(GAME.CHECKER_MANIFEST.files, 58);
+  assert.equal(
+    GAME.CHECKER_MANIFEST.modules["task_acceptance.py"],
+    "4e48e1516f050d8e4382b74e02038cc23aa8783be29e80110773978ef4ba4212",
+  );
+});
+
+test(
+  "the configured checker is the pinned complete manifest",
+  { skip: !CHECKER && "LONG_BENCHMARK_ACCEPTANCE_CHECKER is not set" },
+  async () => {
+    const checker = await GAME.checkerIdentity(CHECKER);
+    assert.equal(checker.unavailable, undefined, checker.unavailable);
+    assert.equal(checker.treeSha256, GAME.CHECKER_MANIFEST.sha256);
+    assert.equal(Object.keys(checker.files).length, 58);
+    assert.equal(GAME.manifestMismatch(checker.files), null);
+  },
+);
 
 test("checker probes go through the agent's real file tools and command sandbox", async () => {
   const root = await realpath(await mkdtemp(join(temporary, "routes-")));
@@ -1122,52 +1239,148 @@ test(
   },
 );
 
-// A fake browser MCP server with the three tools a play-test needs.
-async function fakeBrowser() {
-  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
-  const { StreamableHTTPServerTransport } =
-    await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
-  const { z } = await import("zod");
-  const calls = [];
-  const http = createServer(async (req, res) => {
-    const server = new McpServer({ name: "browser", version: "1" });
-    for (const [name, shape] of [
-      ["browser_navigate", { url: z.string() }],
-      ["browser_click", { target: z.string(), element: z.string().optional() }],
-      ["browser_snapshot", {}],
-    ])
-      server.registerTool(name, { inputSchema: shape }, async (args) => {
-        calls.push([name, args]);
-        return {
-          content: [{ type: "text", text: `- button "Light" [ref=e1]` }],
-        };
-      });
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-      enableJsonResponse: true,
-    });
-    await server.connect(transport);
-    let body = "";
-    for await (const c of req) body += c;
-    await transport.handleRequest(
-      req,
-      res,
-      body ? JSON.parse(body) : undefined,
-    );
+// ---- The real browser route ------------------------------------------------
+// The repository's browser wrapper (browser/: its HTTP listener with Host and
+// Origin checks, owned connection, fixed settings and the pinned
+// @playwright/mcp tools) on host loopback. The only difference from the
+// container is Chromium: the local executable from
+// LONG_BENCHMARK_GAME_BROWSER=local:/abs/chromium, running on this host with
+// access to host files - the worst case for the boundary.
+const LOCAL_CHROMIUM = /^local:(\/.+)$/.exec(BROWSER ?? "")?.[1];
+async function realBrowser(executable = LOCAL_CHROMIUM) {
+  const dir = join(checkout, "browser");
+  const load = (name) => import(pathToFileURL(join(dir, name)).href);
+  const resolveIn = createRequire(join(dir, "package.json")).resolve;
+  const { startHttpServer } = await load("server.mjs");
+  const { createOwnedConnection } = await load("connection.mjs");
+  const { browserSettings } = await load("settings.mjs");
+  // The resolved entries are CommonJS: named exports may sit on default.
+  const mcp = await import(pathToFileURL(resolveIn("@playwright/mcp")).href);
+  const createConnection = mcp.createConnection ?? mcp.default.createConnection;
+  const pw = await import(pathToFileURL(resolveIn("playwright")).href);
+  const chromium = pw.chromium ?? pw.default.chromium;
+  const scratch = await mkdtemp(join(temporary, "browser-"));
+  const settings = browserSettings(scratch, { PATH: process.env.PATH });
+  settings.browser.launchOptions.executablePath = executable;
+  const server = await startHttpServer({
+    createConnection: () =>
+      createOwnedConnection({ createConnection, chromium, settings }),
+    host: "127.0.0.1",
+    port: 0,
   });
-  await new Promise((r) => http.listen(0, "127.0.0.1", r));
-  return {
-    url: `http://127.0.0.1:${http.address().port}/mcp`,
-    calls,
-    close: () => {
-      http.closeAllConnections();
-      return new Promise((r) => http.close(r));
-    },
-  };
+  return { url: server.url, close: server.close, previewKey: "url" };
 }
+const realBrowserSkip =
+  !LOCAL_CHROMIUM &&
+  "needs LONG_BENCHMARK_GAME_BROWSER=local:/abs/chromium and browser/node_modules";
+
+test(
+  "real browser route: with a host browser, no agent path reaches the hidden file",
+  { timeout: 600000, skip: realBrowserSkip },
+  async () => {
+    const browser = await realBrowser();
+    try {
+      // The wrapper's own layer, without the harness policy: the pinned MCP
+      // server refuses browser-initiated file: navigation, in place and in a
+      // new tab, and the browser shows nothing of the file.
+      const { Client } =
+        await import("@modelcontextprotocol/sdk/client/index.js");
+      const { StreamableHTTPClientTransport } =
+        await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+      const owned = join(await mkdtemp(join(temporary, "owned-")), "x.json");
+      const ownedMarker = `owned-marker-${process.pid}`;
+      await writeFile(owned, JSON.stringify({ ownedMarker }));
+      const client = new Client({ name: "boundary-check", version: "1" });
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL(browser.url)),
+      );
+      try {
+        const text = async (name, args) =>
+          JSON.stringify(await client.callTool({ name, arguments: args }));
+        const url = pathToFileURL(owned).href;
+        for (const [name, args] of [
+          ["browser_navigate", { url }],
+          ["browser_tabs", { action: "new", url }],
+        ]) {
+          const refused = await text(name, args);
+          assert.match(refused, /"isError":true/, name);
+          assert.match(
+            refused,
+            /Access to \\"file:\\" protocol is blocked/,
+            name,
+          );
+          const seen = await text("browser_snapshot", {});
+          assert.match(seen, /Page URL: about:blank/, name);
+          assert(!seen.includes(ownedMarker), name);
+        }
+      } finally {
+        await client.close();
+      }
+      // Through the agent and the runner's policy, with this same browser:
+      // the isolation probes (no checker: the run stops before a session).
+      const results = join(temporary, "results-browser-route");
+      const run = await runner("browser-route-1", {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        OPENWEBUI_ACP_HOME: await userState("http://127.0.0.1:9"),
+        LONG_BENCHMARK_RESULTS: results,
+        LONG_BENCHMARK_BROWSER_MCP_URL: browser.url,
+        TMPDIR: temporary,
+      });
+      const dir = join(results, "browser-route-1");
+      if (EVIDENCE)
+        await cp(dir, join(EVIDENCE, "browser-route-1"), { recursive: true });
+      assert.equal(run.code, 4, run.stderr);
+      const report = JSON.parse(
+        await readFile(join(dir, "report.json"), "utf8"),
+      );
+      const iso = report.isolation;
+      assert.equal(iso.established, true, JSON.stringify(iso.findings));
+      const r = iso.results;
+      // Positive control: this host browser read the workspace preview.
+      for (const id of [
+        "browser-preview",
+        "browser-open-host",
+        "browser-look-host",
+      ])
+        assert.equal(r[id].ok, true, id);
+      // The policy refused every browser-initiated route to the file.
+      for (const id of [
+        "browser-navigate-file",
+        "browser-new-tab-file",
+        "browser-navigate-other",
+      ])
+        assert.equal(r[id].ok, false, id);
+      // Every page read after a page-initiated attempt ran and showed nothing.
+      for (const id of [
+        "browser-link-look",
+        "browser-tab-link-tabs",
+        "browser-tab-link-look",
+        "browser-window-tabs",
+        "browser-window-look",
+        "browser-redirect-look",
+        "browser-back-look",
+      ])
+        assert.equal(r[id].ok, true, id);
+      // The clicks and tab selections themselves ran.
+      for (const id of [
+        "browser-link",
+        "browser-tab-link",
+        "browser-tab-link-select",
+        "browser-window",
+        "browser-redirect",
+      ])
+        assert.notEqual(r[id].ok, null, id);
+      assert(!JSON.stringify(report).includes(script.marker));
+    } finally {
+      await browser.close();
+    }
+  },
+);
+
 // A scripted model that writes `html` as index.html and, when `play` is set,
 // previews and plays it without being asked.
-async function fakeModel(html, play) {
+async function fakeModel(html, play, previewKey = "containerUrl") {
   const steps = [
     () => ({ name: "write_file", args: { path: "index.html", content: html } }),
   ];
@@ -1179,11 +1392,18 @@ async function fakeModel(html, play) {
       }),
       (last) => ({
         name: "browser/browser_navigate",
-        args: { url: JSON.parse(last).containerUrl },
+        args: { url: JSON.parse(last)[previewKey] },
       }),
-      () => ({
+      () => ({ name: "browser/browser_snapshot", args: {} }),
+      // A light, by the reference in the real snapshot.
+      (last) => ({
         name: "browser/browser_click",
-        args: { target: "e1", element: "light" },
+        args: {
+          target: String(last)
+            .replaceAll('\\"', '"')
+            .match(/button "Light[^"]*"[^\n]*?\[ref=([a-z0-9]+)\]/)?.[1],
+          element: "a light",
+        },
       }),
       () => ({ name: "browser/browser_snapshot", args: {} }),
     );
@@ -1252,11 +1472,21 @@ test(
   {
     timeout: 600000,
     skip:
-      (!CHECKER || !BROWSER) &&
-      "needs LONG_BENCHMARK_ACCEPTANCE_CHECKER and LONG_BENCHMARK_GAME_BROWSER",
+      (!CHECKER ||
+        !BROWSER ||
+        (!LOCAL_CHROMIUM && !process.env.LONG_BENCHMARK_BROWSER_MCP_URL)) &&
+      "needs LONG_BENCHMARK_ACCEPTANCE_CHECKER, LONG_BENCHMARK_GAME_BROWSER and a real agent browser (local:/abs/chromium or LONG_BENCHMARK_BROWSER_MCP_URL)",
   },
   async () => {
-    const browser = await fakeBrowser();
+    // The agent's real browser: a configured one (the container) or the
+    // repository's wrapper with the local Chromium.
+    const browser = process.env.LONG_BENCHMARK_BROWSER_MCP_URL
+      ? {
+          url: process.env.LONG_BENCHMARK_BROWSER_MCP_URL,
+          previewKey: "containerUrl",
+          close: async () => {},
+        }
+      : await realBrowser();
     const results = join(temporary, "results-full");
     try {
       for (const [label, game, play, verdict] of [
@@ -1266,6 +1496,7 @@ test(
         const model = await fakeModel(
           source.games[game]["index.html"].toString("utf8"),
           play,
+          browser.previewKey,
         );
         try {
           const run = await runner(label, {
@@ -1279,8 +1510,11 @@ test(
             LONG_BENCHMARK_BROWSER_MCP_URL: browser.url,
             TMPDIR: temporary,
           });
-          assert.equal(run.code, 0, run.stderr + run.stdout.slice(-2000));
           const dir = join(results, label);
+          // Optional: keep this run's results outside the temporary tree.
+          if (EVIDENCE)
+            await cp(dir, join(EVIDENCE, label), { recursive: true });
+          assert.equal(run.code, 0, run.stderr + run.stdout.slice(-2000));
           const report = JSON.parse(
             await readFile(join(dir, "report.json"), "utf8"),
           );
@@ -1288,6 +1522,22 @@ test(
             report.isolation.established,
             true,
             JSON.stringify(report.isolation.findings),
+          );
+          // The browser route was probed, with a working preview control,
+          // before the attempt and again after it, under the same policy.
+          for (const iso of [report.isolation, report.isolationAfter]) {
+            assert.equal(iso.established, true, JSON.stringify(iso.findings));
+            assert(
+              iso.results["browser-look-host"].ok === true ||
+                iso.results["browser-look-container"].ok === true,
+            );
+            for (const id of ["browser-navigate-file", "browser-new-tab-file"])
+              assert.equal(iso.results[id].ok, false, id);
+          }
+          assert.deepEqual(report.evaluator.session.unprobedRoutes, []);
+          assert.deepEqual(
+            report.evaluator.session.harnessRoutes.map((r) => r.route),
+            ["browser-mcp"],
           );
           assert.equal(
             report.hiddenChecks.verdict,
@@ -1354,14 +1604,6 @@ test(
           await model.close();
         }
       }
-      assert(browser.calls.some(([name]) => name === "browser_click"));
-      // Navigation went only to the preview the agent started.
-      for (const [name, args] of browser.calls)
-        if (name === "browser_navigate")
-          assert.match(
-            args.url,
-            /^http:\/\/host\.docker\.internal:\d+\/index\.html$/,
-          );
     } finally {
       await browser.close();
     }
@@ -1413,4 +1655,63 @@ test("the summary shows the hidden verdict and play-testing explicitly", async (
     "unavailable: 0 passed, 0 failed, 13 unavailable",
   );
   assert.equal(partial.playtest, "no");
+});
+
+test("the browser policy admits navigation only to the agent's own preview", () => {
+  const previewOrigins = new Set([
+    "http://127.0.0.1:4100",
+    "http://host.docker.internal:4100",
+  ]);
+  const call = (tool, args) =>
+    GAME.decide(
+      {
+        toolCall: {
+          title: `Call browser/${tool} (runs on this machine outside the sandbox): ${JSON.stringify(args)}`,
+        },
+      },
+      { game: true, previewOrigins },
+    );
+  const preview = "http://127.0.0.1:4100/index.html";
+  const file = "file:///scratch/acceptance/playthrough.json";
+  assert.equal(call("browser_navigate", { url: preview }), true);
+  assert.equal(
+    call("browser_navigate", { url: "http://host.docker.internal:4100/x" }),
+    true,
+  );
+  for (const url of [
+    file,
+    "http://127.0.0.1:9/",
+    "about:blank",
+    "chrome://version",
+  ])
+    assert.equal(call("browser_navigate", { url }), false, url);
+  // A tab at a URL is browser-initiated navigation too.
+  assert.equal(call("browser_tabs", { action: "new", url: file }), false);
+  assert.equal(
+    call("browser_tabs", { action: "new", url: "http://127.0.0.1:9/" }),
+    false,
+  );
+  assert.equal(call("browser_tabs", { action: "new", url: preview }), true);
+  assert.equal(call("browser_tabs", { action: "new" }), true);
+  for (const action of ["list", "select", "close"])
+    assert.equal(call("browser_tabs", { action, index: 0 }), true, action);
+  assert.equal(
+    call("browser_tabs", { action: "select", index: 1, url: file }),
+    false,
+  );
+  assert.equal(call("browser_tabs", { action: "reload" }), false);
+  // Page tools take no URL; one that does is refused.
+  assert.equal(call("browser_click", { target: "e3", element: "link" }), true);
+  assert.equal(call("browser_click", { target: "e3", url: file }), false);
+  assert.equal(call("browser_snapshot", {}), true);
+  // Tools outside the wrapper allowlist, and malformed arguments.
+  assert.equal(call("browser_evaluate", { function: "() => 1" }), false);
+  assert.equal(call("browser_take_screenshot", {}), false);
+  assert.equal(
+    GAME.decide(
+      { toolCall: { title: "Call browser/browser_click: not json" } },
+      { game: true, previewOrigins },
+    ),
+    false,
+  );
 });
