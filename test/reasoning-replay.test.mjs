@@ -209,11 +209,9 @@ test("malformed reasoning, conflicting aliases, duplicate tool IDs and interrupt
 test("ACP executes each new tool once and replays private reasoning without rendering it", async () => {
   const { ClientApp } = await import("@agentclientprotocol/sdk");
   const { createAgent } = await import("../dist/agent.js");
-  const { changeTrust } = await import("../dist/workspace.js");
   const workspace = join(temp, "project");
   await mkdir(workspace);
   await writeJson("config.json", config);
-  await changeTrust(workspace, config.url, true);
   metadata = [
     {
       id: config.model,
