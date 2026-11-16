@@ -121,8 +121,11 @@ At the `xhigh` reasoning effort the agent sends `max_tokens` itself: the
 `context_window`. Thinking counts against `max_tokens`, so a server that
 allows a larger limit for that level declares it there. A server that leaves
 that level uncapped would otherwise let one reply think until the window is
-full. The same amount is reserved when requests are sized. Other levels send
-no `max_tokens`, and a model without an advertised `context_window` gets none.
+full. The same amount is reserved when requests are sized, and the runtime
+guidance tells the model to plan for it. At other levels the agent sends no
+`max_tokens` and the server's own cap applies (the guidance uses the advertised
+`max_output_tokens`, else `outputTokenBudget`); a model without an advertised
+`context_window` gets none at any level.
 32,768 is a fixed figure, not a measured percentile of reply sizes. Without a
 level-specific value, an explicit cap respects the advertised output limit even
 if the server permits uncapped replies when the parameter is omitted. Reasoning
@@ -130,10 +133,9 @@ effort remains `xhigh`.
 
 A reply cut off by the output limit before it produced any text or tool call
 used the whole limit thinking. Asking for a shorter reply would not help, so
-the single re-ask says so and runs once at the next lower declared level (by
-the `reasoning_effort` order used for summaries; never Off), with that level's
-own cap. Where no lower level is known it runs at the same level and asks for
-briefer thinking. The session's selected level does not change.
+the notice says so and the single re-ask runs at the same reasoning level with
+the same cap, telling the model to keep its reasoning short and reply or act
+sooner. No tool from the cut-off reply runs, and there is no second re-ask.
 
 ### Clearing older tool results
 

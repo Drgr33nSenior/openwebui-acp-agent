@@ -1151,21 +1151,33 @@ test("Max sends the limit advertised for Max, which the gateway accepts", async 
     assert.equal(coding().at(-1).reasoning_effort, "xhigh");
     assert.equal(coding().at(-1).max_tokens, ceiling);
     assert(!JSON.stringify(c.updates).includes("output_limit_exceeded"));
+    // Runtime guidance names the allowance each request actually gets.
+    const guidance = (r) =>
+      r.messages
+        .find(
+          (m) =>
+            m.role === "system" && /Plan for \d+ output tokens/.test(m.content),
+        )
+        ?.content.match(/Plan for (\d+) output tokens/)[1];
+    assert.deepEqual(coding().map(guidance), ["12288", "32768"]);
   } finally {
     await c.close();
   }
 });
 
-test("a reply whose thinking used the whole limit is asked again once at the next lower effort", async () => {
+test("a reply whose thinking used the whole limit is asked once more at the same level and cap", async () => {
+  // A server declaring both high and xhigh: the re-ask must not move to high,
+  // which would go out without the agent's cap.
   model = {
     id: "fixture",
     context_window: 100768,
     max_output_tokens: 12288,
+    supportedReasoningEfforts: [
+      { reasoningEffort: "xhigh", label: "Max", maxOutputTokens: 32768 },
+    ],
     ...efforts,
   };
-  let cut = 0;
-  reply = (request, res) => {
-    if (request.tools.length === 0 || cut++ > 0) return false;
+  const thinkingOnly = (res) => {
     res.setHeader("Content-Type", "text/event-stream");
     const events = [
       { choices: [{ delta: { reasoning_content: "thinking ".repeat(50) } }] },
@@ -1177,35 +1189,43 @@ test("a reply whose thinking used the whole limit is asked again once at the nex
     );
     return true;
   };
-  const c = await client();
   const reasoning = '["reasoning_effort","xhigh"]';
-  try {
-    await c.select("reasoning", reasoning);
-    assert.equal((await c.prompt()).stopReason, "end_turn");
-    assert.deepEqual(
-      coding().map((r) => [r.reasoning_effort, r.max_tokens]),
-      [
-        ["xhigh", 12288],
-        ["high", undefined],
-      ],
-    );
-    const text = c.updates
-      .filter((u) => u.sessionUpdate === "agent_message_chunk")
-      .map((u) => u.content.text)
-      .join("");
-    assert.match(
-      text,
-      /cut off by its output limit: its thinking used the whole limit before any reply\. Asking once again at Reasoning effort: high\./,
-    );
-    assert.doesNotMatch(text, /shorter reply with smaller tool calls/);
-    const marker = coding()[1].messages.find((m) =>
-      m.content?.startsWith("[Your last reply"),
-    );
-    assert.match(marker.content, /Your thinking used the whole output limit/);
-    // The session keeps its own choice.
-    assert.equal(c.state().reasoning, reasoning);
-  } finally {
-    await c.close();
+  for (const cuts of [1, 2]) {
+    requests.length = 0;
+    let cut = 0;
+    reply = (request, res) =>
+      request.tools.length > 0 && cut++ < cuts && thinkingOnly(res);
+    const c = await client();
+    try {
+      await c.select("reasoning", reasoning);
+      const result = await c.prompt();
+      // One re-ask at most, with the same effort and the same max_tokens.
+      assert.deepEqual(
+        coding().map((r) => [r.reasoning_effort, r.max_tokens]),
+        [
+          ["xhigh", 32768],
+          ["xhigh", 32768],
+        ],
+      );
+      const text = c.updates
+        .filter((u) => u.sessionUpdate === "agent_message_chunk")
+        .map((u) => u.content.text)
+        .join("");
+      assert.match(
+        text,
+        /cut off by its output limit: its thinking used the whole limit before any reply\. Asking once more at the same reasoning level for briefer thinking\. No tools from that reply ran\./,
+      );
+      assert.doesNotMatch(text, /shorter reply with smaller tool calls/);
+      const marker = coding()[1].messages.find((m) =>
+        m.content?.startsWith("[Your last reply"),
+      );
+      assert.match(marker.content, /Keep your reasoning short this time/);
+      if (cuts === 1) assert.equal(result.stopReason, "end_turn");
+      else assert.match(text, /Model reply recovery failed after one re-ask/);
+      assert.equal(c.state().reasoning, reasoning);
+    } finally {
+      await c.close();
+    }
   }
 });
 

@@ -126,10 +126,12 @@ the model to retry. Only failures at the argument parser state that nothing
 executed; response/state validation failures warn that effects may have occurred.
 A truncated tool reply is discarded before execution; the
 single re-ask requests smaller `edit_file` calls only when that tool is offered.
-A reply cut off while only thinking is re-asked once at the next lower declared
-reasoning level instead (see [sessions](sessions.md#models-and-context)).
-Runtime guidance uses a positive integer `max_output_tokens` from model metadata
-(top level, then `openai`), or the private `outputTokenBudget` fallback of 12,288.
+A reply cut off while only thinking is instead re-asked once at the same
+reasoning level and cap, for briefer thinking (see
+[sessions](sessions.md#models-and-context)).
+Runtime guidance uses the reply cap the agent sends itself at `xhigh`, else a
+positive integer `max_output_tokens` from model metadata (top level, then
+`openai`), or the private `outputTokenBudget` fallback of 12,288.
 This is a planning allowance, not a measured output count or a request override.
 No `max_tokens` or equivalent parameter is added to coding requests, with two
 exceptions. Compaction summary requests send a fixed low reasoning setting and
