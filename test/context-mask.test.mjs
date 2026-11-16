@@ -528,10 +528,20 @@ test("the context meter leaves reasoning out of what the conversation occupies",
 test("xhigh gets an explicit reply cap that fits the window, and the input is sized against it", () => {
   const family = { context_window: 100768, max_output_tokens: 12288 };
   assert.equal(XHIGH_OUTPUT_TOKENS, 32768);
-  assert.equal(replyTokenCap("xhigh", family), 32768);
+  assert.equal(replyTokenCap("xhigh", family), 12288);
+  assert.equal(
+    replyTokenCap("xhigh", { context_window: 32768, max_output_tokens: 4096 }),
+    4096,
+  );
+  assert.equal(
+    replyTokenCap("xhigh", {
+      openai: { context_window: 100768, max_output_tokens: 8192 },
+    }),
+    8192,
+  );
   for (const effort of [undefined, "none", "low", "medium", "high", "max"])
     assert.equal(replyTokenCap(effort, family), undefined);
-  // Never above half the window; never below a larger advertised allowance.
+  // Never above half the window or the server's advertised output limit.
   assert.equal(replyTokenCap("xhigh", { context_window: 40000 }), 20000);
   assert.equal(
     replyTokenCap("xhigh", {
@@ -544,11 +554,14 @@ test("xhigh gets an explicit reply cap that fits the window, and the input is si
   // No explicit window: nothing to fit it to, so none is sent.
   assert.equal(replyTokenCap("xhigh", { max_input_tokens: 50000 }), undefined);
   assert.equal(replyTokenCap("xhigh", { id: "unknown" }), undefined);
-  // Reserve: the cap replaces the smaller advertised allowance.
-  assert.deepEqual(contextLimits(family, 12288, 32768), {
-    size: 100768,
-    usable: 68000,
-  });
+  // Reserve the cap actually sent, without exceeding the advertised allowance.
+  assert.deepEqual(
+    contextLimits(family, 12288, replyTokenCap("xhigh", family)),
+    {
+      size: 100768,
+      usable: 88480,
+    },
+  );
   assert.deepEqual(contextLimits(family, 12288), {
     size: 100768,
     usable: 88480,
@@ -921,7 +934,7 @@ test("only xhigh requests carry max_tokens, and compaction pressure uses the res
     await c.select("reasoning", JSON.stringify(["reasoning_effort", "xhigh"]));
     await c.prompt();
     assert.equal(coding().at(-1).reasoning_effort, "xhigh");
-    assert.equal(coding().at(-1).max_tokens, 32768);
+    assert.equal(coding().at(-1).max_tokens, 12288);
   } finally {
     await c.close();
   }
@@ -931,7 +944,6 @@ test("only xhigh requests carry max_tokens, and compaction pressure uses the res
   model = {
     id: "fixture",
     context_window: window,
-    max_output_tokens: 500,
     ...efforts,
   };
   pending = [
@@ -950,11 +962,96 @@ test("only xhigh requests carry max_tokens, and compaction pressure uses the res
       assert.equal(r.max_tokens, window / 2);
       assert(Math.ceil(requestChars(r) / 4) + r.max_tokens <= window);
     }
-    // Both reads together exceed the reserved input, though they would fit the
-    // advertised 500-token allowance: the context was compacted first.
+    // Both reads together exceed the reserved input: compact before sending.
     assert.equal(requests.filter((r) => r.tools.length === 0).length, 1);
   } finally {
     await small.close();
+  }
+});
+
+test("Max respects the gateway output limit on the first prompt and keeps selected settings", async () => {
+  model = {
+    id: "fixture",
+    context_window: 100768,
+    max_output_tokens: 12288,
+    ...efforts,
+  };
+  reply = (request, res) => {
+    if (request.max_tokens > model.max_output_tokens) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { code: "output_limit_exceeded" } }));
+      return true;
+    }
+  };
+  const c = await client();
+  const reasoning = '["reasoning_effort","xhigh"]';
+  try {
+    await c.select("reasoning", reasoning);
+    await c.select("mode", "plan");
+    await c.prompt();
+    assert.equal(coding().length, 1);
+    assert.equal(coding()[0].reasoning_effort, "xhigh");
+    assert.equal(coding()[0].max_tokens, 12288);
+    assert(
+      c
+        .state()
+        .messages.some((m) => m.role === "assistant" && m.content === "Done"),
+    );
+    assert(!JSON.stringify(c.updates).includes("output_limit_exceeded"));
+    assert.equal(c.state().reasoning, reasoning);
+    assert.equal(c.state().workflow, "plan");
+  } finally {
+    await c.close();
+  }
+  const restored = await client(c.cwd, c.sessionId);
+  try {
+    assert.equal(restored.state().reasoning, reasoning);
+    assert.equal(restored.state().workflow, "plan");
+  } finally {
+    await restored.close();
+  }
+});
+
+test("a first-prompt HTTP 400 does not reset reasoning or mode in saved ACP state", async () => {
+  model = {
+    id: "fixture",
+    context_window: 100768,
+    max_output_tokens: 12288,
+    ...efforts,
+  };
+  reply = (_request, res) => {
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { code: "output_limit_exceeded" } }));
+    return true;
+  };
+  const c = await client();
+  const reasoning = '["reasoning_effort","xhigh"]';
+  try {
+    await c.select("reasoning", reasoning);
+    await c.select("mode", "plan");
+    await c.prompt();
+    assert.equal(
+      coding().length,
+      1,
+      "HTTP failure must not automatically retry",
+    );
+    assert(JSON.stringify(c.updates).includes("output_limit_exceeded"));
+    assert.equal(c.state().reasoning, reasoning);
+    assert.equal(c.state().workflow, "plan");
+    const saved = JSON.parse(
+      await readFile(join(directory, `session-${c.sessionId}.json`), "utf8"),
+    );
+    assert.equal(saved.reasoning, reasoning);
+    assert.equal(saved.workflow, "plan");
+  } finally {
+    await c.close();
+  }
+  const restored = await client(c.cwd, c.sessionId);
+  try {
+    assert.equal(restored.state().reasoning, reasoning);
+    assert.equal(restored.state().workflow, "plan");
+  } finally {
+    await restored.close();
   }
 });
 
