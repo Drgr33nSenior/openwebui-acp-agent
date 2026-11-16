@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, access } from "node:fs/promises";
+import { mkdtemp, realpath, access, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -297,12 +297,17 @@ test("a command's natural exit also releases descendants retaining its pipes", a
 
 for (const sandboxed of [false, true]) {
   test(`a failed progress callback stops its owned process (${sandboxed ? "sandboxed" : "local"})`, async () => {
-    const args = ["-e", "console.log('ready');setInterval(()=>{},1000)"];
+    const pidFile = join(root, `callback-${sandboxed}.pid`);
+    const args = [
+      "-e",
+      `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));console.log('ready');setInterval(()=>{},1000)`,
+    ];
     const limits = { timeoutMs: 5000, outputBytes: 10000 };
+    let failedAt;
     const output = () => {
+      failedAt ??= performance.now();
       throw new Error("Synthetic private callback failure");
     };
-    const started = Date.now();
     const raw = sandboxed
       ? await sandboxCommand(
           process.execPath,
@@ -320,7 +325,11 @@ for (const sandboxed of [false, true]) {
           limits,
           output,
         );
-    assert(Date.now() - started < 4000);
+    assert.notEqual(failedAt, undefined, "progress callback ran");
+    assert(performance.now() - failedAt < 4000, "callback cleanup exceeded 4s");
+    const pid = Number(await readFile(pidFile, "utf8"));
+    assert(Number.isSafeInteger(pid) && pid > 0);
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
     const actual = JSON.parse(raw);
     assert.equal(actual.limitedOrCancelled, true);
     assert.equal(actual.output, "ready\n");
