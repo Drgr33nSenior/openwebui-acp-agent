@@ -754,7 +754,7 @@ test("Stop kills an owned foreground command in YOLO before a delayed side effec
     await enabled(c);
     const pending = invoke(c, [
       run(
-        `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));setTimeout(()=>fs.writeFileSync(${JSON.stringify(late)},'bad'),10000);setInterval(()=>{},1000)`,
+        `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(ready + ".tmp")},String(process.pid));fs.renameSync(${JSON.stringify(ready + ".tmp")},${JSON.stringify(ready)});setTimeout(()=>fs.writeFileSync(${JSON.stringify(late)},'bad'),10000);setInterval(()=>{},1000)`,
       ),
     ]);
     await waitFor(() =>
