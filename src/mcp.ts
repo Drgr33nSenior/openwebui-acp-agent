@@ -235,7 +235,7 @@ export class Mcp {
         const connecting = new AbortController();
         const client = new Client({
           name: "openmettle-acp",
-          version: "0.6.0",
+          version: "0.7.0",
         });
         let failed = false;
         let cleanupSignal: AbortSignal | undefined;

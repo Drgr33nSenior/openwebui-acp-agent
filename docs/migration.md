@@ -8,7 +8,7 @@ or executable project settings.
 
 The project is now **OpenMettle ACP**, at
 [OpenMettle/openmettle-acp](https://github.com/OpenMettle/openmettle-acp).
-The renamed source package is `openmettle-acp`; its executable is
+The package is `openmettle-acp`, first released as 0.7.0; its executable is
 `openmettle-acp`, with `openwebui-acp-agent` retained as an alias. The agent's
 ACP title and MCP client metadata use the new name. The proposed, unpublished
 ACP registry entry uses `openmettle-acp` too.
@@ -25,15 +25,16 @@ Compatibility identities remain unchanged:
 
 No credential, trust or session migration runs. Existing client registrations
 continue to use their installed executable until explicitly updated. When
-installing a renamed build, its entrypoint is under
+installing 0.7.0 or later, its entrypoint is under
 `node_modules/openmettle-acp/dist/cli.js`; preserve the registration's identity
 and update only its command path. Keep the previous package for rollback.
 
 Existing releases retain their original tarball names. The 0.6.0 artifact is
 still `openwebui-acp-agent-0.6.0.tgz`; do not construct a renamed 0.6.0 asset URL.
-Future releases from the renamed source use `openmettle-acp-VERSION.tgz` and
-need a new immutable version. The npm name check returned no public package
-on 15 November 2026; that does not reserve the name or establish publishing rights.
+Releases from 0.7.0 onwards use `openmettle-acp-VERSION.tgz`, starting with
+`openmettle-acp-0.7.0.tgz`, and each needs a new immutable version. The renamed
+package is distributed through GitHub Releases, not npm. The npm name check
+returned no public package on 15 November 2026; that does not reserve the name or establish publishing rights.
 
 ## Upgrade
 

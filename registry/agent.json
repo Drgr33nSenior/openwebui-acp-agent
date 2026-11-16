@@ -2,7 +2,7 @@
   "$schema": "https://cdn.agentclientprotocol.com/registry/v1/latest/agent.schema.json",
   "id": "openmettle-acp",
   "name": "OpenMettle ACP",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "OpenMettle coding agent for compatible ACP clients, using your Open WebUI installation.",
   "license": "MIT",
   "license_url": "https://github.com/OpenMettle/openmettle-acp/blob/main/LICENSE",
@@ -11,7 +11,7 @@
   "authors": ["Drgr33nSenior"],
   "distribution": {
     "npx": {
-      "package": "openmettle-acp@0.6.0",
+      "package": "openmettle-acp@0.7.0",
       "args": ["acp"],
       "env": {}
     }

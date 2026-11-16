@@ -17,13 +17,13 @@ see [compatibility and testing](docs/verification.md). Native Windows is not
 supported; see the [Windows plan](docs/windows-plan.md) for a later version.
 Linux needs bubblewrap, socat and ripgrep for command isolation.
 
-The published 0.6.0 package retains the `openwebui-acp-agent` package and command
-names shown below. The renamed source builds as `openmettle-acp`, with both
-`openmettle-acp` and `openwebui-acp-agent` commands. A renamed package has not yet
-been released or published to npm. See [the rename and upgrade notes](docs/migration.md#openmettle-rename).
+Release 0.7.0 is the first `openmettle-acp` package. It installs the
+`openmettle-acp` command and keeps `openwebui-acp-agent`, the command name in
+0.6.0 and earlier, as an alias. Configuration and credentials stay where they
+were. It is not published to npm. See [the rename and upgrade notes](docs/migration.md#openmettle-rename).
 
 ```sh
-npm install --global https://github.com/OpenMettle/openmettle-acp/releases/download/v0.6.0/openwebui-acp-agent-0.6.0.tgz
+npm install --global https://github.com/OpenMettle/openmettle-acp/releases/download/v0.7.0/openmettle-acp-0.7.0.tgz
 ```
 
 In your ACP client's custom-agent settings, use an absolute Node executable and
@@ -37,7 +37,7 @@ JetBrains registration has this form; preserve your other entries:
     "openwebui": {
       "command": "/absolute/path/to/node",
       "args": [
-        "/absolute/installation/node_modules/openwebui-acp-agent/dist/cli.js",
+        "/absolute/installation/node_modules/openmettle-acp/dist/cli.js",
         "acp"
       ],
       "env": {}
@@ -46,8 +46,10 @@ JetBrains registration has this form; preserve your other entries:
 }
 ```
 
-`npm root --global` shows the global `node_modules` directory. This release is distributed through [GitHub Releases](https://github.com/OpenMettle/openmettle-acp/releases/tag/v0.6.0); no npm account is needed.
-See the [0.6.0 release notes](docs/releases/0.6.0.md) for changes since 0.5.0.
+`npm root --global` shows the global `node_modules` directory. This release is distributed through [GitHub Releases](https://github.com/OpenMettle/openmettle-acp/releases/tag/v0.7.0); no npm account is needed.
+See the [0.7.0 release notes](docs/releases/0.7.0.md) for changes since 0.6.0.
+When updating an existing registration, keep its name and change only the
+`dist/cli.js` path.
 For T3 Code desktop setup and the tested scope, see [T3 compatibility](docs/t3.md).
 The [ACP registry manifest](registry/agent.json) is a proposal for future catalog
 distribution. Its npm target is not published, and it is not an installable
@@ -76,7 +78,8 @@ arguments, project files or ACP configuration. `/login` requests setup again;
 revoking the server's API key. Reconnect after login or logout.
 
 For a client without terminal authentication, `openmettle-acp login` is the
-manual fallback; published 0.6.0 uses `openwebui-acp-agent login`. Browser
+manual fallback. 0.6.0 and earlier use `openwebui-acp-agent login`; that
+alias still works. Browser
 sign-in and OAuth are not implemented. See
 [configuration and troubleshooting](docs/configuration.md).
 

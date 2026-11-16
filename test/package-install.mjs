@@ -78,7 +78,7 @@ try {
     .map((line) => JSON.parse(line));
   const response = messages.find((m) => m.id === 1);
   assert.equal(response.result.protocolVersion, 1);
-  assert.equal(response.result.agentInfo.version, "0.6.0");
+  assert.equal(response.result.agentInfo.version, "0.7.0");
   assert.equal(response.result.agentInfo.name, "openmettle-acp");
   assert.equal(response.result.agentInfo.title, "OpenMettle ACP");
   assert.equal(response.result.authMethods[0].type, "terminal");
@@ -199,5 +199,5 @@ assert.equal(
   fixtureText,
 );
 console.log(
-  "Installed 0.6.0: clean ACP v1 handshake, terminal authentication and logout discovery, context usage module, static preview lifecycle, and real sandbox command passed outside the checkout",
+  "Installed 0.7.0: clean ACP v1 handshake, terminal authentication and logout discovery, context usage module, static preview lifecycle, and real sandbox command passed outside the checkout",
 );
