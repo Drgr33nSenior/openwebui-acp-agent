@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, access, readFile } from "node:fs/promises";
+import { mkdtemp, realpath, access } from "node:fs/promises";
+import { readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -304,8 +305,45 @@ for (const sandboxed of [false, true]) {
     ];
     const limits = { timeoutMs: 5000, outputBytes: 10000 };
     let failedAt;
+    let hostPid;
+    let identityError;
     const output = () => {
       failedAt ??= performance.now();
+      try {
+        if (hostPid === undefined) {
+          if (sandboxed && process.platform === "linux") {
+            // --unshare-pid makes the child's process.pid namespace-local.
+            // Match the unique fixture argv in the host's procfs while alive.
+            const matches = readdirSync("/proc").filter((pid) => {
+              if (!/^\d+$/.test(pid)) return false;
+              try {
+                const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split(
+                  "\0",
+                );
+                return (
+                  argv[0] === process.execPath &&
+                  argv[1] === "-e" &&
+                  argv[2] === args[1]
+                );
+              } catch (error) {
+                if (["ENOENT", "ESRCH", "EACCES", "EPERM"].includes(error.code))
+                  return false;
+                throw error;
+              }
+            });
+            assert.equal(matches.length, 1, "unique live fixture host PID");
+            hostPid = Number(matches[0]);
+          } else hostPid = Number(readFileSync(pidFile, "utf8"));
+          assert(Number.isSafeInteger(hostPid) && hostPid > 0);
+          assert.equal(
+            process.kill(hostPid, 0),
+            true,
+            "fixture was alive before cancellation",
+          );
+        }
+      } catch (error) {
+        identityError = error;
+      }
       throw new Error("Synthetic private callback failure");
     };
     const raw = sandboxed
@@ -327,9 +365,9 @@ for (const sandboxed of [false, true]) {
         );
     assert.notEqual(failedAt, undefined, "progress callback ran");
     assert(performance.now() - failedAt < 4000, "callback cleanup exceeded 4s");
-    const pid = Number(await readFile(pidFile, "utf8"));
-    assert(Number.isSafeInteger(pid) && pid > 0);
-    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    assert.equal(identityError, undefined);
+    assert(Number.isSafeInteger(hostPid) && hostPid > 0);
+    assert.throws(() => process.kill(hostPid, 0), { code: "ESRCH" });
     const actual = JSON.parse(raw);
     assert.equal(actual.limitedOrCancelled, true);
     assert.equal(actual.output, "ready\n");
