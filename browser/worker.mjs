@@ -28,11 +28,12 @@ try {
   process.env.XDG_CACHE_HOME = cache;
   const { createConnection } = await import("@playwright/mcp");
   const { chromium } = await import("playwright");
-  const connect = () =>
+  const connect = ({ confined = false } = {}) =>
     createOwnedConnection({
       createConnection,
       chromium,
       settings: browserSettings(temporary, process.env),
+      confined,
     });
   if (mode === "--http") {
     const server = await startHttpServer({

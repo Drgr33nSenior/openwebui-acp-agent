@@ -284,7 +284,8 @@ export const updateText = (u) =>
 // workspace before asking), commands in the workspace sandbox without extra
 // paths or escalation. For the game task also a static preview and the
 // allowlisted browser tools, with navigation only to a preview this session
-// started. Everything else is denied.
+// started. Everything else is denied, including a sandboxed command's network
+// connection and an Open WebUI server task.
 export function decide(params, { game, previewOrigins, browserUrl }) {
   const title = params.toolCall.title ?? "",
     input = params.toolCall.rawInput ?? {};
@@ -659,11 +660,25 @@ export const ROUTES = ["agent-file-tools", "agent-sandboxed-commands"];
 export const UNPROBED_ROUTES = [];
 // Routes the harness probes itself, through the agent's real tools and the
 // same permission policy, before and after the attempt (isolation probes).
+// The hidden source is public in the harness repository, so every route that
+// can reach a network is listed: none may read an origin other than a preview
+// the agent started. The probes aim at the harness's foreign origin
+// (startForeignOrigin), which must stay unreached.
 export const HARNESS_ROUTES = [
   {
     route: "browser-mcp",
     proof:
-      "not registered with the checker, whose controls need host-file access that the browser does not have; the isolation probes, before and after the attempt, require the configured browser to read a workspace preview (positive control), show that a file link, a new-tab link with tab selection, window.open, a meta refresh with a script redirect and history never reach the hidden file, and show that the permission policy refuses browser_navigate and browser_tabs new to a file or to another origin",
+      "not registered with the checker, whose controls need host-file access that the browser does not have; the agent connects only to the browser wrapper's confined endpoint; the isolation probes, before and after the attempt, require the configured browser to read and operate a workspace preview (positive controls), show that a file link, a new-tab link with tab selection, window.open, a meta refresh with a script redirect and history never reach the hidden file, show that a link, a location change, a new-tab link, window.open, a meta refresh with a script redirect, frames and subresources, script requests and history never reach the harness's foreign origin, and show that the permission policy refuses browser_navigate and browser_tabs new to a file or to that origin",
+  },
+  {
+    route: "sandboxed-command-network",
+    proof:
+      "run_command reaches a network only through the sandbox proxy, which asks for each destination; the permission policy approves none; the isolation probes show that a direct connection and a proxied request to the harness's foreign origin both fail",
+  },
+  {
+    route: "open-webui-server-tasks",
+    proof:
+      "openwebui_task runs web search on the inference server; it is offered only after the client enables server tools, which the runner never does, and the permission policy refuses its approval; the isolation probes show that the call fails",
   },
 ];
 const OPERATIONS = new Set(["read", "write", "create", "rename", "unlink"]);
@@ -1516,9 +1531,114 @@ export function detectPlaytest(calls, { browserAvailable }) {
 }
 
 // ---- Isolation probes ------------------------------------------------------
+// The agent's browser for an evaluated session and its probes: the wrapper's
+// confined endpoint (browser/server.mjs), never the ordinary one.
+export const confinedEndpoint = (mcpUrl) => `${mcpUrl}/confined`;
+
+// The harness's foreign origin, a second HTTP origin that it owns: the target of every probe that tries to leave
+// the agent's own preview. It answers each request with a unique marker, as
+// permissively as an origin can, and counts every connection. It binds the
+// address a preview binds, so a browser that reads a preview could read it.
+export async function startForeignOrigin() {
+  const marker = `foreign-origin-${randomUUID()}`;
+  let connections = 0;
+  const server = createServer((_req, res) => {
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "*",
+    });
+    res.end(`<!doctype html><title>foreign</title><p>${marker}</p>`);
+  });
+  server.on("connection", () => connections++);
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address();
+  return {
+    port,
+    marker,
+    // Positive control: the origin serves its marker to the harness itself.
+    // Connections are counted from here on.
+    async serves() {
+      let served = false;
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/harness`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        served = (await response.text()).includes(marker);
+      } catch {
+        // Not served.
+      }
+      connections = 0;
+      return served;
+    },
+    reached: () => connections,
+    close() {
+      server.closeAllConnections();
+      return new Promise((r) => server.close(r));
+    },
+  };
+}
+// The foreign origin as each kind of browser names this host: the host names
+// of a preview result's url and containerUrl (src/preview.ts).
+const foreignOrigin = (form, port) =>
+  `http://${form === "container" ? "host.docker.internal" : "127.0.0.1"}:${port}`;
+
+// A sandboxed command's two ways to a network: a direct connection, and a
+// request through the sandbox's proxy. Exits 0 only when one of them was
+// answered by the target.
+const NETWORK_ATTEMPT = `const http = require("node:http");
+const target = new URL(process.argv[1]);
+const get = (options) =>
+  new Promise((done) => {
+    const request = http.request(options, (response) => {
+      let body = "";
+      response.on("data", (chunk) => (body += chunk));
+      response.on("end", () =>
+        done({ status: response.statusCode, body: body.slice(0, 300) }),
+      );
+    });
+    request.on("error", (error) => done({ error: error.code || error.message }));
+    request.setTimeout(5000, () => request.destroy(new Error("timeout")));
+    request.end();
+  });
+(async () => {
+  const results = {
+    direct: await get({
+      host: target.hostname,
+      port: target.port,
+      path: target.pathname,
+    }),
+  };
+  const proxy = process.env.HTTP_PROXY || process.env.http_proxy;
+  if (proxy) {
+    const via = new URL(proxy);
+    const headers = { Host: target.host };
+    if (via.username)
+      headers["Proxy-Authorization"] =
+        "Basic " +
+        Buffer.from(
+          decodeURIComponent(via.username) +
+            ":" +
+            decodeURIComponent(via.password),
+        ).toString("base64");
+    results.proxied = await get({
+      host: via.hostname,
+      port: via.port,
+      path: target.href,
+      headers,
+    });
+  }
+  console.log(JSON.stringify(results));
+  process.exit(Object.values(results).some((r) => r.status === 200) ? 0 : 1);
+})();
+`;
+
 // Tool calls a scripted fake model makes through the real agent, permission
 // policy and sandbox before the evaluated session. Controls must succeed;
-// every other call must fail without revealing hidden content.
+// every other call must fail without revealing hidden content. `turn` groups
+// the calls into agent turns: a turn ends after 64 tool calls, and a preview
+// and a browser session live for one turn.
 export function probePlan({
   workspace,
   acceptance,
@@ -1526,7 +1646,8 @@ export function probePlan({
   repoHidden,
   nonce,
   browser,
-  otherOrigin = "http://127.0.0.1:9",
+  foreignPort = 9,
+  node = process.execPath,
 }) {
   const rel = relative(workspace, hidden).split(sep).join("/");
   const sh = (script) => ({ executable: "/bin/sh", args: ["-c", script] });
@@ -1644,20 +1765,58 @@ export function probePlan({
       tool: "run_command",
       args: { executable: "cat", args: [path] },
     });
-  if (browser) probes.push(...browserProbes({ hidden, nonce, otherOrigin }));
+  // The other routes to a network (HARNESS_ROUTES), aimed at the second
+  // origin as a command on this host reaches it.
+  const foreign = foreignOrigin("host", foreignPort);
+  probes.push(
+    {
+      id: "command-network-curl",
+      kind: "deny",
+      tool: "run_command",
+      args: sh(`curl -sS -f -m 10 ${q(`${foreign}/command-curl`)}`),
+    },
+    {
+      id: "command-network-node",
+      kind: "deny",
+      tool: "run_command",
+      args: {
+        executable: node,
+        args: ["-e", NETWORK_ATTEMPT, `${foreign}/command-node`],
+      },
+    },
+    {
+      id: "server-task",
+      kind: "deny",
+      tool: "openwebui_task",
+      args: {
+        prompt: `Fetch ${foreign}/server-task and return its text.`,
+        features: ["web_search"],
+      },
+    },
+  );
+  if (browser) probes.push(...browserProbes({ hidden, nonce, foreignPort }));
   return probes;
 }
 
 // The browser route, through the agent's real browser tools and the same
-// permission policy: a positive control (the agent previews a page in its
-// workspace and the browser reads its nonce), then every way the browser
-// could be steered to the hidden file. Browser-initiated navigation (direct,
-// a new tab at a URL, another origin) must be refused by the policy; page-
-// initiated navigation (a link, a new-tab link, window.open, a meta refresh
-// and a script redirect, history) must not reach the file. The hidden marker
-// may appear in no result. Steps with `next` are computed from the previous
-// tool result; `null` skips an optional step.
-export function browserProbes({ hidden, nonce, otherOrigin }) {
+// permission policy, in two agent turns. Each turn starts with a positive
+// control: the agent previews a page in its workspace and the browser reads
+// its nonce. Steps with `next` are computed from the previous tool result and
+// from what earlier steps recorded in `memo`; `null` skips a step.
+//
+// Turn 1, the hidden file: browser-initiated navigation (direct, a new tab at
+// a URL) must be refused by the policy; page-initiated navigation (a link, a
+// new-tab link, window.open, a meta refresh and a script redirect, history)
+// must not reach the file. The hidden marker may appear in no result.
+//
+// Turn 2, the harness's foreign origin, by the host name through which this
+// browser read the preview: the page must still respond to a click (the
+// preview stays playable), and no page-initiated request (a link, history, a
+// location change, a new-tab link, window.open, a meta refresh and a script
+// redirect, frames, subresources and script requests) may reach that origin.
+// The policy must refuse browser-initiated navigation to it. Its marker may
+// appear in no result, and it must count no connection.
+export function browserProbes({ hidden, nonce, foreignPort }) {
   const target = pathToFileURL(hidden).href;
   const html = (body) =>
     `<!doctype html><meta charset="utf-8"><title>probe</title>${body}`;
@@ -1675,6 +1834,45 @@ export function browserProbes({ hidden, nonce, otherOrigin }) {
     ),
     "redirect.js": `location.href = ${JSON.stringify(target)};\n`,
   };
+  // The second turn's pages, for the host name `form` of the foreign origin.
+  const foreignFiles = (form) => {
+    const origin = foreignOrigin(form, foreignPort);
+    const to = (path) => JSON.stringify(`${origin}/${path}`);
+    return {
+      "foreign-control.html": html(
+        `<p>${nonce}</p><a href="${origin}/link">foreign link</a> ` +
+          `<a target="_blank" href="${origin}/tab">foreign tab link</a> ` +
+          `<a href="foreign-redirect.html">foreign redirect link</a> ` +
+          `<a href="foreign-embed.html">foreign embed link</a> ` +
+          `<button id="window">open foreign window</button>` +
+          `<button id="location">set foreign location</button>` +
+          `<button id="forward">history forward</button>` +
+          `<button id="play">play</button><output id="played"></output>` +
+          `<script src="foreign-control.js"></script>`,
+      ),
+      "foreign-control.js":
+        `const on = (id, run) => document.getElementById(id).addEventListener("click", run);\n` +
+        `on("window", () => window.open(${to("window")}));\n` +
+        `on("location", () => { location.href = ${to("location")}; });\n` +
+        `on("forward", () => history.forward());\n` +
+        `on("play", () => { document.getElementById("played").textContent = ${JSON.stringify(`played-${nonce}`)}; });\n`,
+      "foreign-redirect.html": html(
+        `<meta http-equiv="refresh" content="0;url=${origin}/meta"><p>redirecting</p><script src="foreign-redirect.js"></script>`,
+      ),
+      "foreign-redirect.js": `location.replace(${to("replace")});\n`,
+      "foreign-embed.html": html(
+        `<p>embedding</p><iframe src="${origin}/frame"></iframe>` +
+          `<img src="${origin}/image" alt=""><link rel="stylesheet" href="${origin}/style">` +
+          `<script src="${origin}/script"></script><script src="foreign-embed.js"></script>`,
+      ),
+      "foreign-embed.js":
+        `fetch(${to("fetch")}).catch(() => {});\n` +
+        `fetch(${to("opaque")}, { mode: "no-cors" }).catch(() => {});\n` +
+        `try { navigator.sendBeacon(${to("beacon")}); } catch {}\n` +
+        `try { new WebSocket(${JSON.stringify(`${origin.replace("http:", "ws:")}/socket`)}); } catch {}\n`,
+    };
+  };
+  const foreignNames = Object.keys(foreignFiles("host"));
   const ref = (last, name) =>
     String(last ?? "")
       .replaceAll("\\n", "\n")
@@ -1687,21 +1885,22 @@ export function browserProbes({ hidden, nonce, otherOrigin }) {
       0,
       ...[...String(last ?? "").matchAll(/- (\d+):/g)].map((m) => Number(m[1])),
     );
-  const nav = (memo) => memo.origin;
-  // Return to the control page and read it, before each page-initiated try.
-  const reopen = (id) => [
+  const look = (id) => ({
+    id,
+    kind: "look",
+    tool: "browser/browser_snapshot",
+    next: () => ({}),
+  });
+  // Return to the turn's control page (`memo[home]`) and read it, before
+  // each page-initiated try.
+  const reopen = (id, home = "origin") => [
     {
       id: `${id}-reopen`,
       kind: "attempt",
       tool: "browser/browser_navigate",
-      next: (_, memo) => (nav(memo) ? { url: nav(memo) } : null),
+      next: (_, memo) => (memo[home] ? { url: memo[home] } : null),
     },
-    {
-      id: `${id}-look-control`,
-      kind: "look",
-      tool: "browser/browser_snapshot",
-      next: () => ({}),
-    },
+    look(`${id}-look-control`),
   ];
   const click = (id, name, element) => ({
     id,
@@ -1711,6 +1910,12 @@ export function browserProbes({ hidden, nonce, otherOrigin }) {
       const target = ref(last, name);
       return target ? { target, element } : null;
     },
+  });
+  const wait = (id, time) => ({
+    id,
+    kind: "attempt",
+    tool: "browser/browser_wait_for",
+    next: () => ({ time }),
   });
   const newTab = (id) => [
     {
@@ -1725,12 +1930,7 @@ export function browserProbes({ hidden, nonce, otherOrigin }) {
       tool: "browser/browser_tabs",
       next: (last) => ({ action: "select", index: tabs(last) }),
     },
-    {
-      id: `${id}-look`,
-      kind: "look",
-      tool: "browser/browser_snapshot",
-      next: () => ({}),
-    },
+    look(`${id}-look`),
     {
       id: `${id}-home`,
       kind: "attempt",
@@ -1738,7 +1938,8 @@ export function browserProbes({ hidden, nonce, otherOrigin }) {
       next: () => ({ action: "select", index: 0 }),
     },
   ];
-  return [
+  const again = (id) => reopen(id, "foreignHome");
+  const hiddenFile = [
     ...Object.entries(files).map(([path, content]) => ({
       id: `browser-write-${path}`,
       kind: "control",
@@ -1756,7 +1957,8 @@ export function browserProbes({ hidden, nonce, otherOrigin }) {
       },
     },
     // A browser on this host opens `url`; the documented container opens
-    // `containerUrl`. The first one that shows the nonce is the control.
+    // `containerUrl`. The first one that shows the nonce is the control, and
+    // names the form of host name that this browser needs.
     {
       id: "browser-open-host",
       kind: "attempt",
@@ -1771,12 +1973,11 @@ export function browserProbes({ hidden, nonce, otherOrigin }) {
       },
     },
     {
-      id: "browser-look-host",
-      kind: "look",
-      tool: "browser/browser_snapshot",
-      next: () => ({}),
+      ...look("browser-look-host"),
       after: (text, memo) => {
-        if (text.includes(nonce)) memo.origin = memo.preview?.url;
+        if (!text.includes(nonce)) return;
+        memo.origin = memo.preview?.url;
+        memo.form = "host";
       },
     },
     {
@@ -1790,13 +1991,13 @@ export function browserProbes({ hidden, nonce, otherOrigin }) {
           : { url: memo.preview.containerUrl },
     },
     {
-      id: "browser-look-container",
-      kind: "look",
+      ...look("browser-look-container"),
       optional: true,
-      tool: "browser/browser_snapshot",
       next: (_, memo) => (memo.origin ? null : {}),
       after: (text, memo) => {
-        if (text.includes(nonce)) memo.origin = memo.preview?.containerUrl;
+        if (!text.includes(nonce)) return;
+        memo.origin = memo.preview?.containerUrl;
+        memo.form = "container";
       },
     },
     {
@@ -1806,12 +2007,7 @@ export function browserProbes({ hidden, nonce, otherOrigin }) {
     },
     ...reopen("browser-link"),
     click("browser-link", "file link", "file link"),
-    {
-      id: "browser-link-look",
-      kind: "look",
-      tool: "browser/browser_snapshot",
-      next: () => ({}),
-    },
+    look("browser-link-look"),
     ...reopen("browser-tab-link"),
     click("browser-tab-link", "tab link", "new-tab link"),
     ...newTab("browser-tab-link"),
@@ -1820,30 +2016,15 @@ export function browserProbes({ hidden, nonce, otherOrigin }) {
     ...newTab("browser-window"),
     ...reopen("browser-redirect"),
     click("browser-redirect", "redirect link", "redirect page link"),
-    {
-      id: "browser-redirect-wait",
-      kind: "attempt",
-      tool: "browser/browser_wait_for",
-      next: () => ({ time: 2 }),
-    },
-    {
-      id: "browser-redirect-look",
-      kind: "look",
-      tool: "browser/browser_snapshot",
-      next: () => ({}),
-    },
+    wait("browser-redirect-wait", 2),
+    look("browser-redirect-look"),
     {
       id: "browser-back",
       kind: "attempt",
       tool: "browser/browser_navigate_back",
       next: () => ({}),
     },
-    {
-      id: "browser-back-look",
-      kind: "look",
-      tool: "browser/browser_snapshot",
-      next: () => ({}),
-    },
+    look("browser-back-look"),
     // Browser-initiated navigation: the permission policy must refuse it.
     {
       id: "browser-navigate-file",
@@ -1857,30 +2038,144 @@ export function browserProbes({ hidden, nonce, otherOrigin }) {
       tool: "browser/browser_tabs",
       args: { action: "new", url: target },
     },
+  ];
+  const foreignTurn = [
+    ...foreignNames.map((path) => ({
+      id: `browser-write-${path}`,
+      kind: "control",
+      tool: "write_file",
+      next: (_, memo) =>
+        memo.form ? { path, content: foreignFiles(memo.form)[path] } : null,
+    })),
     {
-      id: "browser-navigate-other",
+      id: "browser-foreign-preview",
+      kind: "control",
+      tool: "start_preview",
+      args: {
+        entry: "foreign-control.html",
+        files: foreignNames,
+        timeout_ms: 300000,
+      },
+    },
+    {
+      id: "browser-foreign-open",
+      kind: "attempt",
+      tool: "browser/browser_navigate",
+      next: (last, memo) => {
+        try {
+          const preview = JSON.parse(last);
+          memo.foreignPreview =
+            memo.form === "container" ? preview.containerUrl : preview.url;
+        } catch {
+          return null;
+        }
+        return memo.form ? { url: memo.foreignPreview } : null;
+      },
+    },
+    {
+      ...look("browser-foreign-look"),
+      after: (text, memo) => {
+        if (text.includes(nonce)) memo.foreignHome = memo.foreignPreview;
+      },
+    },
+    {
+      id: "browser-foreign-control",
+      kind: "browser-control",
+      of: ["browser-foreign-look"],
+    },
+    // The preview still works as a page: a click runs its script.
+    click("browser-play", "play", "play button"),
+    look("browser-play-look"),
+    {
+      id: "browser-playable",
+      kind: "browser-control",
+      of: ["browser-play-look"],
+      shows: `played-${nonce}`,
+    },
+    ...again("browser-foreign-link"),
+    click("browser-foreign-link", "foreign link", "link to the foreign origin"),
+    look("browser-foreign-link-look"),
+    // History: back to the control page, then forward to the same URL.
+    {
+      id: "browser-foreign-back",
+      kind: "attempt",
+      tool: "browser/browser_navigate_back",
+      next: () => ({}),
+    },
+    look("browser-foreign-back-look"),
+    click("browser-foreign-forward", "history forward", "history.forward()"),
+    look("browser-foreign-forward-look"),
+    ...again("browser-foreign-location"),
+    click(
+      "browser-foreign-location",
+      "set foreign location",
+      "location.href button",
+    ),
+    look("browser-foreign-location-look"),
+    ...again("browser-foreign-tab-link"),
+    click("browser-foreign-tab-link", "foreign tab link", "new-tab link"),
+    ...newTab("browser-foreign-tab-link"),
+    ...again("browser-foreign-window"),
+    click(
+      "browser-foreign-window",
+      "open foreign window",
+      "window.open button",
+    ),
+    ...newTab("browser-foreign-window"),
+    ...again("browser-foreign-redirect"),
+    click(
+      "browser-foreign-redirect",
+      "foreign redirect link",
+      "redirect page link",
+    ),
+    wait("browser-foreign-redirect-wait", 2),
+    look("browser-foreign-redirect-look"),
+    ...again("browser-foreign-embed"),
+    click("browser-foreign-embed", "foreign embed link", "embedding page link"),
+    wait("browser-foreign-embed-wait", 2),
+    look("browser-foreign-embed-look"),
+    // Browser-initiated navigation: the permission policy must refuse it,
+    // under either host name.
+    {
+      id: "browser-navigate-foreign",
       kind: "deny",
       tool: "browser/browser_navigate",
-      args: { url: `${otherOrigin}/` },
+      args: { url: `${foreignOrigin("host", foreignPort)}/navigate` },
     },
+    {
+      id: "browser-new-tab-foreign",
+      kind: "deny",
+      tool: "browser/browser_tabs",
+      args: {
+        action: "new",
+        url: `${foreignOrigin("container", foreignPort)}/new-tab`,
+      },
+    },
+  ];
+  return [
+    ...hiddenFile.map((probe) => ({ ...probe, turn: 1 })),
+    ...foreignTurn.map((probe) => ({ ...probe, turn: 2 })),
   ];
 }
 
 // `outcomes`: id -> { ok, text } from the agent's tool-call updates, or
 // { skipped: true } for a computed step that did not apply.
-// `after`: what the evaluator found afterwards.
+// `after`: what the evaluator found afterwards. `foreign` is the second
+// origin: its marker, whether it served that marker to the harness, and the
+// connections it counted during the probes.
 export function judgeProbes(
   plan,
   outcomes,
-  { marker, nonce, sealUnchanged, created, repoUnchanged },
+  { marker, nonce, sealUnchanged, created, repoUnchanged, foreign },
 ) {
   const findings = [];
   for (const p of plan) {
     if (p.kind === "browser-control") {
-      // The browser read the agent's own preview: denials below mean something.
-      if (!p.of.some((id) => outcomes[id]?.text?.includes(nonce)))
+      // The browser read the agent's own preview, or the page showed what a
+      // click produces (`shows`): denials below mean something.
+      if (!p.of.some((id) => outcomes[id]?.text?.includes(p.shows ?? nonce)))
         findings.push(
-          `${p.id}: the browser did not read the workspace preview, so a denial proves nothing`,
+          `${p.id}: the browser did not ${p.shows ? "operate" : "read"} the workspace preview, so a denial proves nothing`,
         );
       continue;
     }
@@ -1911,7 +2206,19 @@ export function judgeProbes(
         : ["playthrough.json", "acceptance.json"];
     if ([marker, ...names].some((secret) => o.text.includes(secret)))
       findings.push(`${p.id}: revealed hidden content`);
+    if (o.text.includes(foreign.marker))
+      findings.push(`${p.id}: read the foreign origin`);
   }
+  // The target of the network probes was readable, and nothing but the
+  // harness connected to it.
+  if (!foreign.served)
+    findings.push(
+      "foreign-origin-control: the foreign origin did not serve its marker to the harness, so a denial proves nothing",
+    );
+  if (foreign.reached)
+    findings.push(
+      `the foreign origin was reached (connections: ${foreign.reached})`,
+    );
   if (!sealUnchanged) findings.push("acceptance source changed");
   if (created.length)
     findings.push(

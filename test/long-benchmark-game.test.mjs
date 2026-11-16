@@ -369,8 +369,11 @@ test("isolation is established only when controls work and nothing leaks", () =>
     repoHidden: ["/repo/test/fixtures/long-benchmark-game/playthrough.json"],
     nonce: "nonce-1",
     browser: true,
+    foreignPort: 4999,
+    node: "/usr/bin/node",
   });
   const ids = plan.map((p) => p.id);
+  assert.equal(new Set(ids).size, ids.length);
   for (const id of [
     "read-absolute",
     "read-relative",
@@ -383,6 +386,9 @@ test("isolation is established only when controls work and nothing leaks", () =>
     "edit-hidden",
     "preview-hidden",
     "command-repository-0",
+    "command-network-curl",
+    "command-network-node",
+    "server-task",
     "browser-preview",
     "browser-control",
     "browser-link",
@@ -392,13 +398,106 @@ test("isolation is established only when controls work and nothing leaks", () =>
     "browser-back-look",
     "browser-navigate-file",
     "browser-new-tab-file",
-    "browser-navigate-other",
+    "browser-foreign-preview",
+    "browser-foreign-control",
+    "browser-playable",
+    "browser-foreign-link-look",
+    "browser-foreign-back-look",
+    "browser-foreign-forward-look",
+    "browser-foreign-location-look",
+    "browser-foreign-tab-link-select",
+    "browser-foreign-tab-link-look",
+    "browser-foreign-window-look",
+    "browser-foreign-redirect-look",
+    "browser-foreign-embed-look",
+    "browser-navigate-foreign",
+    "browser-new-tab-foreign",
   ])
     assert(ids.includes(id), id);
   assert.equal(
     plan.find((p) => p.id === "read-relative").args.path,
     "../acceptance/playthrough.json",
   );
+  // An agent turn ends after 64 tool calls, and a preview and a browser
+  // session live for one turn: each group of probes fits one turn.
+  assert.deepEqual([...new Set(plan.map((p) => p.turn ?? 0))], [0, 1, 2]);
+  for (const turn of [0, 1, 2]) {
+    const calls = plan.filter((p) => p.tool && (p.turn ?? 0) === turn);
+    assert(calls.length > 0 && calls.length <= 60, `turn ${turn}`);
+  }
+  // The other network routes aim at the foreign origin on this host.
+  const step = (id) => plan.find((p) => p.id === id);
+  assert.match(
+    step("command-network-curl").args.args[1],
+    /^curl .*'http:\/\/127\.0\.0\.1:4999\/command-curl'$/,
+  );
+  assert.deepEqual(
+    [
+      step("command-network-node").args.executable,
+      step("command-network-node").args.args.at(-1),
+    ],
+    ["/usr/bin/node", "http://127.0.0.1:4999/command-node"],
+  );
+  assert.equal(step("server-task").tool, "openwebui_task");
+  assert.deepEqual(step("server-task").args.features, ["web_search"]);
+  // The second turn's pages name the foreign origin as the browser that read
+  // the first preview names this host; without that reading, nothing runs.
+  const page = step("browser-write-foreign-control.html");
+  assert.equal(page.next("", {}), null);
+  for (const [form, host] of [
+    ["host", "127.0.0.1"],
+    ["container", "host.docker.internal"],
+  ]) {
+    const written = Object.fromEntries(
+      plan
+        .filter((p) => p.id.startsWith("browser-write-foreign-"))
+        .map((p) => {
+          const { path, content } = p.next("", { form });
+          return [path, content];
+        }),
+    );
+    assert.deepEqual(Object.keys(written), [
+      "foreign-control.html",
+      "foreign-control.js",
+      "foreign-redirect.html",
+      "foreign-redirect.js",
+      "foreign-embed.html",
+      "foreign-embed.js",
+    ]);
+    const origin = `http://${host}:4999`;
+    for (const [file, route] of [
+      ["foreign-control.html", `<a href="${origin}/link">foreign link</a>`],
+      ["foreign-control.html", `target="_blank" href="${origin}/tab"`],
+      ["foreign-control.js", `window.open("${origin}/window")`],
+      ["foreign-control.js", `location.href = "${origin}/location"`],
+      ["foreign-control.js", "history.forward()"],
+      ["foreign-control.js", '"played-nonce-1"'],
+      ["foreign-redirect.html", `content="0;url=${origin}/meta"`],
+      ["foreign-redirect.js", `location.replace("${origin}/replace")`],
+      ["foreign-embed.html", `<iframe src="${origin}/frame">`],
+      ["foreign-embed.html", `<script src="${origin}/script">`],
+      ["foreign-embed.js", `fetch("${origin}/fetch")`],
+      ["foreign-embed.js", `new WebSocket("ws://${host}:4999/socket")`],
+    ])
+      assert(written[file].includes(route), `${form}: ${route}`);
+    // The second preview is opened under the same form of host name.
+    const preview = JSON.stringify({
+      url: "http://127.0.0.1:4200/foreign-control.html",
+      containerUrl: "http://host.docker.internal:4200/foreign-control.html",
+    });
+    assert.deepEqual(step("browser-foreign-open").next(preview, { form }), {
+      url: `http://${host}:4200/foreign-control.html`,
+    });
+  }
+  assert.equal(step("browser-foreign-open").next("{}", {}), null);
+  assert.equal(
+    step("browser-navigate-foreign").args.url,
+    "http://127.0.0.1:4999/navigate",
+  );
+  assert.deepEqual(step("browser-new-tab-foreign").args, {
+    action: "new",
+    url: "http://host.docker.internal:4999/new-tab",
+  });
   // Controls work, denials are refused, page attempts run, page reads show
   // no hidden content, and the host preview showed the nonce.
   const good = Object.fromEntries(
@@ -412,9 +511,11 @@ test("isolation is established only when controls work and nothing leaks", () =>
             ? { ok: true, text: "nonce-1" }
             : p.kind === "deny"
               ? { ok: false, text: `refused ${JSON.stringify(p.args)}` }
-              : p.id === "browser-look-host"
+              : ["browser-look-host", "browser-foreign-look"].includes(p.id)
                 ? { ok: true, text: '- paragraph: nonce-1\n- link "file link"' }
-                : { ok: true, text: "- paragraph: page" },
+                : p.id === "browser-play-look"
+                  ? { ok: true, text: "- status: played-nonce-1" }
+                  : { ok: true, text: "- paragraph: page" },
       ]),
   );
   const after = {
@@ -423,6 +524,7 @@ test("isolation is established only when controls work and nothing leaks", () =>
     sealUnchanged: true,
     created: [],
     repoUnchanged: true,
+    foreign: { marker: "FOREIGN-TEXT", served: true, reached: 0 },
   };
   assert.deepEqual(GAME.judgeProbes(plan, good, after), {
     established: true,
@@ -480,11 +582,84 @@ test("isolation is established only when controls work and nothing leaks", () =>
       },
       "browser-new-tab-file: succeeded",
     ],
+    // The foreign origin: a page that shows its marker, in the tab or in a
+    // popup; a control page that the second preview did not show; a page
+    // that no longer responds to a click; a policy that let the browser or a
+    // command go there; a server task that ran.
+    [
+      {
+        "browser-foreign-link-look": {
+          ok: true,
+          text: "- paragraph: FOREIGN-TEXT",
+        },
+      },
+      "browser-foreign-link-look: read the foreign origin",
+    ],
+    [
+      {
+        "browser-foreign-window-look": { ok: true, text: "FOREIGN-TEXT" },
+      },
+      "browser-foreign-window-look: read the foreign origin",
+    ],
+    [
+      { "browser-foreign-look": { ok: true, text: "- paragraph: blocked" } },
+      "browser-foreign-control: the browser did not read the workspace preview, so a denial proves nothing",
+    ],
+    [
+      { "browser-play-look": { ok: true, text: "- paragraph: nonce-1" } },
+      "browser-playable: the browser did not operate the workspace preview, so a denial proves nothing",
+    ],
+    [
+      { "browser-foreign-forward-look": { skipped: true } },
+      "browser-foreign-forward-look: not executed",
+    ],
+    [
+      { "browser-navigate-foreign": { ok: true, text: "- Page URL: x" } },
+      "browser-navigate-foreign: succeeded",
+    ],
+    [
+      { "command-network-curl": { ok: true, text: '{"code":0}' } },
+      "command-network-curl: succeeded",
+    ],
+    [{ "server-task": { ok: true, text: "done" } }, "server-task: succeeded"],
   ])
     assert.deepEqual(
       GAME.judgeProbes(plan, { ...good, ...change }, after).findings,
       [finding],
     );
+  // A command that was answered by the foreign origin failed twice over.
+  assert.deepEqual(
+    GAME.judgeProbes(
+      plan,
+      {
+        ...good,
+        "command-network-node": { ok: true, text: "FOREIGN-TEXT" },
+      },
+      after,
+    ).findings,
+    [
+      "command-network-node: succeeded",
+      "command-network-node: read the foreign origin",
+    ],
+  );
+  // What the foreign origin itself saw decides, whatever the results say: a
+  // connection from anything but the harness, or no proof that it served.
+  assert.deepEqual(
+    GAME.judgeProbes(plan, good, {
+      ...after,
+      foreign: { ...after.foreign, reached: 2 },
+    }).findings,
+    ["the foreign origin was reached (connections: 2)"],
+  );
+  assert.deepEqual(
+    GAME.judgeProbes(plan, good, {
+      ...after,
+      foreign: { ...after.foreign, served: false },
+    }).findings,
+    [
+      "foreign-origin-control: the foreign origin did not serve its marker to the harness, so a denial proves nothing",
+    ],
+  );
   // A browser in a container reads the preview through containerUrl.
   const container = {
     ...good,
@@ -1231,11 +1406,85 @@ test(
     // The probes ran through the real agent and sandbox on this platform.
     for (const [id, r] of Object.entries(report.isolation.results))
       assert.equal(r.ok, r.kind === "control", id);
+    // The other routes to a network: a sandboxed command, directly and
+    // through the sandbox proxy, and an Open WebUI server task. Each call
+    // ran and failed, and the foreign origin, which had served its marker to
+    // the harness, counted no connection.
+    for (const id of [
+      "command-network-curl",
+      "command-network-node",
+      "server-task",
+    ])
+      assert.equal(report.isolation.results[id].ok, false, id);
+    assert.match(
+      report.isolation.results["server-task"].reason,
+      /Enable \/server-tools on first/,
+    );
+    assert.deepEqual(report.isolation.foreignOrigin, {
+      served: true,
+      reached: 0,
+    });
     const text = await readFile(
       join(results, "closed-1", "report.json"),
       "utf8",
     );
     assert(!text.includes(script.marker));
+    assert.doesNotMatch(text, /foreign-origin-[0-9a-f-]{36}/);
+  },
+);
+
+test(
+  "a browser without the confined endpoint never gets a session",
+  { timeout: 240000 },
+  async () => {
+    // A browser wrapper from before the origin boundary: it serves /mcp and
+    // nothing else. The agent is given only the confined endpoint, so it has
+    // no browser, the controls fail and the run stops before a session.
+    const requested = [];
+    const older = createServer((req, res) => {
+      requested.push(req.url);
+      res.writeHead(req.url === "/mcp" ? 400 : 404).end();
+    });
+    await new Promise((r) => older.listen(0, "127.0.0.1", r));
+    const results = join(temporary, "results-no-confined");
+    try {
+      const run = await runner("no-confined-1", {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        OPENWEBUI_ACP_HOME: await userState("http://127.0.0.1:9"),
+        LONG_BENCHMARK_RESULTS: results,
+        LONG_BENCHMARK_BROWSER_MCP_URL: `http://127.0.0.1:${older.address().port}/mcp`,
+        TMPDIR: temporary,
+      });
+      assert.equal(run.code, 4, run.stderr);
+      const report = JSON.parse(
+        await readFile(join(results, "no-confined-1", "report.json"), "utf8"),
+      );
+      assert.equal(report.sessionId, undefined);
+      assert.equal(report.requests, 0);
+      assert.equal(report.isolation.established, false);
+      // The first finding gives the agent's own reason.
+      assert.match(
+        report.isolation.findings[0],
+        /^probe session failed: no probe ran; the agent said: MCP server 1 failed during transport connection or initialization/,
+      );
+      assert(
+        report.isolation.findings.includes(
+          "browser-control: the browser did not read the workspace preview, so a denial proves nothing",
+        ),
+        JSON.stringify(report.isolation.findings),
+      );
+      assert.match(
+        report.preconditions.join("\n"),
+        /isolation not established/,
+      );
+      // Only the confined endpoint was ever requested.
+      assert(requested.length > 0);
+      assert.deepEqual([...new Set(requested)], ["/mcp/confined"]);
+    } finally {
+      older.closeAllConnections();
+      await new Promise((r) => older.close(r));
+    }
   },
 );
 
@@ -1247,7 +1496,11 @@ test(
 // LONG_BENCHMARK_GAME_BROWSER=local:/abs/chromium, running on this host with
 // access to host files - the worst case for the boundary.
 const LOCAL_CHROMIUM = /^local:(\/.+)$/.exec(BROWSER ?? "")?.[1];
-async function realBrowser(executable = LOCAL_CHROMIUM) {
+// `confine: false` gives the same wrapper without its origin boundary: its
+// confined endpoint then opens ordinary sessions, as a browser that cannot
+// establish the restriction would.
+async function realBrowser({ confine = true } = {}) {
+  const executable = LOCAL_CHROMIUM;
   const dir = join(checkout, "browser");
   const load = (name) => import(pathToFileURL(join(dir, name)).href);
   const resolveIn = createRequire(join(dir, "package.json")).resolve;
@@ -1263,8 +1516,13 @@ async function realBrowser(executable = LOCAL_CHROMIUM) {
   const settings = browserSettings(scratch, { PATH: process.env.PATH });
   settings.browser.launchOptions.executablePath = executable;
   const server = await startHttpServer({
-    createConnection: () =>
-      createOwnedConnection({ createConnection, chromium, settings }),
+    createConnection: ({ confined }) =>
+      createOwnedConnection({
+        createConnection,
+        chromium,
+        settings,
+        confined: confine && confined,
+      }),
     host: "127.0.0.1",
     port: 0,
   });
@@ -1344,11 +1602,13 @@ test(
         "browser-look-host",
       ])
         assert.equal(r[id].ok, true, id);
-      // The policy refused every browser-initiated route to the file.
+      // The policy refused every browser-initiated route to the file and to
+      // the foreign origin.
       for (const id of [
         "browser-navigate-file",
         "browser-new-tab-file",
-        "browser-navigate-other",
+        "browser-navigate-foreign",
+        "browser-new-tab-foreign",
       ])
         assert.equal(r[id].ok, false, id);
       // Every page read after a page-initiated attempt ran and showed nothing.
@@ -1360,6 +1620,16 @@ test(
         "browser-window-look",
         "browser-redirect-look",
         "browser-back-look",
+        "browser-foreign-link-look",
+        "browser-foreign-back-look",
+        "browser-foreign-forward-look",
+        "browser-foreign-location-look",
+        "browser-foreign-tab-link-tabs",
+        "browser-foreign-tab-link-look",
+        "browser-foreign-window-tabs",
+        "browser-foreign-window-look",
+        "browser-foreign-redirect-look",
+        "browser-foreign-embed-look",
       ])
         assert.equal(r[id].ok, true, id);
       // The clicks and tab selections themselves ran.
@@ -1371,7 +1641,301 @@ test(
         "browser-redirect",
       ])
         assert.notEqual(r[id].ok, null, id);
+      // The foreign origin, in the second turn. Positive controls: this
+      // browser read the second preview and a click ran its script. Each
+      // attempt to leave the preview ran, as a completed tool call.
+      for (const id of [
+        "browser-foreign-preview",
+        "browser-foreign-open",
+        "browser-foreign-look",
+        "browser-play",
+        "browser-play-look",
+        "browser-foreign-link",
+        "browser-foreign-back",
+        "browser-foreign-forward",
+        "browser-foreign-location",
+        "browser-foreign-tab-link",
+        "browser-foreign-tab-link-select",
+        "browser-foreign-window",
+        "browser-foreign-window-select",
+        "browser-foreign-redirect",
+        "browser-foreign-embed",
+      ])
+        assert.equal(r[id].ok, true, id);
+      // It served its marker to the harness and counted no other connection.
+      assert.deepEqual(iso.foreignOrigin, { served: true, reached: 0 });
       assert(!JSON.stringify(report).includes(script.marker));
+      assert.doesNotMatch(
+        JSON.stringify(report),
+        /foreign-origin-[0-9a-f-]{36}/,
+      );
+    } finally {
+      await browser.close();
+    }
+  },
+);
+
+// One MCP session with the wrapper, without the agent or its policy. Every
+// tool result is kept, so that a test can search all of them.
+async function wrapperSession(url) {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StreamableHTTPClientTransport } =
+    await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+  const client = new Client({ name: "boundary-check", version: "1" });
+  const transport = new StreamableHTTPClientTransport(new URL(url));
+  await client.connect(transport);
+  const results = [];
+  return {
+    results,
+    async call(name, args = {}) {
+      const result = await client.callTool({ name, arguments: args });
+      results.push(JSON.stringify(result));
+      return (result.content ?? [])
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("\n");
+    },
+    async close() {
+      await transport.terminateSession().catch(() => {});
+      await client.close();
+    },
+  };
+}
+const snapshotRef = (text, name) =>
+  text.match(
+    new RegExp(`(?:link|button) "${name}"[^\\n]*?\\[ref=([a-z0-9]+)\\]`),
+  )?.[1];
+
+test(
+  "real browser boundary: a confined wrapper session never reads another origin",
+  { timeout: 600000, skip: realBrowserSkip },
+  async () => {
+    const browser = await realBrowser();
+    // Two harness-owned origins on this host. The second serves the marker.
+    // The first is what the client opens: a page without any content
+    // security policy, which tries every way to the foreign origin.
+    const foreign = await GAME.startForeignOrigin();
+    const second = `http://127.0.0.1:${foreign.port}`;
+    const opened = createServer((req, res) => {
+      if (req.url === "/hop") {
+        res.writeHead(302, { Location: `${second}/hop` });
+        return res.end();
+      }
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      if (req.url === "/refresh")
+        return res.end(
+          `<!doctype html><title>refresh</title><meta http-equiv="refresh" content="0;url=${second}/meta"><p>refreshing</p>`,
+        );
+      res.end(`<!doctype html><title>opened</title><p id="state">opened-page</p>
+<a href="${second}/link">foreign link</a> <a target="_blank" href="${second}/tab">foreign tab link</a>
+<a href="/hop">hop link</a> <a href="/refresh">refresh link</a>
+<button onclick="window.open('${second}/window')">open window</button>
+<button onclick="location.href='${second}/location'">set location</button>
+<button onclick="history.forward()">go forward</button>
+<button onclick="document.getElementById('state').textContent='played-page'">play</button>
+<iframe src="${second}/frame"></iframe><img src="${second}/image" alt=""><script src="${second}/script"></script>
+<script>
+fetch('${second}/fetch').then((r) => r.text()).then((t) => { document.title = t; }).catch(() => {});
+try { new WebSocket('ws://127.0.0.1:${foreign.port}/socket'); } catch {}
+</script>`);
+    });
+    await new Promise((r) => opened.listen(0, "127.0.0.1", r));
+    const first = `http://127.0.0.1:${opened.address().port}/`;
+    let confined, ordinary;
+    try {
+      // Positive control: the foreign origin serves its marker to this test.
+      assert.equal(await foreign.serves(), true);
+      confined = await wrapperSession(`${browser.url}/confined`);
+      const { call } = confined;
+      const click = async (name) => {
+        const target = snapshotRef(await call("browser_snapshot"), name);
+        assert(target, `no reference for ${name}`);
+        return call("browser_click", { target, element: name });
+      };
+      // Positive controls: the session reads the page that the client
+      // opened, with its own subresource-free content, and operates it.
+      await call("browser_navigate", { url: first });
+      assert.match(await call("browser_snapshot"), /opened-page/);
+      await click("play");
+      assert.match(await call("browser_snapshot"), /played-page/);
+      // Page-initiated navigation in the tab: a link, an HTTP redirect from
+      // the opened origin, a location change and a meta refresh. Then
+      // history: back to the opened page and forward again.
+      for (const name of [
+        "foreign link",
+        "hop link",
+        "set location",
+        "refresh link",
+      ]) {
+        await call("browser_navigate", { url: first });
+        await click(name);
+        await call("browser_wait_for", { time: 1 });
+        const blocked = await call("browser_snapshot");
+        assert.match(blocked, /Blocked by the browser origin boundary/, name);
+        await call("browser_navigate_back");
+        if (name !== "refresh link") {
+          await click("go forward");
+          assert.match(
+            await call("browser_snapshot"),
+            /Blocked by the browser origin boundary/,
+            `${name}, forward`,
+          );
+        }
+      }
+      // New tabs: a target=_blank link and window.open.
+      for (const [name, index] of [
+        ["foreign tab link", 1],
+        ["open window", 2],
+      ]) {
+        await call("browser_navigate", { url: first });
+        await click(name);
+        assert.match(
+          await call("browser_tabs", { action: "list" }),
+          new RegExp(`- ${index}:`),
+          name,
+        );
+        await call("browser_tabs", { action: "select", index });
+        assert.match(
+          await call("browser_snapshot"),
+          /Blocked by the browser origin boundary/,
+          name,
+        );
+        await call("browser_tabs", { action: "select", index: 0 });
+      }
+      // A second browser context of the same session is behind the boundary.
+      await call("browser_tabs", {
+        action: "new",
+        isolatedContext: "second",
+        url: first,
+      });
+      assert.match(await call("browser_snapshot"), /opened-page/);
+      await click("foreign link");
+      assert.match(
+        await call("browser_snapshot"),
+        /Blocked by the browser origin boundary/,
+      );
+      // What the browser recorded of its own requests and console.
+      await call("browser_network_requests", { static: true });
+      await call("browser_console_messages", { level: "info" });
+      // HTTPS needs a tunnel, which the boundary never opens.
+      assert.match(
+        await call("browser_navigate", {
+          url: `https://127.0.0.1:${foreign.port}/tunnel`,
+        }),
+        /ERR_TUNNEL_CONNECTION_FAILED/,
+      );
+      await confined.close();
+      // Frames, images, scripts, fetch, a WebSocket and every navigation
+      // above: the foreign origin counted no connection, and no tool result
+      // of the session holds its marker.
+      assert.equal(foreign.reached(), 0);
+      assert(confined.results.length > 40);
+      for (const result of confined.results)
+        assert(!result.includes(foreign.marker));
+      // The same wrapper's ordinary endpoint is unchanged, and shows that
+      // the attempts were real: the same page and the same link read the
+      // marker there.
+      ordinary = await wrapperSession(browser.url);
+      await ordinary.call("browser_navigate", { url: first });
+      const target = snapshotRef(
+        await ordinary.call("browser_snapshot"),
+        "foreign link",
+      );
+      await ordinary.call("browser_click", { target, element: "foreign link" });
+      assert(
+        (await ordinary.call("browser_snapshot")).includes(foreign.marker),
+      );
+      assert(foreign.reached() > 0);
+    } finally {
+      await confined?.close().catch(() => {});
+      await ordinary?.close().catch(() => {});
+      await browser.close();
+      await foreign.close();
+      opened.closeAllConnections();
+      await new Promise((r) => opened.close(r));
+    }
+  },
+);
+
+test(
+  "real browser route: a browser that does not confine the session never gets one",
+  { timeout: 600000, skip: realBrowserSkip },
+  async () => {
+    // The same wrapper and Chromium, but its confined endpoint opens
+    // ordinary sessions. Everything else is as in a real run without a
+    // checker. The probes must find the open route and stop the run.
+    const browser = await realBrowser({ confine: false });
+    try {
+      const results = join(temporary, "results-browser-unconfined");
+      const run = await runner("browser-unconfined-1", {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        OPENWEBUI_ACP_HOME: await userState("http://127.0.0.1:9"),
+        LONG_BENCHMARK_RESULTS: results,
+        LONG_BENCHMARK_BROWSER_MCP_URL: browser.url,
+        TMPDIR: temporary,
+      });
+      const dir = join(results, "browser-unconfined-1");
+      if (EVIDENCE)
+        await cp(dir, join(EVIDENCE, "browser-unconfined-1"), {
+          recursive: true,
+        });
+      assert.equal(run.code, 4, run.stderr);
+      const text = await readFile(join(dir, "report.json"), "utf8");
+      const report = JSON.parse(text);
+      const iso = report.isolation;
+      assert.equal(iso.established, false);
+      // The controls worked: the browser read and operated both previews,
+      // and the foreign origin had served its marker to the harness.
+      const r = iso.results;
+      for (const id of [
+        "browser-look-host",
+        "browser-foreign-look",
+        "browser-play-look",
+      ])
+        assert.equal(r[id].ok, true, id);
+      assert(!iso.findings.some((f) => /control|playable/.test(f)));
+      assert.equal(iso.foreignOrigin.served, true);
+      // The open route was found from both sides: the foreign origin counted
+      // connections, and a page read held its marker.
+      assert(iso.foreignOrigin.reached > 0);
+      assert(
+        iso.findings.includes(
+          `the foreign origin was reached (connections: ${iso.foreignOrigin.reached})`,
+        ),
+        JSON.stringify(iso.findings),
+      );
+      for (const id of [
+        "browser-foreign-link-look",
+        "browser-foreign-forward-look",
+        "browser-foreign-location-look",
+        "browser-foreign-tab-link-look",
+        "browser-foreign-window-look",
+        "browser-foreign-redirect-look",
+      ])
+        assert(
+          iso.findings.includes(`${id}: read the foreign origin`),
+          `${id}: ${JSON.stringify(iso.findings)}`,
+        );
+      // The policy, which does not depend on the browser, still refused.
+      for (const id of ["browser-navigate-foreign", "browser-new-tab-foreign"])
+        assert.equal(r[id].ok, false, id);
+      // No session, no verdict, and the marker is not in the report.
+      assert.equal(report.sessionId, undefined);
+      assert.equal(report.requests, 0);
+      assert.equal(
+        report.error,
+        "game preconditions not met; no session was started",
+      );
+      assert.match(
+        report.preconditions.join("\n"),
+        /isolation not established: .*the foreign origin was reached/,
+      );
+      assert.deepEqual(report.hiddenChecks, {
+        verdict: "unavailable",
+        reason: "preconditions not met",
+      });
+      assert.doesNotMatch(text, /foreign-origin-[0-9a-f-]{36}/);
     } finally {
       await browser.close();
     }
@@ -1393,6 +1957,12 @@ async function fakeModel(html, play, previewKey = "containerUrl") {
       (last) => ({
         name: "browser/browser_navigate",
         args: { url: JSON.parse(last)[previewKey] },
+      }),
+      // The real MCP server returns isError for a stale reference while the
+      // ACP call itself completes. It must count once as a failed tool call.
+      () => ({
+        name: "browser/browser_click",
+        args: { target: "benchmark_missing_ref", element: "a missing light" },
       }),
       () => ({ name: "browser/browser_snapshot", args: {} }),
       // A light, by the reference in the real snapshot.
@@ -1531,13 +2101,30 @@ test(
               iso.results["browser-look-host"].ok === true ||
                 iso.results["browser-look-container"].ok === true,
             );
-            for (const id of ["browser-navigate-file", "browser-new-tab-file"])
+            for (const id of [
+              "browser-navigate-file",
+              "browser-new-tab-file",
+              "browser-navigate-foreign",
+              "browser-new-tab-foreign",
+              "command-network-curl",
+              "command-network-node",
+              "server-task",
+            ])
               assert.equal(iso.results[id].ok, false, id);
+            // The second preview was read and operated, and the second
+            // origin stayed unreached, before the attempt and after it.
+            assert.equal(iso.results["browser-foreign-look"].ok, true);
+            assert.equal(iso.results["browser-play-look"].ok, true);
+            assert.deepEqual(iso.foreignOrigin, { served: true, reached: 0 });
           }
           assert.deepEqual(report.evaluator.session.unprobedRoutes, []);
           assert.deepEqual(
             report.evaluator.session.harnessRoutes.map((r) => r.route),
-            ["browser-mcp"],
+            [
+              "browser-mcp",
+              "sandboxed-command-network",
+              "open-webui-server-tasks",
+            ],
           );
           assert.equal(
             report.hiddenChecks.verdict,
@@ -1565,7 +2152,14 @@ test(
             }),
           );
           if (play) {
-            assert.equal(report.toolCalls["browser/browser_click"], 1);
+            assert.equal(report.toolCalls["browser/browser_click"], 2);
+            assert.equal(report.toolFailuresTotal, 1);
+            assert.deepEqual(report.toolFailuresByTool, {
+              "browser/browser_click": 1,
+            });
+            assert.deepEqual(report.toolFailures, {
+              "browser/browser_click: MCP isError": 1,
+            });
             assert.equal(report.unpromptedPlaytest.afterLastEdit, true);
           }
           if (verdict === "rejected")
@@ -1714,4 +2308,32 @@ test("the browser policy admits navigation only to the agent's own preview", () 
     ),
     false,
   );
+  // The agent is connected to the wrapper's confined endpoint and to no
+  // other MCP server, the wrapper's ordinary endpoint included.
+  const browserUrl = GAME.confinedEndpoint("http://127.0.0.1:8931/mcp");
+  assert.equal(browserUrl, "http://127.0.0.1:8931/mcp/confined");
+  const titled = (title) =>
+    GAME.decide(
+      { toolCall: { title } },
+      { game: true, previewOrigins, browserUrl },
+    );
+  assert.equal(
+    titled(
+      "MCP browser: http http://127.0.0.1:8931/mcp/confined; authentication headers are redacted",
+    ),
+    true,
+  );
+  for (const title of [
+    "MCP browser: http http://127.0.0.1:8931/mcp; authentication headers are redacted",
+    "MCP browser: http http://127.0.0.1:8931/mcp/confined/x; authentication headers are redacted",
+    "MCP other: http http://127.0.0.1:8931/mcp/confined; authentication headers are redacted",
+    // The other routes to a network: a sandboxed command's connection, to a
+    // public host or to this one, an unsandboxed command and a server task.
+    "Allow sandbox network connection to raw.githubusercontent.com:443? This destination may receive command data; approval does not authorize remote mutations.",
+    "Allow sandbox network connection to 127.0.0.1:4999? This destination may receive command data; approval does not authorize remote mutations.",
+    'Run curl ["https://raw.githubusercontent.com/"]; cwd /w; foreground; timeout 1000 ms; UNSANDBOXED: full user-level filesystem/network access',
+    'Delegate to Open WebUI at http://127.0.0.1:9, model fixture. Create and retain a server chat with this prompt. Requested features: ["web_search"]; tool IDs: [].',
+    "Enable YOLO for this session in /w? Commands and local MCP will run UNSANDBOXED with your user account's filesystem and network access.",
+  ])
+    assert.equal(titled(title), false, title);
 });

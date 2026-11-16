@@ -27,10 +27,12 @@ const headers = {
 async function fixture({ delay = 0 } = {}) {
   let created = 0;
   const instances = [];
+  const modes = [];
   const started = await startHttpServer({
     host: "127.0.0.1",
     port: 0,
-    createConnection: async () => {
+    createConnection: async (mode) => {
+      modes.push(mode);
       if (delay) await new Promise((r) => setTimeout(r, delay));
       const id = ++created;
       const server = new Server(
@@ -56,7 +58,7 @@ async function fixture({ delay = 0 } = {}) {
       return server;
     },
   });
-  return { ...started, created: () => created, instances };
+  return { ...started, created: () => created, instances, modes };
 }
 async function connect(url) {
   const transport = new StreamableHTTPClientTransport(new URL(url));
@@ -95,6 +97,52 @@ test("HTTP browser sessions work with the official SDK, stay isolated and releas
     clients.shift();
     clients.push(await connect(server.url));
     assert.equal(server.created(), 3);
+  } finally {
+    await Promise.all(clients.map((c) => c.close()));
+    await server.close();
+  }
+});
+
+test("/mcp/confined opens a confined session and a session keeps its path", async () => {
+  const server = await fixture();
+  const clients = [];
+  try {
+    const ordinary = await connect(server.url);
+    const confined = await connect(`${server.url}/confined`);
+    clients.push(ordinary, confined);
+    assert.deepEqual(server.modes, [{ confined: false }, { confined: true }]);
+    for (const { client } of clients)
+      assert.equal((await client.listTools()).tools[0].name, "fixture");
+    // A session identifier is not valid on the other path, in either
+    // direction: a confined session cannot be driven as an ordinary one.
+    const list = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    for (const [path, session] of [
+      ["", confined.transport.sessionId],
+      ["/confined", ordinary.transport.sessionId],
+    ]) {
+      const response = await fetch(server.url + path, {
+        method: "POST",
+        headers: { ...headers, "Mcp-Session-Id": session },
+        body: list,
+      });
+      assert.equal(response.status, 404, path);
+      await response.body?.cancel();
+    }
+    // No other path opens any session.
+    for (const suffix of ["/confined/", "/confined/x", "/Confined", "/"]) {
+      const response = await fetch(server.url + suffix, {
+        method: "POST",
+        headers,
+        body: initialize,
+      });
+      assert.equal(response.status, 404, suffix);
+      await response.body?.cancel();
+    }
+    assert.equal(server.created(), 2);
   } finally {
     await Promise.all(clients.map((c) => c.close()));
     await server.close();

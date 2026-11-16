@@ -138,6 +138,39 @@ test("browser dependency pins, tool allowlist and container boundary are explici
   );
 });
 
+test("the image contains every wrapper module that its entry point loads", async () => {
+  const read = (name) =>
+    readFile(new URL(`../${name}`, import.meta.url), "utf8");
+  // index.mjs and everything it reaches by a relative path, the origin
+  // boundary of confined sessions included.
+  const loaded = new Set();
+  const visit = async (name) => {
+    if (loaded.has(name)) return;
+    loaded.add(name);
+    for (const [, next] of (await read(name)).matchAll(
+      /["']\.\/([\w.-]+\.mjs)["']/g,
+    ))
+      await visit(next);
+  };
+  await visit("index.mjs");
+  assert.deepEqual([...loaded].sort(), [
+    "boundary.mjs",
+    "connection.mjs",
+    "index.mjs",
+    "server.mjs",
+    "settings.mjs",
+    "worker.mjs",
+  ]);
+  const copied = (await read("Dockerfile"))
+    .match(/^COPY (index\.mjs .*) \.\/$/m)[1]
+    .split(" ");
+  const kept = (await read(".dockerignore")).split("\n");
+  for (const name of loaded) {
+    assert.ok(copied.includes(name), `Dockerfile does not copy ${name}`);
+    assert.ok(kept.includes(`!${name}`), `.dockerignore excludes ${name}`);
+  }
+});
+
 test("the pinned upstream catalog contains every allowed tool without launching a browser", async () => {
   const allowed = JSON.parse(
     await readFile(new URL("../allowed-tools.json", import.meta.url), "utf8"),

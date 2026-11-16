@@ -138,6 +138,17 @@ text; never copy this into a tool call; read the file to see it]`; a copied
   `write_file` content made entirely of `read_file`-numbered lines is refused.
 - `edit_file` on a missing file says to create it with `write_file`, and a
   write into a missing folder says so, instead of a raw `ENOENT` error.
+- The optional browser wrapper serves `/mcp/confined` next to `/mcp`. A session
+  opened there loads only plain-HTTP origins that the MCP client opened with
+  `browser_navigate` or `browser_tabs` `new`; links, new tabs, redirects,
+  scripts, frames and history cannot reach another origin. Ordinary sessions
+  are unchanged. Rebuild the browser image to get the endpoint. See
+  [confined sessions](../browser.md#confined-sessions).
+- The game benchmark uses the confined endpoint and refuses to start when
+  the configured browser cannot prove isolation. Before and after an attempt,
+  its probes test a second HTTP origin and the other agent network routes.
+  Reports also count completed MCP results with `isError: true` as failures,
+  once per tool call, without including the MCP payload in the grouping key.
 
 See [verification](../verification.md), [session modes](../sessions.md#session-modes),
 [ACP v2 readiness](../design.md#acp-v2-readiness) and the
