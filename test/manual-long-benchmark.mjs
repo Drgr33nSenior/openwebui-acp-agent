@@ -378,6 +378,9 @@ if (args[0] === "--child") {
             files: Object.keys(gameSetup.checker.files).length,
             taskAcceptanceSha256: gameSetup.checker.files["task_acceptance.py"],
             sessionSha256: gameSetup.checker.files[GAME.CHECKER_SESSION.file],
+            runRecordSha256: gameSetup.checker.files["run_record.py"],
+            // The complete manifest matched this pin before the session.
+            pinnedStackCommit: GAME.CHECKER_MANIFEST.stackCommit,
           }
         : null,
       references: gameSetup.references
@@ -898,8 +901,8 @@ async function inspect(workspace, state, sessionId, task) {
 // stops the run. Site settings come only from the environment:
 //   LONG_BENCHMARK_GAME_BROWSER        container:NAME or local:/abs/chromium
 //   LONG_BENCHMARK_ACCEPTANCE_CHECKER  /abs/.../lib/workstation/task_acceptance.py
-//     in a stack checkout whose task_acceptance_session.py is the protocol
-//     pinned in GAME.CHECKER_SESSION
+//     in a stack checkout whose complete checker manifest matches
+//     GAME.CHECKER_MANIFEST (and whose bootstrap is GAME.CHECKER_SESSION)
 //   LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256  optional pin of that file
 //   LONG_BENCHMARK_BROWSER_MCP_URL     http://127.0.0.1:PORT/mcp for the agent
 async function prepareGame(context) {
@@ -1003,7 +1006,9 @@ async function prepareGame(context) {
     } catch (error) {
       problem(`evaluator browser: ${error.message}`);
     }
-  setup.isolation = await runProbes({ ...context, setup, mcpJson });
+  // Kept for the same probes after the attempt.
+  setup.probeContext = { ...context, mcpJson };
+  setup.isolation = await runProbes({ ...setup.probeContext, setup });
   if (!setup.isolation.established)
     problem(
       `isolation not established: ${setup.isolation.findings.join("; ")}`,
@@ -1018,14 +1023,15 @@ async function prepareGame(context) {
 // discarded so that a leak cannot reach the report.
 async function runProbes({
   root,
+  name = "probe",
   setup,
   mcpJson,
   agentDirectory,
   ClientApp,
   ndJsonStream,
 }) {
-  const workspace = join(root, "probe"),
-    state = join(root, "probe-state");
+  const workspace = join(root, name),
+    state = join(root, `${name}-state`);
   await mkdir(workspace, { mode: 0o700 });
   await mkdir(state, { mode: 0o700 });
   const hidden = join(setup.acceptance, "playthrough.json");
@@ -1049,6 +1055,10 @@ async function runProbes({
     browser: Boolean(mcpJson),
   });
   const queue = [...plan];
+  // Computed browser steps share what earlier results showed (the preview).
+  const memo = {};
+  let previous = null;
+  const outcomes = {};
   const server = createServer(async (req, res) => {
     res.setHeader("Content-Type", "application/json");
     if (req.url === "/api/models")
@@ -1057,8 +1067,26 @@ async function runProbes({
     for await (const part of req) raw += part;
     const request = JSON.parse(raw);
     let message = { role: "assistant", content: "Probe finished." };
+    // The previous tool result, as the model receives it.
+    const last = request.messages
+      .filter((m) => m.role === "tool")
+      .at(-1)?.content;
+    const lastText =
+      typeof last === "string" ? last : JSON.stringify(last ?? "");
+    previous?.after?.(lastText, memo);
+    previous = null;
     while (request.tools.length && queue.length) {
       const next = queue.shift();
+      // Judge-only entries are not tool calls.
+      if (!next.tool) continue;
+      let args = next.args;
+      if (next.next) {
+        args = next.next(lastText, memo);
+        if (args === null) {
+          outcomes[next.id] = { skipped: true };
+          continue;
+        }
+      }
       const name = next.tool.startsWith("browser/")
         ? request.tools.find((t) =>
             t.function.description?.startsWith(`Untrusted MCP ${next.tool}:`),
@@ -1072,10 +1100,11 @@ async function runProbes({
           {
             id: `probe-${next.id}`,
             type: "function",
-            function: { name, arguments: JSON.stringify(next.args) },
+            function: { name, arguments: JSON.stringify(args) },
           },
         ],
       };
+      previous = next;
       break;
     }
     res.end(
@@ -1117,7 +1146,6 @@ async function runProbes({
     { cwd: workspace, env, stdio: ["pipe", "pipe", "ignore"] },
   );
   const tools = new Map(),
-    outcomes = {},
     previewOrigins = new Set(),
     app = new ClientApp();
   app.onNotification("session/update", ({ params }) => {
@@ -1273,12 +1301,26 @@ async function inspectGame({
     workspace,
     out: results,
   });
+  // The same isolation probes, after the attempt and under the same
+  // permission policy and browser: the boundary must still hold.
+  out.isolationAfter = await runProbes({
+    ...setup.probeContext,
+    setup,
+    name: "probe-after",
+  });
   // The fresh observation goes to the session started before the attempt.
   const output = join(results, "acceptance-result.json");
-  const finished = await setup.attempt.finish({
-    observation: observation.unavailable ? null : observation,
-    output,
-  });
+  let finished;
+  if (!out.isolationAfter.established) {
+    setup.attempt.close();
+    finished = {
+      unavailable: `isolation not re-established after the attempt: ${out.isolationAfter.findings.join("; ")}`,
+    };
+  } else
+    finished = await setup.attempt.finish({
+      observation: observation.unavailable ? null : observation,
+      output,
+    });
   const hidden = finished.unavailable
     ? { verdict: "unavailable", reason: finished.unavailable }
     : await GAME.summarizeResult({

@@ -339,8 +339,19 @@ the attempt is always `unavailable` with
    refuses the checker unless `task_acceptance_session.py` has the SHA-256
    pinned in `CHECKER_SESSION` in `test/manual-long-benchmark-game.mjs`: the
    protocol of stack commit `7c2ff06`. A checker without that file predates
-   the protocol. It copies the verified bytes to a private `checker/`
-   directory in the scratch directory, next to the acceptance source copy.
+   the protocol. It then refuses the checker unless the complete manifest
+   matches `CHECKER_MANIFEST`: its canonical SHA-256, its 58 files and the
+   pinned `task_acceptance.py` and `run_record.py` (see the table below). A
+   matching bootstrap alone never admits a checker. It copies the verified
+   bytes to a private `checker/` directory in the scratch directory, next to
+   the acceptance source copy.
+
+   | Pin (stack commit `59eac79`, the final PLAN-04 producer with the PLAN-01 run-record correction) | SHA-256 |
+   | --- | --- |
+   | `task_acceptance_session.py` | `619316431b1f3460ea042b4eafd6e944bd00d5f95f31ebcb6b14f31ccad20b0c` |
+   | `task_acceptance.py` | `4e48e1516f050d8e4382b74e02038cc23aa8783be29e80110773978ef4ba4212` |
+   | `run_record.py` | `403f9dbd0c9967044f1a90b5684523cac8dc5cad5d705666804c374e93f1c66e` |
+   | Complete manifest, 58 files | `c85163f80abe3d4bcbec790c4c81251d5b34fd632265dbecb3a9d822c8def22e` |
 2. After every other precondition, and before the agent process of the
    evaluated session starts, runs `python3 -I -B checker/task_acceptance_session.py`
    with private pipes. The start message holds the acceptance source, the
@@ -362,13 +373,13 @@ the attempt is always `unavailable` with
 
    The file tools have no rename or delete, so those probes are
    `unsupported`. Every file tool, and `start_preview`, resolves paths through
-   the same workspace guard. The browser MCP tools are not a registered route
-   and are not probed: the permission policy allows `browser_navigate` only to
-   preview origins and the browser container mounts no host directory, but
-   other browser tools (for example `browser_tabs`, or clicking a link) are
-   not checked. A browser MCP server whose browser runs on the host would be
-   an unprobed route to host files. The report records this in
-   `evaluator.session.unprobedRoutes`.
+   the same workspace guard. The browser MCP tools are not a checker route: the
+   checker's controls need host-file access, and the browser has none. The
+   harness probes the browser itself, through the agent's real browser tools
+   and the same permission policy, before and after the attempt (see
+   isolation, below). The report lists it in
+   `evaluator.session.harnessRoutes`; `evaluator.session.unprobedRoutes` is
+   empty.
 4. Starts the evaluated session only when the checker answers `ready` and the
    workspace is unchanged since before the setup probes. Otherwise the run
    stops with status 4 (below).
@@ -383,8 +394,8 @@ the attempt is always `unavailable` with
    `config.json` and `mcp.json`.
 
 **Isolation.** The hidden source is in the scratch directory next to the
-workspace and in the harness checkout. Before the evaluated session, the runner
-proves that the agent cannot read or change it. A scripted fake model sends
+workspace and in the harness checkout. Before the evaluated session, and again
+after it ends, the runner proves that the agent cannot read or change it. A scripted fake model sends
 tool calls through the same agent build, child process, permission policy,
 sandbox and browser configuration as the evaluated session, from a sibling
 workspace. The calls are:
@@ -396,11 +407,25 @@ workspace. The calls are:
 - `run_command` with `cat`, `ls`, a symbolic link, a copy, an append and a new
   file, on the scratch copy and on the checkout copy;
 - `start_preview` of a hidden file;
-- `browser_navigate` to a `file://` URL of the hidden file, when the browser is
-  configured.
+- the browser route (the game task always configures the browser):
+  - a positive control: the agent writes pages in its workspace, starts a
+    preview and opens it; the browser must show the page's nonce, through the
+    host `url` or, for the browser container, the `containerUrl`;
+  - page-initiated navigation to the hidden file: a link, a new-tab link with
+    tab listing and selection, `window.open` with tab selection, a page with a
+    meta refresh and a script redirect, then history back. After each attempt
+    the browser state is read (`browser_snapshot`, `browser_tabs`), and every
+    read must succeed;
+  - browser-initiated navigation: `browser_navigate` to the hidden file,
+    `browser_tabs` `new` at the hidden file, and `browser_navigate` to another
+    origin. The permission policy must refuse all three.
 
-Every probe other than the controls must fail without revealing the hidden
-marker or file names, and the source seal must be unchanged afterwards. The
+Every probe that is not a control or a browser read must fail or show
+nothing, no result may reveal the hidden marker (or, outside the browser, the
+hidden file names), and the source seal must be unchanged afterwards. A
+control that does not work, a browser read that fails or a probe that did not
+run leaves isolation not established: the run does not start, or, after the
+attempt, the verdict is `unavailable`. The
 report keeps only the outcome and the first line of each refusal. The
 boundary that this demonstrates:
 
@@ -408,10 +433,16 @@ boundary that this demonstrates:
 - the command sandbox denies reads of the home directory, `/tmp`, `$TMPDIR` and
   the agent state, except the workspace;
 - the runner approves no extra read or write paths and no escalation;
-- the runner approves browser navigation only to a preview that the agent
-  started;
+- the runner approves browser-initiated navigation (`browser_navigate`, and
+  `browser_tabs` `new` with a URL) only to a preview that the agent started,
+  allows `browser_tabs` otherwise only to list, select or close, and refuses
+  any other browser tool call that carries a URL;
+- the pinned browser MCP server refuses browser-initiated `file:` navigation
+  itself (`Access to "file:" protocol is blocked`), and Chromium does not
+  load a `file:` URL from a web page;
 - the preview serves only listed workspace files;
-- the browser container mounts no host directory.
+- the browser container mounts no host directory. The probes do not rely on
+  this: they pass with a browser on the host.
 
 The evaluator plays the reference and mutants before the session and the
 attempt after it ends, from memory; neither play-through uses the agent's tools
@@ -432,7 +463,7 @@ starts no session and exits with status 4:
 | Variable                                   | Meaning                                                                                 |
 | ------------------------------------------ | --------------------------------------------------------------------------------------- |
 | `LONG_BENCHMARK_GAME_BROWSER`              | Evaluator browser: `container:NAME` (the browser container) or `local:/abs/chromium` (needs `npm ci --ignore-scripts` in `browser/`) |
-| `LONG_BENCHMARK_ACCEPTANCE_CHECKER`        | Absolute path of `lib/workstation/task_acceptance.py` in a stack checkout whose `task_acceptance_session.py` is the supported protocol |
+| `LONG_BENCHMARK_ACCEPTANCE_CHECKER`        | Absolute path of `lib/workstation/task_acceptance.py` in a stack checkout whose complete checker manifest matches `CHECKER_MANIFEST` (stack commit `59eac79`) |
 | `LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256` | Optional. SHA-256 that `task_acceptance.py` must have                                   |
 | `LONG_BENCHMARK_BROWSER_MCP_URL`           | The agent's browser: `http://127.0.0.1:PORT/mcp` of the browser container               |
 
@@ -484,31 +515,54 @@ that a one-shot `check` of the same attempt is `unavailable` with
 `protection:attempt-lifetime-not-established`. The other changes a checker
 file after the manifest was pinned; the session never becomes ready.
 
-One test needs the checker and an evaluator browser and is skipped in CI.
-With both set, it runs the full `--task game` flow twice with a scripted model
-and a fake browser server:
+In CI, unit tests cover the browser permission policy (navigation and new
+tabs only to the agent's preview, no other URL argument) and the judging of
+every browser probe kind: a missing preview control, a failed browser read, a
+skipped step, a marker in a page and a refused navigation that succeeded each
+leave isolation not established.
 
-- a model that writes the reference and plays it is `accepted` (13 passed) and
-  the play-test is observed;
+With `LONG_BENCHMARK_GAME_BROWSER=local:/abs/chromium` (skipped in CI), a test
+runs the repository's browser wrapper (`browser/`: its HTTP listener, owned
+connection, settings and the pinned `@playwright/mcp` tools) on host loopback
+with that Chromium. A browser on the host is the worst case: it could read
+host files. The test shows that the wrapper refuses browser-initiated `file:`
+navigation by itself, and runs the runner's isolation probes through the agent
+with that browser: the preview control passes, every page-initiated attempt
+runs without reaching the hidden file, and the policy refuses every
+browser-initiated one.
+
+One test needs the checker and an evaluator browser, and a real agent browser:
+`LONG_BENCHMARK_GAME_BROWSER=local:/abs/chromium` (the wrapper as above) or
+`LONG_BENCHMARK_BROWSER_MCP_URL` (a configured browser, such as the container).
+It is skipped in CI. It runs the full `--task game` flow twice with a
+scripted model:
+
+- a model that writes the reference and plays it (preview, navigation, a click
+  on a light by its snapshot reference, a page read) is `accepted` (13
+  passed) and the play-test is observed;
 - a model that writes the `no-lock` mutant without playing it is `rejected`
-  with `external_state:solved-locked`, and no play-test is observed.
+  with `external_state:solved-locked`, and no play-test is observed;
+- in both, isolation including the browser route is established before and
+  after the attempt, and the session lists no unprobed route.
 
 **Limits.**
 
 - The play-through checks the rules in the brief through the page structure
   that the brief requires; a game that draws without those elements fails.
 - The harness implements the checker session protocol of stack commit
-  `7c2ff06`. A checker with another `task_acceptance_session.py` is refused
-  until the harness is updated and `CHECKER_SESSION` re-pinned; rerun the
-  self-test with that checker.
+  `7c2ff06` and accepts only the complete checker of stack commit `59eac79`.
+  Any other bootstrap or manifest is refused until the harness is updated and
+  `CHECKER_SESSION` and `CHECKER_MANIFEST` are re-pinned; rerun the self-test
+  with that checker.
 - The route probes run in a second agent process with the same build and
   policy but a separate configuration (its own state and fake model, no
   `mcp.json`), not inside the evaluated process. The capability lease is the
   runner's: it keeps the build, dependencies, harness code and configuration
   fixed for the attempt and checks their digest before it sends the
   observation.
-- The browser MCP tools are not a registered route (see the checker session,
-  step 3).
+- The browser is probed by the harness, not by the checker (see the checker
+  session, step 3). Pages served by other processes on the host are outside
+  the harness: the hidden files are served by none of its processes.
 - Each probe phase takes a few hundred tool calls; on macOS each sandboxed
   command takes about 0.4 s, so a phase takes about two minutes.
 - The probes demonstrate the boundary on the platform where they run. The

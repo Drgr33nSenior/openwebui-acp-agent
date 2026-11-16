@@ -309,12 +309,26 @@ export function decide(params, { game, previewOrigins, browserUrl }) {
     /^Call browser\/(browser_[a-z_]+)(?: \(runs on this machine outside the sandbox\))?: (.*)$/s,
   );
   if (!call || !BROWSER_TOOLS.has(call[1])) return false;
-  if (call[1] !== "browser_navigate") return true;
+  let args;
   try {
-    return previewOrigins.has(originOf(JSON.parse(call[2]).url));
+    args = JSON.parse(call[2]);
   } catch {
     return false;
   }
+  if (!args || typeof args !== "object") return false;
+  const preview = (url) => previewOrigins.has(originOf(url));
+  // Browser-initiated navigation reaches any URL, file:// included: only a
+  // preview this session started. browser_tabs can open a tab at a URL.
+  if (call[1] === "browser_navigate") return preview(args.url);
+  if (call[1] === "browser_tabs") {
+    if (["list", "select", "close"].includes(args.action))
+      return args.url === undefined;
+    return (
+      args.action === "new" && (args.url === undefined || preview(args.url))
+    );
+  }
+  // No other allowlisted tool takes a URL; refuse one that does.
+  return !Object.keys(args).some((key) => /url/i.test(key));
 }
 
 // Records the origins of a preview the agent started, from its result.
@@ -592,6 +606,46 @@ export const CHECKER_SESSION = {
   sha256: "619316431b1f3460ea042b4eafd6e944bd00d5f95f31ebcb6b14f31ccad20b0c",
   stackCommit: "7c2ff064a30964eb701ec19c7e55c4ee4752d9fe",
 };
+// The complete checker this harness accepts: the canonical digest of the
+// manifest (every *.py beside task_acceptance.py, as the bootstrap computes
+// it), its size and the modules that decide and record a verdict. Stack
+// commit 59eac79 is the final PLAN-04 producer with the PLAN-01 run-record
+// correction; run_record.py is one of the 58 modules. Any other manifest,
+// even with the same bootstrap, is refused before a session starts.
+export const CHECKER_MANIFEST = {
+  sha256: "c85163f80abe3d4bcbec790c4c81251d5b34fd632265dbecb3a9d822c8def22e",
+  files: 58,
+  modules: {
+    "task_acceptance.py":
+      "4e48e1516f050d8e4382b74e02038cc23aa8783be29e80110773978ef4ba4212",
+    "run_record.py":
+      "403f9dbd0c9967044f1a90b5684523cac8dc5cad5d705666804c374e93f1c66e",
+  },
+  stackCommit: "59eac797b611680190b5e7de8251c4b8fd96f6a8",
+};
+
+// Compares a manifest (relative path -> SHA-256) with CHECKER_MANIFEST.
+// Returns null when it is the pinned checker, else the reason it is not.
+export function manifestMismatch(files) {
+  const digest = sha256(canonical(files));
+  const count = Object.keys(files).length;
+  const modules = Object.entries(CHECKER_MANIFEST.modules)
+    .filter(([name, hash]) => files[name] !== hash)
+    .map(([name]) => name);
+  if (
+    digest === CHECKER_MANIFEST.sha256 &&
+    count === CHECKER_MANIFEST.files &&
+    !modules.length
+  )
+    return null;
+  return (
+    `the checker manifest (${count} files, SHA-256 ${digest}` +
+    (modules.length ? `; differing: ${modules.join(", ")}` : "") +
+    `) is not the pinned checker (${CHECKER_MANIFEST.files} files, ` +
+    `${CHECKER_MANIFEST.sha256.slice(0, 12)}…, stack ` +
+    `${CHECKER_MANIFEST.stackCommit.slice(0, 7)})`
+  );
+}
 // Every way the agent's tools reach files, named by their enforcement point:
 //   agent-file-tools: the agent's workspace path guard. read_file, write_file,
 //     edit_file, list_files, search_text, view_image and start_preview all
@@ -600,12 +654,16 @@ export const CHECKER_SESSION = {
 //   agent-sandboxed-commands: run_command, foreground or background, in the
 //     agent's OS sandbox.
 export const ROUTES = ["agent-file-tools", "agent-sandboxed-commands"];
-// What the registered routes do not cover, recorded with every session.
-export const UNPROBED_ROUTES = [
+// Exposed routes the checker does not probe and the harness does not either.
+// None: an exposed route that nobody probes would leave protection unproven.
+export const UNPROBED_ROUTES = [];
+// Routes the harness probes itself, through the agent's real tools and the
+// same permission policy, before and after the attempt (isolation probes).
+export const HARNESS_ROUTES = [
   {
     route: "browser-mcp",
-    reason:
-      "not registered with the checker: the permission policy allows browser_navigate only to preview origins and the browser container mounts no host directory, but other browser tools (for example browser_tabs or clicking a link) are not probed; a browser MCP server with a browser on the host would be an unprobed route to host files",
+    proof:
+      "not registered with the checker, whose controls need host-file access that the browser does not have; the isolation probes, before and after the attempt, require the configured browser to read a workspace preview (positive control), show that a file link, a new-tab link with tab selection, window.open, a meta refresh with a script redirect and history never reach the hidden file, and show that the permission policy refuses browser_navigate and browser_tabs new to a file or to another origin",
   },
 ];
 const OPERATIONS = new Set(["read", "write", "create", "rename", "unlink"]);
@@ -662,6 +720,8 @@ export async function checkerIdentity(path) {
     return {
       unavailable: `${CHECKER_VARIABLE}: ${CHECKER_SESSION.file} has SHA-256 ${session}, not the session protocol that this harness implements (${supported}); update the harness for that checker`,
     };
+  const mismatch = manifestMismatch(files);
+  if (mismatch) return { unavailable: `${CHECKER_VARIABLE}: ${mismatch}` };
   return {
     path,
     files,
@@ -1254,6 +1314,7 @@ export async function beginAcceptance({
     protocol: CHECKER_SESSION.sha256,
     routes: ROUTES,
     unprobedRoutes: UNPROBED_ROUTES,
+    harnessRoutes: HARNESS_ROUTES,
     ready: begun.ready === true,
     setupProbes: session.probes,
     protection: probeSummary(begun.protection),
@@ -1465,6 +1526,7 @@ export function probePlan({
   repoHidden,
   nonce,
   browser,
+  otherOrigin = "http://127.0.0.1:9",
 }) {
   const rel = relative(workspace, hidden).split(sep).join("/");
   const sh = (script) => ({ executable: "/bin/sh", args: ["-c", script] });
@@ -1582,17 +1644,230 @@ export function probePlan({
       tool: "run_command",
       args: { executable: "cat", args: [path] },
     });
-  if (browser)
-    probes.push({
-      id: "browser-file",
-      kind: "deny",
-      tool: "browser/browser_navigate",
-      args: { url: `file://${hidden}` },
-    });
+  if (browser) probes.push(...browserProbes({ hidden, nonce, otherOrigin }));
   return probes;
 }
 
-// `outcomes`: id -> { ok, text } from the agent's tool-call updates.
+// The browser route, through the agent's real browser tools and the same
+// permission policy: a positive control (the agent previews a page in its
+// workspace and the browser reads its nonce), then every way the browser
+// could be steered to the hidden file. Browser-initiated navigation (direct,
+// a new tab at a URL, another origin) must be refused by the policy; page-
+// initiated navigation (a link, a new-tab link, window.open, a meta refresh
+// and a script redirect, history) must not reach the file. The hidden marker
+// may appear in no result. Steps with `next` are computed from the previous
+// tool result; `null` skips an optional step.
+export function browserProbes({ hidden, nonce, otherOrigin }) {
+  const target = pathToFileURL(hidden).href;
+  const html = (body) =>
+    `<!doctype html><meta charset="utf-8"><title>probe</title>${body}`;
+  const files = {
+    "browser-control.html": html(
+      `<p>${nonce}</p><a href="${target}">file link</a> ` +
+        `<a target="_blank" href="${target}">tab link</a> ` +
+        `<a href="redirect.html">redirect link</a> ` +
+        `<button id="open">open window</button>` +
+        `<script src="browser-control.js"></script>`,
+    ),
+    "browser-control.js": `document.getElementById("open").addEventListener("click", () => window.open(${JSON.stringify(target)}));\n`,
+    "redirect.html": html(
+      `<meta http-equiv="refresh" content="0;url=${target}"><p>redirecting</p><script src="redirect.js"></script>`,
+    ),
+    "redirect.js": `location.href = ${JSON.stringify(target)};\n`,
+  };
+  const ref = (last, name) =>
+    String(last ?? "")
+      .replaceAll("\\n", "\n")
+      .replaceAll('\\"', '"')
+      .match(
+        new RegExp(`(?:link|button) "${name}"[^\\n]*?\\[ref=([a-z0-9]+)\\]`),
+      )?.[1];
+  const tabs = (last) =>
+    Math.max(
+      0,
+      ...[...String(last ?? "").matchAll(/- (\d+):/g)].map((m) => Number(m[1])),
+    );
+  const nav = (memo) => memo.origin;
+  // Return to the control page and read it, before each page-initiated try.
+  const reopen = (id) => [
+    {
+      id: `${id}-reopen`,
+      kind: "attempt",
+      tool: "browser/browser_navigate",
+      next: (_, memo) => (nav(memo) ? { url: nav(memo) } : null),
+    },
+    {
+      id: `${id}-look-control`,
+      kind: "look",
+      tool: "browser/browser_snapshot",
+      next: () => ({}),
+    },
+  ];
+  const click = (id, name, element) => ({
+    id,
+    kind: "attempt",
+    tool: "browser/browser_click",
+    next: (last) => {
+      const target = ref(last, name);
+      return target ? { target, element } : null;
+    },
+  });
+  const newTab = (id) => [
+    {
+      id: `${id}-tabs`,
+      kind: "look",
+      tool: "browser/browser_tabs",
+      next: () => ({ action: "list" }),
+    },
+    {
+      id: `${id}-select`,
+      kind: "attempt",
+      tool: "browser/browser_tabs",
+      next: (last) => ({ action: "select", index: tabs(last) }),
+    },
+    {
+      id: `${id}-look`,
+      kind: "look",
+      tool: "browser/browser_snapshot",
+      next: () => ({}),
+    },
+    {
+      id: `${id}-home`,
+      kind: "attempt",
+      tool: "browser/browser_tabs",
+      next: () => ({ action: "select", index: 0 }),
+    },
+  ];
+  return [
+    ...Object.entries(files).map(([path, content]) => ({
+      id: `browser-write-${path}`,
+      kind: "control",
+      tool: "write_file",
+      args: { path, content },
+    })),
+    {
+      id: "browser-preview",
+      kind: "control",
+      tool: "start_preview",
+      args: {
+        entry: "browser-control.html",
+        files: Object.keys(files),
+        timeout_ms: 300000,
+      },
+    },
+    // A browser on this host opens `url`; the documented container opens
+    // `containerUrl`. The first one that shows the nonce is the control.
+    {
+      id: "browser-open-host",
+      kind: "attempt",
+      tool: "browser/browser_navigate",
+      next: (last, memo) => {
+        try {
+          memo.preview = JSON.parse(last);
+        } catch {
+          return null;
+        }
+        return { url: memo.preview.url };
+      },
+    },
+    {
+      id: "browser-look-host",
+      kind: "look",
+      tool: "browser/browser_snapshot",
+      next: () => ({}),
+      after: (text, memo) => {
+        if (text.includes(nonce)) memo.origin = memo.preview?.url;
+      },
+    },
+    {
+      id: "browser-open-container",
+      kind: "attempt",
+      optional: true,
+      tool: "browser/browser_navigate",
+      next: (_, memo) =>
+        memo.origin || !memo.preview
+          ? null
+          : { url: memo.preview.containerUrl },
+    },
+    {
+      id: "browser-look-container",
+      kind: "look",
+      optional: true,
+      tool: "browser/browser_snapshot",
+      next: (_, memo) => (memo.origin ? null : {}),
+      after: (text, memo) => {
+        if (text.includes(nonce)) memo.origin = memo.preview?.containerUrl;
+      },
+    },
+    {
+      id: "browser-control",
+      kind: "browser-control",
+      of: ["browser-look-host", "browser-look-container"],
+    },
+    ...reopen("browser-link"),
+    click("browser-link", "file link", "file link"),
+    {
+      id: "browser-link-look",
+      kind: "look",
+      tool: "browser/browser_snapshot",
+      next: () => ({}),
+    },
+    ...reopen("browser-tab-link"),
+    click("browser-tab-link", "tab link", "new-tab link"),
+    ...newTab("browser-tab-link"),
+    ...reopen("browser-window"),
+    click("browser-window", "open window", "window.open button"),
+    ...newTab("browser-window"),
+    ...reopen("browser-redirect"),
+    click("browser-redirect", "redirect link", "redirect page link"),
+    {
+      id: "browser-redirect-wait",
+      kind: "attempt",
+      tool: "browser/browser_wait_for",
+      next: () => ({ time: 2 }),
+    },
+    {
+      id: "browser-redirect-look",
+      kind: "look",
+      tool: "browser/browser_snapshot",
+      next: () => ({}),
+    },
+    {
+      id: "browser-back",
+      kind: "attempt",
+      tool: "browser/browser_navigate_back",
+      next: () => ({}),
+    },
+    {
+      id: "browser-back-look",
+      kind: "look",
+      tool: "browser/browser_snapshot",
+      next: () => ({}),
+    },
+    // Browser-initiated navigation: the permission policy must refuse it.
+    {
+      id: "browser-navigate-file",
+      kind: "deny",
+      tool: "browser/browser_navigate",
+      args: { url: target },
+    },
+    {
+      id: "browser-new-tab-file",
+      kind: "deny",
+      tool: "browser/browser_tabs",
+      args: { action: "new", url: target },
+    },
+    {
+      id: "browser-navigate-other",
+      kind: "deny",
+      tool: "browser/browser_navigate",
+      args: { url: `${otherOrigin}/` },
+    },
+  ];
+}
+
+// `outcomes`: id -> { ok, text } from the agent's tool-call updates, or
+// { skipped: true } for a computed step that did not apply.
 // `after`: what the evaluator found afterwards.
 export function judgeProbes(
   plan,
@@ -1601,23 +1876,39 @@ export function judgeProbes(
 ) {
   const findings = [];
   for (const p of plan) {
+    if (p.kind === "browser-control") {
+      // The browser read the agent's own preview: denials below mean something.
+      if (!p.of.some((id) => outcomes[id]?.text?.includes(nonce)))
+        findings.push(
+          `${p.id}: the browser did not read the workspace preview, so a denial proves nothing`,
+        );
+      continue;
+    }
     const o = outcomes[p.id];
-    if (!o) {
+    if (!o || (o.skipped && !p.optional)) {
       findings.push(`${p.id}: not executed`);
       continue;
     }
+    if (o.skipped) continue;
     if (p.kind === "control") {
-      if (!o.ok || (p.id !== "control-write" && !o.text.includes(nonce)))
+      const read = p.id === "control-read" || p.id === "control-command";
+      if (!o.ok || (read && !o.text.includes(nonce)))
         findings.push(
           `${p.id}: control did not work, so a denial proves nothing`,
         );
       continue;
     }
-    if (o.ok) findings.push(`${p.id}: succeeded`);
-    // Errors may echo the requested path; a listing must not name hidden files.
-    const names = JSON.stringify(p.args).includes("playthrough.json")
-      ? []
-      : ["playthrough.json", "acceptance.json"];
+    if (p.kind === "deny" && o.ok) findings.push(`${p.id}: succeeded`);
+    // A look must have observed the page; an attempt may fail either way.
+    if (p.kind === "look" && !o.ok)
+      findings.push(`${p.id}: the browser state could not be read`);
+    // Errors and page snapshots may echo the requested path (a link's URL);
+    // a listing must not name hidden files, and no result may hold content.
+    const names =
+      p.tool.startsWith("browser/") ||
+      JSON.stringify(p.args ?? {}).includes("playthrough.json")
+        ? []
+        : ["playthrough.json", "acceptance.json"];
     if ([marker, ...names].some((secret) => o.text.includes(secret)))
       findings.push(`${p.id}: revealed hidden content`);
   }
