@@ -67,6 +67,26 @@ export function contextLimits(
   return capped(reserve < size ? size - reserve : Math.ceil(size / 2));
 }
 
+// An explicit output limit the catalog declares for one reasoning_effort level:
+// maxOutputTokens on that level's supportedReasoningEfforts entry, the largest
+// max_tokens the server accepts at that level. Never inferred.
+export function effortOutputAllowance(
+  model: unknown,
+  effort: string,
+): number | undefined {
+  const m = model as any;
+  for (const levels of [
+    m?.supportedReasoningEfforts,
+    m?.openai?.supportedReasoningEfforts,
+  ]) {
+    if (!Array.isArray(levels)) continue;
+    const level = levels.find((l) => l?.reasoningEffort === effort);
+    const parsed = tokens.positive().safeParse(level?.maxOutputTokens);
+    if (parsed.success) return parsed.data;
+  }
+  return undefined;
+}
+
 // Output cap the agent sends itself at the "xhigh" reasoning_effort level.
 // Other levels send none and keep the server's own cap (the advertised
 // max_output_tokens). A server that leaves xhigh uncapped lets one reply think
@@ -83,9 +103,11 @@ const CAPPED_EFFORT = "xhigh";
 // The cap for one coding request, or undefined to send none. It needs the
 // declared reasoning_effort level and an explicit context_window: a cap is
 // never guessed from a model name, and never set where the window it must fit
-// is unknown. An advertised output limit also bounds explicit requests, even
-// when the server allows uncapped replies if max_tokens is omitted. Otherwise
-// use the fixed fallback. Half the window remains available for input.
+// is unknown. The level's own advertised limit comes first (reasoning shares
+// the cap, so the general allowance can be too small for xhigh thinking). A
+// server that advertises none may still refuse more than its general output
+// limit, which then bounds the request; otherwise use the fixed fallback.
+// Half the window remains available for input.
 export function replyTokenCap(
   effort: string | undefined,
   model: unknown,
@@ -99,7 +121,9 @@ export function replyTokenCap(
   return Math.max(
     1,
     Math.min(
-      outputAllowance(model) ?? XHIGH_OUTPUT_TOKENS,
+      effortOutputAllowance(model, CAPPED_EFFORT) ??
+        outputAllowance(model) ??
+        XHIGH_OUTPUT_TOKENS,
       Math.floor(window.data / 2),
     ),
   );

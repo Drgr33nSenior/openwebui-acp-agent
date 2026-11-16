@@ -8,7 +8,11 @@ import {
   type Message,
 } from "./backend.js";
 import { isImageMessage } from "./images.js";
-import { reasoningPayload, type ReasoningChoice } from "./reasoning.js";
+import {
+  effortRank,
+  reasoningPayload,
+  type ReasoningChoice,
+} from "./reasoning.js";
 import { contextLimits, outputAllowance, type ContextUsage } from "./usage.js";
 
 // Longest accepted summary; the checkpoint schema stores at most this much.
@@ -340,20 +344,14 @@ export function compactionFailure(error: unknown): string {
   return message ? message.slice(0, 200) : "unknown error";
 }
 
-// Ordered levels of the reasoning_effort request parameter. "none" (thinking
-// off) is deliberately absent, so it is never chosen by rank.
-const EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max"];
-
 // The summary request's reasoning setting, independent of the session's: the
 // lowest declared reasoning_effort level other than "none". Values outside the
 // parameter's standard levels, and named workspace controls, have no known
 // order; then the server's declared default applies, else the model default.
 export function summaryReasoning(model: string, choices: ReasoningChoice[]) {
-  const rank = (c: ReasoningChoice) =>
-    c.effort === undefined ? -1 : EFFORT_ORDER.indexOf(c.effort);
   const lowest = choices
-    .filter((c) => rank(c) >= 0)
-    .sort((a, b) => rank(a) - rank(b))[0];
+    .filter((c) => effortRank(c) >= 0)
+    .sort((a, b) => effortRank(a) - effortRank(b))[0];
   const choice = lowest ?? choices.find((c) => c.serverDefault);
   return choice ? reasoningPayload(model, choice.value, choices) : {};
 }

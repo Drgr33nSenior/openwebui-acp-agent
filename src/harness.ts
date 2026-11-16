@@ -336,9 +336,13 @@ export function replyRecoveryHint(
   kind: string,
   inToolCall: boolean,
   availableTools: readonly string[],
+  thinkingOnly = false,
 ) {
   if (kind !== "truncated")
     return "Reply again with complete text and valid function-call JSON.";
+  // Nothing visible was cut, so advice about smaller replies would not help.
+  if (thinkingOnly)
+    return "Your thinking used the whole output limit before you replied or called a tool. Think briefly, then reply or take one small step.";
   const prefix = inToolCall
     ? "Your reply hit the output limit inside a tool call."
     : "Your reply was cut off; keep the next reply shorter.";

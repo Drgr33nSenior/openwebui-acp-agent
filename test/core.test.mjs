@@ -796,9 +796,46 @@ test("a length stop keeps streamed text and signals recoverable truncation witho
         shown += t;
       },
     ),
-    (error) => error.kind === "truncated" && /cut off/.test(error.message),
+    (error) =>
+      error.kind === "truncated" &&
+      /cut off/.test(error.message) &&
+      !error.thinkingOnly,
   );
   assert.equal(shown, "half an answer");
+});
+test("a length stop with only reasoning is flagged as thinking that used the whole limit", async () => {
+  for (const [frames, thinkingOnly] of [
+    [[delta({ reasoning_content: "long thought" }), delta({}, "length")], true],
+    [
+      [
+        delta({ reasoning_content: "long thought" }),
+        delta({ content: "\n" }),
+        delta({}, "length"),
+      ],
+      true,
+    ],
+    [
+      [
+        delta({ reasoning_content: "long thought" }),
+        delta({ content: "Answer" }),
+        delta({}, "length"),
+      ],
+      false,
+    ],
+    [[delta({}, "length")], false],
+  ]) {
+    response = async (_, res) => sse(res, frames);
+    await assert.rejects(
+      new Backend(conf, "secret").complete(
+        [],
+        [],
+        AbortSignal.timeout(5000),
+        async () => {},
+      ),
+      (error) =>
+        error.kind === "truncated" && error.thinkingOnly === thinkingOnly,
+    );
+  }
 });
 test("server error codes and Retry-After are reported; raw bodies are not", async () => {
   response = async (_, res) =>

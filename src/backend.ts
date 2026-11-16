@@ -57,11 +57,14 @@ export class BackendHttpError extends Error {
 }
 // Only failed reply parsing is recoverable. Transport/auth/policy failures and
 // resource limits must not trigger another inference request automatically.
+// thinkingOnly: a truncated reply that produced reasoning and nothing else (no
+// text, no tool call), so its reasoning used the whole output limit.
 export class ModelReplyError extends Error {
   constructor(
     readonly kind: "truncated" | "malformed",
     message: string,
     readonly inToolCall = false,
+    readonly thinkingOnly = false,
   ) {
     super(message);
   }
@@ -513,6 +516,7 @@ export class Backend {
         "truncated",
         OUTPUT_LIMIT_CUTOFF,
         calls.size > 0,
+        thought > 0 && calls.size === 0 && !content.trim(),
       );
     }
     if (finish === "content_filter")
