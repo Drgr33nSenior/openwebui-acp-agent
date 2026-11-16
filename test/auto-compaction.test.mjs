@@ -564,7 +564,7 @@ test("automatic compaction failure notices state the reason without reply conten
   for (const [answer, reason, attempts] of [
     [
       () => ({ status: 500 }),
-      "the summary request was refused \\(HTTP 500: synthetic summary failure[^)]*\\)\\)",
+      "the summary request was refused \\(HTTP 500: synthetic summary failure\\)",
       1,
     ],
     [() => "", "the summary was empty", 1],
