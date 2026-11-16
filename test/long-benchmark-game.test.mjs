@@ -1,8 +1,10 @@
 // Offline self-test for the long-benchmark game task
 // (test/manual-long-benchmark-game*.mjs and the runner's --task game). No
-// model and no remote service. Two parts need tools that CI does not have and
-// are skipped there with the reason shown: the PLAN-04 checker
-// (LONG_BENCHMARK_ACCEPTANCE_CHECKER) and an evaluator browser
+// model and no remote service. The checker session protocol runs against a
+// scripted session bootstrap everywhere. Two parts need tools that CI does not
+// have and are skipped there with the reason shown: the real PLAN-04 checker
+// from a stack checkout (LONG_BENCHMARK_ACCEPTANCE_CHECKER), whose session is
+// then driven through the agent's real routes, and an evaluator browser
 // (LONG_BENCHMARK_GAME_BROWSER). The browser container workflow plays the
 // reference and the known-bug mutants in the real container.
 import assert from "node:assert/strict";
@@ -10,11 +12,14 @@ import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import {
+  appendFile,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -485,6 +490,542 @@ test("command control markers survive proxy-credential prefix redaction", async 
   );
 });
 
+// ---- PLAN-04 checker session ---------------------------------------------
+// A checker tree in `directory`: task_acceptance.py plus `extra` files.
+async function checkerTree(name, extra = {}) {
+  const directory = await mkdtemp(join(temporary, `${name}-`));
+  await writeFile(join(directory, "task_acceptance.py"), "# checker\n");
+  for (const [file, text] of Object.entries(extra))
+    await writeFile(join(directory, file), text);
+  return join(directory, "task_acceptance.py");
+}
+
+test("a checker without the supported session protocol is refused", async () => {
+  // Before stack PR #243: no session bootstrap at all.
+  const stale = await GAME.checkerIdentity(await checkerTree("stale"));
+  assert.match(
+    stale.unavailable,
+    /^LONG_BENCHMARK_ACCEPTANCE_CHECKER: the checker has no task_acceptance_session\.py; it predates the PLAN-04 session protocol/,
+  );
+  // A different bootstrap is a different protocol.
+  const changed = await GAME.checkerIdentity(
+    await checkerTree("changed", {
+      "task_acceptance_session.py": "# another protocol\n",
+    }),
+  );
+  assert.match(
+    changed.unavailable,
+    /task_acceptance_session\.py has SHA-256 [0-9a-f]{64}, not the session protocol that this harness implements \(619316431b1f…, stack 7c2ff06\)/,
+  );
+  for (const bad of ["", "relative/task_acceptance.py", "/abs/other.py"])
+    assert.match(
+      (await GAME.checkerIdentity(bad)).unavailable,
+      /not an absolute path to task_acceptance\.py/,
+    );
+});
+
+test("checker probes go through the agent's real file tools and command sandbox", async () => {
+  const root = await realpath(await mkdtemp(join(temporary, "routes-")));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  await writeFile(join(workspace, "control"), "acceptance control\n");
+  const outside = join(root, "evaluator");
+  await mkdir(outside);
+  await writeFile(join(outside, "pin.json"), "{}\n");
+  // Sacrificial directories as the checker makes them: one per operation.
+  const owned = async (parent, name) => {
+    await mkdir(join(parent, name));
+    await writeFile(join(parent, name, "entry"), "owned\n");
+    return join(parent, name);
+  };
+  const agent = await GAME.startRouteAgent({
+    agentDirectory: checkout,
+    workspace,
+    state: join(root, "state"),
+  });
+  const seen = {};
+  try {
+    for (const route of GAME.ROUTES)
+      for (const [where, parent, file] of [
+        ["workspace", workspace, join(workspace, "control")],
+        ["outside", outside, join(outside, "pin.json")],
+      ])
+        for (const operation of ["read", "write", "create", "rename", "unlink"])
+          seen[`${route} ${operation} ${where}`] = await agent.probe(
+            route,
+            operation,
+            ["read", "write"].includes(operation)
+              ? file
+              : await owned(parent, `${route}-${operation}`),
+          );
+  } finally {
+    await agent.close();
+  }
+  const expected = {};
+  for (const operation of ["read", "write", "create", "rename", "unlink"]) {
+    const files = ["read", "write", "create"].includes(operation);
+    expected[`agent-file-tools ${operation} workspace`] = files
+      ? "allowed"
+      : "unsupported";
+    expected[`agent-file-tools ${operation} outside`] = files
+      ? "denied"
+      : "unsupported";
+    expected[`agent-sandboxed-commands ${operation} workspace`] = "allowed";
+    expected[`agent-sandboxed-commands ${operation} outside`] = "denied";
+  }
+  assert.deepEqual(seen, expected);
+  // Read and write probes changed no bytes; outside, nothing changed at all.
+  assert.equal(
+    await readFile(join(workspace, "control"), "utf8"),
+    "acceptance control\n",
+  );
+  assert.deepEqual((await readdir(outside)).sort(), [
+    "agent-file-tools-create",
+    "agent-file-tools-rename",
+    "agent-file-tools-unlink",
+    "agent-sandboxed-commands-create",
+    "agent-sandboxed-commands-rename",
+    "agent-sandboxed-commands-unlink",
+    "pin.json",
+  ]);
+  for (const name of await readdir(outside))
+    if (name !== "pin.json")
+      assert.deepEqual(await readdir(join(outside, name)), ["entry"]);
+  // In the workspace each allowed mutation happened, and nothing else.
+  assert.deepEqual((await readdir(workspace)).sort(), [
+    "agent-file-tools-create",
+    "agent-file-tools-rename",
+    "agent-file-tools-unlink",
+    "agent-sandboxed-commands-create",
+    "agent-sandboxed-commands-rename.moved",
+    "agent-sandboxed-commands-unlink",
+    "control",
+  ]);
+});
+
+test("probe outcomes: refusals are denials, other failures are unavailable", () => {
+  const command = (output, code = 0, ok = true) => ({
+    ok,
+    text: JSON.stringify({ code, output, limitedOrCancelled: false }),
+  });
+  const outcome = (result, operation = "write") =>
+    GAME.routeOutcome("agent-sandboxed-commands", operation, result);
+  assert.equal(outcome(command("probe-allowed\n")), "allowed");
+  for (const refusal of [
+    "probe: /x/pin.json: Operation not permitted", // macOS sandbox
+    "cat: /x/pin.json: No such file or directory", // GNU
+    "sh: 1: cannot create /x/pin.json: Directory nonexistent", // dash
+    "sh: 1: cannot open /x/pin.json: No such file", // dash
+    "mkdir: cannot create directory '/x/created': Permission denied",
+    "mv: cannot move '/x' to '/x.moved': Read-only file system",
+  ])
+    assert.equal(outcome(command(`${refusal}\nprobe-failed\n`)), "denied");
+  // A failure that is not a refusal, or a command that did not run.
+  assert.equal(
+    outcome(
+      command("mkdir: cannot create directory: File exists\nprobe-failed\n"),
+    ),
+    "unavailable",
+  );
+  // A path or label that merely contains refusal words is not a refusal.
+  assert.equal(
+    outcome(
+      command(
+        "mkdir: cannot create directory '/x/Permission denied/created': File exists\nprobe-failed\n",
+      ),
+    ),
+    "unavailable",
+  );
+  assert.equal(outcome(command("", 1, false)), "unavailable");
+  assert.equal(
+    outcome({ ok: false, text: "Sandbox failed to start" }),
+    "unavailable",
+  );
+  const file = (ok, text, operation) =>
+    GAME.routeOutcome("agent-file-tools", operation, { ok, text });
+  assert.equal(file(true, "1→x", "read"), "allowed");
+  assert.equal(
+    file(
+      false,
+      "old_string matched 0 occurrences; expected at least 1.",
+      "write",
+    ),
+    "allowed",
+  );
+  assert.equal(
+    file(false, "Path outside permitted scope or sensitive", "read"),
+    "denied",
+  );
+  assert.equal(file(false, "Tool call limit exceeded", "read"), "unavailable");
+  assert.equal(GAME.routeCall("agent-file-tools", "rename", "/x", "n"), null);
+});
+
+// A scripted session bootstrap that speaks the protocol: probes through each
+// declared route, one probe with an unknown route and one with another lease,
+// then echoes what the parent sent.
+const SCRIPTED_SESSION = `import json, sys
+def receive():
+    return json.loads(sys.stdin.readline())
+def send(value):
+    print(json.dumps(value), flush=True)
+start = receive()
+lease = start["capability_lease"]
+if start.get("behaviour") == "refuse":
+    print("session unavailable: checker tree does not match the parent-held immutable pin", file=sys.stderr)
+    raise SystemExit(3)
+outcomes = []
+for route, path, held in [(r, start["workspace"], lease) for r in start["routes"]] + [
+        ("unknown-route", start["workspace"], lease), (start["routes"][0], start["workspace"], "another")]:
+    send({"probe": "read", "path": path, "route": route, "capability_lease": held})
+    outcomes.append(receive())
+send({"ready": start.get("behaviour") != "not-ready", "protection": {"status": "passed", "probes": [{"status": "passed"}]}, "capability_lease": lease})
+final = receive()
+send({"probe": "unlink", "path": start["source"], "route": start["routes"][1], "capability_lease": lease})
+outcomes.append(receive())
+send({"result": {"final": final, "outcomes": outcomes, "start": start}})
+`;
+
+test("the parent speaks the session protocol over private pipes (scripted session)", async () => {
+  const directory = await scriptedChecker("scripted-session", SCRIPTED_SESSION);
+  const start = (behaviour) => ({
+    source: "/evaluator/source",
+    workspace: "/evaluator/workspace",
+    seal: GAME.GAME_SEAL,
+    checker: {},
+    configuration: [],
+    routes: GAME.ROUTES,
+    capability_lease: "lease-fixed",
+    behaviour,
+  });
+  const calls = [];
+  const route = async (name, operation, path) => {
+    calls.push([name, operation, path]);
+    return operation === "read" ? "allowed" : "denied";
+  };
+  const session = GAME.openCheckerSession({ directory, start: start() });
+  const begun = await session.begin(route);
+  assert.deepEqual(begun, {
+    ready: true,
+    protection: { status: "passed", probes: [{ status: "passed" }] },
+  });
+  const done = await session.finish({ observation: { complete: true } }, route);
+  assert.equal(done.exitCode, 0);
+  // The parent probed only declared routes under its own lease.
+  assert.deepEqual(calls, [
+    ["agent-file-tools", "read", "/evaluator/workspace"],
+    ["agent-sandboxed-commands", "read", "/evaluator/workspace"],
+    ["agent-sandboxed-commands", "unlink", "/evaluator/source"],
+  ]);
+  assert.deepEqual(
+    done.result.outcomes.map((o) => o.outcome),
+    ["allowed", "allowed", "unavailable", "unavailable", "denied"],
+  );
+  for (const o of done.result.outcomes)
+    assert.equal(o.capability_lease, "lease-fixed");
+  assert.deepEqual(done.result.final, {
+    observation: { complete: true },
+    capability_lease: "lease-fixed",
+  });
+  assert.equal(session.probes, 5);
+  // Not ready: the parent must not enable the agent.
+  const waiting = GAME.openCheckerSession({
+    directory,
+    start: start("not-ready"),
+  });
+  assert.equal((await waiting.begin(route)).ready, false);
+  waiting.close();
+  // A session that stops gives its reason, not a verdict.
+  const refused = await GAME.openCheckerSession({
+    directory,
+    start: start("refuse"),
+  }).begin(route);
+  assert.equal(refused.ready, false);
+  assert.match(
+    refused.reason,
+    /status 3: session unavailable: checker tree does not match/,
+  );
+});
+
+// ---- Capability lease (scripted sessions through beginAcceptance) ---------
+async function scriptedChecker(name, script) {
+  const directory = await mkdtemp(join(temporary, `${name}-`));
+  await writeFile(join(directory, "task_acceptance_session.py"), script);
+  return directory;
+}
+// One read probe of the brief through the real file tools, then ready; after
+// the final message one more probe, then the final message echoed back.
+// `dirty` writes into the workspace during setup, as a misbehaving probe would.
+const LEASE_SESSION = (dirty) => `import json, os, sys
+def receive():
+    return json.loads(sys.stdin.readline())
+def send(value):
+    print(json.dumps(value), flush=True)
+start = receive()
+lease = start["capability_lease"]
+probe = {"probe": "read", "path": os.path.join(start["workspace"], "BRIEF.md"),
+         "route": "agent-file-tools", "capability_lease": lease}
+send(probe)
+setup = receive()["outcome"]
+${dirty ? 'open(os.path.join(start["workspace"], "left-behind"), "w").close()' : ""}
+send({"ready": setup == "allowed", "protection": {"status": "passed"}, "capability_lease": lease})
+final = receive()
+send(probe)
+send({"result": {"final": final, "setup": setup, "after": receive()["outcome"]}})
+`;
+async function leaseSetup(name, script) {
+  const root = await realpath(await mkdtemp(join(temporary, `${name}-`)));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  await writeFile(join(workspace, "BRIEF.md"), "brief\n");
+  const configuration = [join(root, "config.json")];
+  await writeFile(configuration[0], '{"model":"fixture"}');
+  return {
+    root,
+    workspace,
+    configuration,
+    acceptance: join(root, "acceptance"),
+    checker: { installed: await scriptedChecker(name, script), files: {} },
+    agentDirectory: checkout,
+    scratch: root,
+    runId: name,
+  };
+}
+
+test("the lease goes to the checker only while the capability policy is unchanged", async () => {
+  // Unchanged: the final message carries the lease and the observation.
+  const kept = await leaseSetup("lease-kept", LEASE_SESSION(false));
+  const attempt = await GAME.beginAcceptance(kept);
+  assert.equal(attempt.ready, true, attempt.reason);
+  assert.deepEqual(attempt.record.unprobedRoutes, GAME.UNPROBED_ROUTES);
+  const output = join(kept.root, "result.json");
+  assert.deepEqual(
+    await attempt.finish({ observation: { complete: true }, output }),
+    { exitCode: 0 },
+  );
+  const echoed = JSON.parse(await readFile(output, "utf8"));
+  assert.deepEqual(echoed.final.observation, { complete: true });
+  assert.match(echoed.final.capability_lease, /^lease-/);
+  assert.equal(echoed.setup, "allowed");
+  assert.equal(echoed.after, "allowed");
+  // Configuration changed during the attempt: no lease, no result.
+  const changed = await leaseSetup("lease-changed", LEASE_SESSION(false));
+  const second = await GAME.beginAcceptance(changed);
+  assert.equal(second.ready, true, second.reason);
+  await writeFile(changed.configuration[0], '{"model":"other"}');
+  const refused = join(changed.root, "result.json");
+  assert.deepEqual(await second.finish({ observation: {}, output: refused }), {
+    unavailable: "the agent's capability policy changed during the attempt",
+  });
+  await assert.rejects(readFile(refused));
+});
+
+test("a workspace changed during the setup probes never starts the attempt", async () => {
+  const setup = await leaseSetup("lease-dirty", LEASE_SESSION(true));
+  const attempt = await GAME.beginAcceptance(setup);
+  assert.equal(attempt.ready, false);
+  assert.equal(attempt.reason, "the workspace changed during the setup probes");
+  assert.equal(attempt.record.ready, false);
+});
+
+test("the capability policy covers build, dependencies, package files and configuration", async () => {
+  const agent = await mkdtemp(join(temporary, "policy-agent-"));
+  for (const dir of ["dist", "node_modules/pkg"])
+    await mkdir(join(agent, dir), { recursive: true });
+  await writeFile(join(agent, "dist/agent.js"), "agent");
+  // Over the 2 MiB limit of the source reader: still hashed by content.
+  const large = 3 * 1024 * 1024;
+  await writeFile(join(agent, "dist/large.js"), Buffer.alloc(large));
+  await writeFile(join(agent, "node_modules/pkg/index.js"), "pkg");
+  await symlink("index.js", join(agent, "node_modules/pkg/link.js"));
+  await writeFile(join(agent, "package.json"), "{}");
+  await writeFile(join(agent, "package-lock.json"), "{}");
+  const config = join(agent, "config.json");
+  await writeFile(config, "{}");
+  const policy = () => GAME.capabilityPolicy(agent, [config]);
+  assert.equal(await policy(), await policy());
+  for (const [name, change] of [
+    ["dist/agent.js", () => writeFile(join(agent, "dist/agent.js"), "agent2")],
+    [
+      "dist/large.js",
+      () =>
+        writeFile(
+          join(agent, "dist/large.js"),
+          Buffer.concat([Buffer.alloc(large - 1), Buffer.from("x")]),
+        ),
+    ],
+    [
+      "node_modules/pkg/index.js",
+      () => writeFile(join(agent, "node_modules/pkg/index.js"), "pkg2"),
+    ],
+    [
+      "node_modules/pkg/link.js",
+      async () => {
+        await rm(join(agent, "node_modules/pkg/link.js"));
+        await symlink("other.js", join(agent, "node_modules/pkg/link.js"));
+      },
+    ],
+    ["package.json", () => writeFile(join(agent, "package.json"), "[]")],
+    [
+      "package-lock.json",
+      () => writeFile(join(agent, "package-lock.json"), "[]"),
+    ],
+    ["config.json", () => writeFile(config, "[]")],
+  ]) {
+    const before = await policy();
+    await change();
+    assert.notEqual(await policy(), before, name);
+  }
+});
+
+// Builds a game attempt for the real checker: the copied source, the
+// fixture workspace, the agent's configuration and the installed checker.
+async function attemptSetup(name) {
+  const root = await realpath(await mkdtemp(join(temporary, `${name}-`)));
+  const acceptance = join(root, "acceptance"),
+    workspace = join(root, "workspace"),
+    state = join(root, "state");
+  await GAME.copySource(source, acceptance);
+  await mkdir(workspace, { mode: 0o700 });
+  await mkdir(state, { mode: 0o700 });
+  await GAME.writeFixture(source, workspace);
+  const configuration = [join(state, "config.json"), join(state, "mcp.json")];
+  await writeFile(
+    configuration[0],
+    JSON.stringify({ url: "http://127.0.0.1:9", model: "fixture" }),
+    { mode: 0o600 },
+  );
+  await writeFile(configuration[1], "[]", { mode: 0o600 });
+  const checker = await GAME.checkerIdentity(CHECKER);
+  assert.equal(checker.unavailable, undefined, checker.unavailable);
+  checker.installed = await GAME.installChecker(checker, join(root, "checker"));
+  return { root, acceptance, workspace, configuration, checker };
+}
+
+test(
+  "the real checker accepts or rejects an attempt only through its session",
+  {
+    timeout: 1800000,
+    skip: !CHECKER && "LONG_BENCHMARK_ACCEPTANCE_CHECKER is not set",
+  },
+  async () => {
+    for (const [game, verdict] of [
+      ["reference", "accepted"],
+      ["no-lock", "rejected"],
+    ]) {
+      const setup = await attemptSetup(`attempt-${game}`);
+      const attempt = await GAME.beginAcceptance({
+        ...setup,
+        agentDirectory: checkout,
+        scratch: setup.root,
+        runId: `self-test-${game}`,
+      });
+      try {
+        assert.equal(attempt.ready, true, attempt.reason);
+        assert.equal(attempt.record.protection.status, "passed");
+        assert(attempt.record.setupProbes > 0);
+        // The attempt: the agent's deliverable, then the evaluator's fresh
+        // observation of it (the browser play-through, simulated here).
+        const html = source.games[game]["index.html"];
+        await writeFile(join(setup.workspace, "index.html"), html);
+        const output = join(setup.root, "acceptance-result.json");
+        const done = await attempt.finish({
+          observation: {
+            complete: true,
+            entry_sha256: GAME.sha256(html),
+            ...GAME.judge(script, simulate(game)),
+          },
+          output,
+        });
+        assert.equal(done.unavailable, undefined, done.unavailable);
+        assert.equal(done.exitCode, verdict === "accepted" ? 0 : 1);
+        assert(attempt.record.finalProbes > 0);
+        const hidden = await GAME.summarizeResult({
+          checker: join(setup.checker.installed, "task_acceptance.py"),
+          output,
+        });
+        assert.equal(hidden.verdict, verdict, JSON.stringify(hidden));
+        assert.equal(hidden.validatedVerdict, verdict);
+        assert.equal(hidden.components.protection, "passed");
+        assert.equal(hidden.sealSha256, GAME.GAME_SEAL);
+        assert.equal(hidden.checkerTreeSha256, setup.checker.treeSha256);
+        assert.deepEqual(
+          hidden.reasons,
+          verdict === "accepted" ? [] : ["external_state:solved-locked"],
+        );
+        if (game !== "reference") continue;
+        // What the harness did before the session protocol: a one-shot check
+        // after the attempt. The checker can never accept that.
+        const state = join(setup.root, "observation.json");
+        await writeFile(
+          state,
+          JSON.stringify({
+            complete: true,
+            entry_sha256: GAME.sha256(html),
+            ...GAME.judge(script, simulate(game)),
+          }),
+        );
+        const oneShot = spawnSync(
+          "python3",
+          [
+            "-E",
+            "-s",
+            "-B",
+            join(setup.checker.installed, "task_acceptance.py"),
+            "check",
+            setup.acceptance,
+            join(setup.root, "one-shot.json"),
+            "--workspace",
+            setup.workspace,
+            "--seal",
+            GAME.GAME_SEAL,
+            "--state",
+            state,
+          ],
+          { encoding: "utf8" },
+        );
+        assert.equal(oneShot.status, 3, oneShot.stderr);
+        const result = JSON.parse(
+          await readFile(join(setup.root, "one-shot.json"), "utf8"),
+        );
+        assert.equal(result.verdict, "unavailable");
+        assert(
+          result.reasons.includes(
+            "protection:attempt-lifetime-not-established",
+          ),
+        );
+      } finally {
+        attempt.close();
+      }
+    }
+  },
+);
+
+test(
+  "a checker changed after it was pinned never establishes the attempt",
+  {
+    timeout: 120000,
+    skip: !CHECKER && "LONG_BENCHMARK_ACCEPTANCE_CHECKER is not set",
+  },
+  async () => {
+    const setup = await attemptSetup("attempt-swapped");
+    await appendFile(
+      join(setup.checker.installed, "coding_eval.py"),
+      "\n# swapped\n",
+    );
+    const attempt = await GAME.beginAcceptance({
+      ...setup,
+      agentDirectory: checkout,
+      scratch: setup.root,
+      runId: "self-test-swapped",
+    });
+    assert.equal(attempt.ready, false);
+    assert.match(
+      attempt.reason,
+      /checker tree does not match the parent-held immutable pin/,
+    );
+  },
+);
+
 // ---- Through the runner --------------------------------------------------
 async function userState(url) {
   const state = await mkdtemp(join(temporary, "user-state-"));
@@ -528,6 +1069,8 @@ test(
       HOME: process.env.HOME,
       OPENWEBUI_ACP_HOME: await userState("http://127.0.0.1:9"),
       LONG_BENCHMARK_RESULTS: results,
+      // A checker from before the session protocol.
+      LONG_BENCHMARK_ACCEPTANCE_CHECKER: await checkerTree("closed-checker"),
       TMPDIR: temporary,
     };
     const run = await runner("closed-1", env);
@@ -559,10 +1102,15 @@ test(
       report.preconditions.map((p) => p.split(" ")[0]),
       [
         "LONG_BENCHMARK_BROWSER_MCP_URL",
-        "LONG_BENCHMARK_ACCEPTANCE_CHECKER",
+        "LONG_BENCHMARK_ACCEPTANCE_CHECKER:",
         "LONG_BENCHMARK_GAME_BROWSER",
       ],
     );
+    assert.match(
+      report.preconditions[1],
+      /predates the PLAN-04 session protocol/,
+    );
+    assert.equal(report.evaluator.session, undefined);
     // The probes ran through the real agent and sandbox on this platform.
     for (const [id, r] of Object.entries(report.isolation.results))
       assert.equal(r.ok, r.kind === "control", id);
@@ -747,6 +1295,10 @@ test(
             JSON.stringify(report.hiddenChecks),
           );
           assert.equal(report.hiddenChecks.validatedVerdict, verdict);
+          // The session began before the agent and lived through the attempt.
+          assert.equal(report.evaluator.session.ready, true);
+          assert(report.evaluator.session.finalProbes > 0);
+          assert.equal(report.hiddenChecks.components.protection, "passed");
           assert.equal(
             report.hiddenChecks.passed + report.hiddenChecks.failed,
             13,

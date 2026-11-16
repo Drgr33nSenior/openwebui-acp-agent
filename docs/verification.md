@@ -245,7 +245,8 @@ unavailable and the wrapper never starts.
 
 - **Hidden checks**: for `game`, the PLAN-04 verdict (`accepted`, `rejected`
   or `unavailable`) with the number of hidden checks passed, failed and
-  unavailable, the reasons, and the checker, specification and seal digests.
+  unavailable, the reasons, the protection component (status and probe
+  counts), and the checker, checker tree, specification and seal digests.
   `null` (not applicable) for `long`, whose tests are visible to the agent;
   there the runner runs the suite itself after the session (`finalSuite`) and
   checks that the data tables and tests are unchanged.
@@ -267,8 +268,9 @@ unavailable and the wrapper never starts.
   (`afterLastEdit`); `null` (not applicable) for `long`.
 - For `long`: reads, repeat reads, edits, test runs and whether the full suite
   ran after the last edit. For `game`: the isolation probe results, the
-  evaluator identity and reference outcomes, denied operations and MCP tool
-  names.
+  evaluator identity and reference outcomes, the checker session
+  (`evaluator.session`: protocol digest, routes, readiness, protection probe
+  counts before and after the attempt), denied operations and MCP tool names.
 
 ```sh
 node test/manual-long-benchmark-summary.mjs /absolute/results/base-1 /absolute/results/new-1
@@ -323,8 +325,62 @@ behave as declared, the play-through is unproven and the verdict is
 The results directory receives `playthrough-state.json` (the observation),
 `screenshots/*.png` and `acceptance-result.json` (the PLAN-04 result). Each
 screenshot entry holds its SHA-256 and the digest of the exact files played
-(`served_tree_sha256`). The runner then runs the PLAN-04 checker's `check` and
-`validate` commands.
+(`served_tree_sha256`). The observation goes to the checker's session (below),
+which returns the result; the runner then runs the checker's `validate`
+command on it.
+
+**Checker session.** The PLAN-04 checker accepts or rejects an attempt only
+through its private session protocol (stack PR #243). A one-shot `check` after
+the attempt is always `unavailable` with
+`protection:attempt-lifetime-not-established`. The runner therefore:
+
+1. Before any session, reads every `*.py` file in the directory of
+   `LONG_BENCHMARK_ACCEPTANCE_CHECKER` (the complete checker manifest) and
+   refuses the checker unless `task_acceptance_session.py` has the SHA-256
+   pinned in `CHECKER_SESSION` in `test/manual-long-benchmark-game.mjs`: the
+   protocol of stack commit `7c2ff06`. A checker without that file predates
+   the protocol. It copies the verified bytes to a private `checker/`
+   directory in the scratch directory, next to the acceptance source copy.
+2. After every other precondition, and before the agent process of the
+   evaluated session starts, runs `python3 -I -B checker/task_acceptance_session.py`
+   with private pipes. The start message holds the acceptance source, the
+   workspace, the pinned seal, the manifest, the agent's `config.json` and
+   `mcp.json` as protected configuration, the two routes below and a fixed
+   capability lease.
+3. Performs every probe of the checker through the agent's real routes. A
+   scripted fake model drives the same agent build, child process, permission
+   policy and sandbox in the evaluated workspace. Its configuration is
+   separate: its own state, a `config.json` that points at the fake model
+   (a loopback address with a random path) and no `mcp.json`. Each probe is
+   one tool call, and only its outcome (`allowed`, `denied`, `unavailable` or
+   `unsupported`) goes back:
+
+   | Route                      | Probe                                                                                                    |
+   | -------------------------- | -------------------------------------------------------------------------------------------------------- |
+   | `agent-file-tools`         | `read_file`; `edit_file` replacing a random text with itself (no bytes change); `write_file` of `created` |
+   | `agent-sandboxed-commands` | `run_command` of `/bin/sh` that opens the file for reading or appending, or runs `mkdir`, `mv` or `rm`   |
+
+   The file tools have no rename or delete, so those probes are
+   `unsupported`. Every file tool, and `start_preview`, resolves paths through
+   the same workspace guard. The browser MCP tools are not a registered route
+   and are not probed: the permission policy allows `browser_navigate` only to
+   preview origins and the browser container mounts no host directory, but
+   other browser tools (for example `browser_tabs`, or clicking a link) are
+   not checked. A browser MCP server whose browser runs on the host would be
+   an unprobed route to host files. The report records this in
+   `evaluator.session.unprobedRoutes`.
+4. Starts the evaluated session only when the checker answers `ready` and the
+   workspace is unchanged since before the setup probes. Otherwise the run
+   stops with status 4 (below).
+5. After the session, plays the attempt and sends the observation over the
+   same session, with the same lease, while the route agent services the
+   final probes. The lease is sent only if the capability policy is unchanged
+   since the start; otherwise the result is `unavailable`. That policy is a
+   digest of the agent's `dist/` and `node_modules/` (every file by content at
+   any size, links by target), `package.json`, `package-lock.json`, the runner
+   and game evaluator files (the `--child` wrapper and the permission
+   decisions), the administrator `policy.json` if present, and the agent's
+   `config.json` and `mcp.json`.
 
 **Isolation.** The hidden source is in the scratch directory next to the
 workspace and in the harness checkout. Before the evaluated session, the runner
@@ -376,14 +432,17 @@ starts no session and exits with status 4:
 | Variable                                   | Meaning                                                                                 |
 | ------------------------------------------ | --------------------------------------------------------------------------------------- |
 | `LONG_BENCHMARK_GAME_BROWSER`              | Evaluator browser: `container:NAME` (the browser container) or `local:/abs/chromium` (needs `npm ci --ignore-scripts` in `browser/`) |
-| `LONG_BENCHMARK_ACCEPTANCE_CHECKER`        | Absolute path of `lib/workstation/task_acceptance.py` in a stack checkout               |
+| `LONG_BENCHMARK_ACCEPTANCE_CHECKER`        | Absolute path of `lib/workstation/task_acceptance.py` in a stack checkout whose `task_acceptance_session.py` is the supported protocol |
 | `LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256` | Optional. SHA-256 that `task_acceptance.py` must have                                   |
 | `LONG_BENCHMARK_BROWSER_MCP_URL`           | The agent's browser: `http://127.0.0.1:PORT/mcp` of the browser container               |
 
-The checker's own `seal` of the copied source must equal the pinned seal, the
-reference and mutants must give their declared outcomes, and the isolation
-probes must pass. The report records the evaluator transport, the SHA-256 of the
-checker files, the reference outcomes and every probe result.
+The checker must implement the supported session protocol, its own `seal` of
+the copied source must equal the pinned seal, the reference and mutants must
+give their declared outcomes, and the isolation probes must pass. Then the
+checker session must become ready with the protection component passed. The
+report records the evaluator transport, the checker tree digest, the
+`task_acceptance.py` and session bootstrap digests, the reference outcomes,
+every isolation probe result and the session record.
 
 To check the evaluator browser without a model:
 
@@ -401,10 +460,33 @@ all 12 checks, and each mutant failed its declared check (`diagonal`:
 
 **Self-test.** `test/long-benchmark-game.test.mjs` checks the seal, the brief,
 the judge against a rule simulator of every mutant, play-test detection and
-probe judging. It also runs the runner without an evaluator: the probes pass on
-the platform and the run stops before a session. One test needs the checker
-and an evaluator browser and is skipped in CI. With both set, it runs the full
-`--task game` flow twice with a scripted model and a fake browser server:
+probe judging. It refuses a checker without the session bootstrap or with
+another one, runs each checker probe kind through the agent's real file tools
+and command sandbox (controls allowed, paths outside the workspace denied, no
+bytes changed), and drives the session protocol against a scripted bootstrap
+(`python3`): probes only for declared routes under the parent's lease, a
+not-ready session, and a session that stops. Through `beginAcceptance` with a
+scripted bootstrap and the real routes, it checks that the lease and
+observation reach the checker while the capability policy is unchanged, that a
+configuration change during the attempt gives `unavailable` without a result,
+and that a workspace changed during the setup probes never starts the attempt.
+It checks that the policy digest changes with the build, a file over 2 MiB, a
+dependency file, a link target, the package files and the configuration, and
+that a refusal is recognised only at the end of an error line. It also runs the runner without an
+evaluator and with a checker from before the protocol: the probes pass on the
+platform and the run stops before a session.
+
+With `LONG_BENCHMARK_ACCEPTANCE_CHECKER` set to a stack checkout, two more
+tests use the real checker without a browser. One runs a whole attempt through
+the session for the reference (`accepted`, protection `passed`) and the
+`no-lock` mutant (`rejected` with `external_state:solved-locked`), and shows
+that a one-shot `check` of the same attempt is `unavailable` with
+`protection:attempt-lifetime-not-established`. The other changes a checker
+file after the manifest was pinned; the session never becomes ready.
+
+One test needs the checker and an evaluator browser and is skipped in CI.
+With both set, it runs the full `--task game` flow twice with a scripted model
+and a fake browser server:
 
 - a model that writes the reference and plays it is `accepted` (13 passed) and
   the play-test is observed;
@@ -415,9 +497,20 @@ and an evaluator browser and is skipped in CI. With both set, it runs the full
 
 - The play-through checks the rules in the brief through the page structure
   that the brief requires; a game that draws without those elements fails.
-- The checker is the merged PLAN-04 contract. Its protection corrections are
-  in progress separately; re-pin the seal and rerun the self-test with the
-  corrected checker.
+- The harness implements the checker session protocol of stack commit
+  `7c2ff06`. A checker with another `task_acceptance_session.py` is refused
+  until the harness is updated and `CHECKER_SESSION` re-pinned; rerun the
+  self-test with that checker.
+- The route probes run in a second agent process with the same build and
+  policy but a separate configuration (its own state and fake model, no
+  `mcp.json`), not inside the evaluated process. The capability lease is the
+  runner's: it keeps the build, dependencies, harness code and configuration
+  fixed for the attempt and checks their digest before it sends the
+  observation.
+- The browser MCP tools are not a registered route (see the checker session,
+  step 3).
+- Each probe phase takes a few hundred tool calls; on macOS each sandboxed
+  command takes about 0.4 s, so a phase takes about two minutes.
 - The probes demonstrate the boundary on the platform where they run. The
   runner repeats them before every evaluated session, on that machine.
 

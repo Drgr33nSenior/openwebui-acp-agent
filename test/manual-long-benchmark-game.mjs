@@ -7,8 +7,9 @@
 // play-through script, a trusted reference game and known-bug mutants. Its
 // seal is pinned below, outside the source and every workspace. After the
 // agent's session the evaluator plays the produced game in a real browser,
-// captures screenshots, and writes the observation as the contract's
-// external-state file; the PLAN-04 checker gives the verdict.
+// captures screenshots and hands the observation to the PLAN-04 checker,
+// whose private session was started before the agent's tools were enabled
+// (see beginAcceptance); the checker gives the verdict.
 //
 //   node test/manual-long-benchmark-game.mjs --check-browser container:NAME
 //   node test/manual-long-benchmark-game.mjs --check-browser local:/path/to/chromium
@@ -16,10 +17,29 @@
 // plays the trusted reference and every mutant and exits non-zero unless each
 // gives its declared outcome. No model is involved.
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  readlink,
+  writeFile,
+} from "node:fs/promises";
+import { createServer } from "node:http";
+import { createRequire } from "node:module";
+import { homedir } from "node:os";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
+import { Readable, Writable } from "node:stream";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const SOURCE = fileURLToPath(
   new URL("./fixtures/long-benchmark-game/", import.meta.url),
@@ -232,6 +252,86 @@ export async function runDriver(transport, payload) {
     });
     child.stdin.end(input);
   });
+}
+
+// ---- Permission policy -----------------------------------------------------
+// Shared by the runner's evaluated session, its isolation probes and the
+// checker's route probes.
+// The browser tools an evaluated agent may use: the wrapper's allowlist.
+export const BROWSER_TOOLS = new Set(
+  JSON.parse(
+    await readFile(
+      new URL("../browser/allowed-tools.json", import.meta.url),
+      "utf8",
+    ),
+  ),
+);
+const originOf = (url) => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+};
+export const updateText = (u) =>
+  (u.content ?? [])
+    .filter((c) => c.type === "content" && c.content?.type === "text")
+    .map((c) => c.content.text)
+    .join("\n");
+
+// One permission decision for the evaluated session and the isolation probes.
+// Allowed: workspace activation, edits (the agent refuses paths outside the
+// workspace before asking), commands in the workspace sandbox without extra
+// paths or escalation. For the game task also a static preview and the
+// allowlisted browser tools, with navigation only to a preview this session
+// started. Everything else is denied.
+export function decide(params, { game, previewOrigins, browserUrl }) {
+  const title = params.toolCall.title ?? "",
+    input = params.toolCall.rawInput ?? {};
+  if (title.startsWith("Activate exact workspace ")) return true;
+  if (params.toolCall.kind === "edit") return true;
+  if (
+    title.startsWith("Run ") &&
+    title.includes("OS sandbox: workspace") &&
+    !/extra reads|extra writes/.test(title) &&
+    !input.additional_read_paths?.length &&
+    !input.additional_write_paths?.length &&
+    input.sandbox_permissions !== "require_escalated"
+  )
+    return true;
+  if (!game) return false;
+  if (title.startsWith("Start static preview of ")) return true;
+  // Connecting the configured browser server, and no other MCP server.
+  if (browserUrl && title.startsWith(`MCP browser: http ${browserUrl};`))
+    return true;
+  // The agent marks every HTTP MCP server as running outside its sandbox.
+  const call = title.match(
+    /^Call browser\/(browser_[a-z_]+)(?: \(runs on this machine outside the sandbox\))?: (.*)$/s,
+  );
+  if (!call || !BROWSER_TOOLS.has(call[1])) return false;
+  if (call[1] !== "browser_navigate") return true;
+  try {
+    return previewOrigins.has(originOf(JSON.parse(call[2]).url));
+  } catch {
+    return false;
+  }
+}
+
+// Records the origins of a preview the agent started, from its result.
+export function trackPreview(u, tools, previewOrigins) {
+  if (
+    u.sessionUpdate !== "tool_call_update" ||
+    u.status !== "completed" ||
+    tools.get(u.toolCallId) !== "start_preview"
+  )
+    return;
+  try {
+    const info = JSON.parse(updateText(u));
+    for (const url of [info.url, info.containerUrl])
+      if (originOf(url)) previewOrigins.add(originOf(url));
+  } catch {
+    // Not a preview result.
+  }
 }
 
 // ---- Judging ---------------------------------------------------------------
@@ -477,35 +577,111 @@ export async function playWorkspace({
 }
 
 // ---- PLAN-04 checker -------------------------------------------------------
-const checkerFiles = [
-  "task_acceptance.py",
-  "coding_eval.py",
-  "assistant_acceptance.py",
+// The checker accepts an attempt only through its private session protocol
+// (stack PR #243): the parent starts task_acceptance_session.py BEFORE the
+// agent's tools are enabled, pins the complete checker manifest, keeps a
+// fixed capability lease for the whole attempt, performs each access probe
+// through the agent's real routes and sends the play-through observation over
+// the session's private pipe. A one-shot `check` returns `unavailable`
+// (`protection:attempt-lifetime-not-established`).
+//
+// The protocol this harness implements is pinned by the bootstrap's digest.
+// Any other bootstrap, or a checker without one, is refused before a session.
+export const CHECKER_SESSION = {
+  file: "task_acceptance_session.py",
+  sha256: "619316431b1f3460ea042b4eafd6e944bd00d5f95f31ebcb6b14f31ccad20b0c",
+  stackCommit: "7c2ff064a30964eb701ec19c7e55c4ee4752d9fe",
+};
+// Every way the agent's tools reach files, named by their enforcement point:
+//   agent-file-tools: the agent's workspace path guard. read_file, write_file,
+//     edit_file, list_files, search_text, view_image and start_preview all
+//     resolve paths through it. The browser reaches files only through a
+//     preview: the permission policy allows navigation to preview origins only.
+//   agent-sandboxed-commands: run_command, foreground or background, in the
+//     agent's OS sandbox.
+export const ROUTES = ["agent-file-tools", "agent-sandboxed-commands"];
+// What the registered routes do not cover, recorded with every session.
+export const UNPROBED_ROUTES = [
+  {
+    route: "browser-mcp",
+    reason:
+      "not registered with the checker: the permission policy allows browser_navigate only to preview origins and the browser container mounts no host directory, but other browser tools (for example browser_tabs or clicking a link) are not probed; a browser MCP server with a browser on the host would be an unprobed route to host files",
+  },
 ];
+const OPERATIONS = new Set(["read", "write", "create", "rename", "unlink"]);
+const CHECKER_VARIABLE = "LONG_BENCHMARK_ACCEPTANCE_CHECKER";
+const MAX_CHECKER_FILE = 2 * 1024 * 1024;
+const PHASE_TIMEOUT_MS = 20 * 60000;
+const PROBE_TIMEOUT_MS = 120000;
+const RUNNER = fileURLToPath(
+  new URL("./manual-long-benchmark.mjs", import.meta.url),
+);
+
+// The complete checker manifest: every *.py below the directory of
+// task_acceptance.py (as the session bootstrap computes it), with the bytes
+// read once here. Refused unless the bootstrap is the supported protocol.
 export async function checkerIdentity(path) {
-  if (!path || !isAbsolute(path) || !path.endsWith("task_acceptance.py"))
+  if (!path || !isAbsolute(path) || basename(path) !== "task_acceptance.py")
     return {
-      unavailable:
-        "LONG_BENCHMARK_ACCEPTANCE_CHECKER is not an absolute path to task_acceptance.py",
+      unavailable: `${CHECKER_VARIABLE} is not an absolute path to task_acceptance.py`,
     };
-  const identity = { path, files: {} };
-  try {
-    for (const name of checkerFiles)
-      identity.files[name] = sha256(await readFile(join(dirname(path), name)));
-  } catch {
-    return { unavailable: "checker files are not readable" };
+  const directory = dirname(path),
+    contents = {};
+  async function walk(folder) {
+    for (const entry of await readdir(folder, { withFileTypes: true })) {
+      const full = join(folder, entry.name);
+      if (entry.isDirectory() && entry.name !== "__pycache__") await walk(full);
+      else if (entry.name.endsWith(".py") && !entry.isDirectory()) {
+        const info = await lstat(full);
+        if (!info.isFile() || info.size > MAX_CHECKER_FILE)
+          throw new Error(`${entry.name} is not a bounded regular file`);
+        contents[relative(directory, full).split(sep).join("/")] =
+          await readFile(full);
+      }
+    }
   }
-  return identity;
+  try {
+    await walk(directory);
+  } catch (error) {
+    return {
+      unavailable: `${CHECKER_VARIABLE}: the checker files are not readable (${error.message})`,
+    };
+  }
+  const files = Object.fromEntries(
+    Object.keys(contents)
+      .sort()
+      .map((name) => [name, sha256(contents[name])]),
+  );
+  const session = files[CHECKER_SESSION.file];
+  const supported = `${CHECKER_SESSION.sha256.slice(0, 12)}…, stack ${CHECKER_SESSION.stackCommit.slice(0, 7)}`;
+  if (!session)
+    return {
+      unavailable: `${CHECKER_VARIABLE}: the checker has no ${CHECKER_SESSION.file}; it predates the PLAN-04 session protocol that this harness requires (${supported})`,
+    };
+  if (session !== CHECKER_SESSION.sha256)
+    return {
+      unavailable: `${CHECKER_VARIABLE}: ${CHECKER_SESSION.file} has SHA-256 ${session}, not the session protocol that this harness implements (${supported}); update the harness for that checker`,
+    };
+  return {
+    path,
+    files,
+    contents,
+    treeSha256: sha256(canonical(files)),
+  };
 }
+
+// Copies the verified checker bytes to a new private directory outside the
+// workspace; the session runs from there. Returns that directory.
+export async function installChecker(identity, destination) {
+  await copySource({ files: identity.contents }, destination);
+  return destination;
+}
+
 function python(args) {
   return new Promise((done) => {
-    const child = spawn("python3", ["-E", "-s", ...args], {
+    const child = spawn("python3", ["-E", "-s", "-B", ...args], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        PATH: process.env.PATH,
-        HOME: process.env.HOME,
-        PYTHONDONTWRITEBYTECODE: "1",
-      },
+      env: { PATH: process.env.PATH, HOME: process.env.HOME },
     });
     let stdout = "",
       stderr = "";
@@ -523,33 +699,615 @@ export async function checkerSeal(checker, source) {
   return r.code === 0 ? r.stdout.trim() : null;
 }
 
-// Runs `check` and `validate`. Returns the hidden-check summary for the report.
-export async function runChecker({
+// The session bootstrap as a child with private pipes. `begin(route)` sends
+// the start message and services the setup probes until the checker is ready;
+// `finish(final, route)` sends the observation and services the final probes
+// until the result. `route(name, operation, path)` returns the outcome of one
+// probe. Nothing from these pipes reaches the agent.
+export function openCheckerSession({ directory, start }) {
+  const lease = start.capability_lease;
+  const child = spawn(
+    "python3",
+    ["-I", "-B", join(directory, CHECKER_SESSION.file)],
+    {
+      cwd: directory,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { PATH: process.env.PATH },
+    },
+  );
+  const queue = [];
+  let buffer = "",
+    stderr = "",
+    ended = null,
+    wake = null,
+    probes = 0;
+  const exited = new Promise((done) =>
+    child.on("close", (code) => {
+      ended ??= { code };
+      wake?.();
+      done(code);
+    }),
+  );
+  child.on("error", (error) => {
+    ended = { error: error.message };
+    wake?.();
+  });
+  child.stdin.on("error", () => {
+    // The session has ended; the next read reports why.
+  });
+  child.stdout.on("data", (chunk) => {
+    buffer += chunk;
+    let end;
+    while ((end = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, end);
+      buffer = buffer.slice(end + 1);
+      try {
+        const message = JSON.parse(line);
+        queue.push(
+          message && typeof message === "object" ? message : { malformed: 1 },
+        );
+      } catch {
+        queue.push({ malformed: true });
+      }
+    }
+    wake?.();
+  });
+  child.stderr.on("data", (chunk) => {
+    if (stderr.length < 4000) stderr += chunk;
+  });
+  const next = async (deadline) => {
+    while (!queue.length && !ended && Date.now() < deadline) {
+      let timer;
+      await new Promise((r) => {
+        wake = r;
+        timer = setTimeout(r, deadline - Date.now());
+      });
+      clearTimeout(timer);
+      wake = null;
+    }
+    return queue.shift() ?? null;
+  };
+  const why = () => {
+    if (ended?.error) return `checker session could not start: ${ended.error}`;
+    const last = stderr.trim().split("\n").at(-1)?.slice(0, 300);
+    return `checker session ended${ended ? ` with status ${ended.code}` : ""}: ${last || "no message"}`;
+  };
+  async function exchange(message, route, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    child.stdin.write(JSON.stringify(message) + "\n");
+    for (;;) {
+      const m = await next(deadline);
+      if (!m) {
+        const reason =
+          ended || queue.length ? why() : "checker session timed out";
+        child.kill("SIGKILL");
+        return { unavailable: reason };
+      }
+      if (m.malformed) {
+        child.kill("SIGKILL");
+        return { unavailable: "checker session sent a malformed message" };
+      }
+      if (!("probe" in m)) return m;
+      probes++;
+      let outcome = "unavailable";
+      if (
+        m.capability_lease === lease &&
+        ROUTES.includes(m.route) &&
+        OPERATIONS.has(m.probe) &&
+        typeof m.path === "string" &&
+        isAbsolute(m.path)
+      )
+        outcome = await route(m.route, m.probe, m.path).catch(
+          () => "unavailable",
+        );
+      child.stdin.write(
+        JSON.stringify({ outcome, capability_lease: lease }) + "\n",
+      );
+    }
+  }
+  return {
+    get probes() {
+      return probes;
+    },
+    async begin(route, timeoutMs = PHASE_TIMEOUT_MS) {
+      const m = await exchange(start, route, timeoutMs);
+      if (m.unavailable) return { ready: false, reason: m.unavailable };
+      if (m.capability_lease !== lease || typeof m.ready !== "boolean") {
+        child.kill("SIGKILL");
+        return {
+          ready: false,
+          reason: "checker session answered off-protocol",
+        };
+      }
+      return { ready: m.ready, protection: m.protection ?? null };
+    },
+    async finish(final, route, timeoutMs = PHASE_TIMEOUT_MS) {
+      const m = await exchange(
+        { ...final, capability_lease: lease },
+        route,
+        timeoutMs,
+      );
+      if (m.unavailable) return m;
+      if (!m.result || typeof m.result !== "object") {
+        child.kill("SIGKILL");
+        return { unavailable: "checker session sent no result" };
+      }
+      let timer;
+      const exitCode = await Promise.race([
+        exited,
+        new Promise((r) => (timer = setTimeout(() => r(null), 30000))),
+      ]);
+      clearTimeout(timer);
+      if (exitCode === null) child.kill("SIGKILL");
+      return { result: m.result, exitCode };
+    },
+    close() {
+      if (!ended) child.kill("SIGKILL");
+    },
+  };
+}
+
+// One checker probe as one tool call through a route. Read and write open a
+// file without returning or changing its bytes; create, rename and unlink
+// receive only the checker's own sacrificial directories. null: the route
+// does not expose that capability (no file tool renames or deletes a path).
+export function routeCall(route, operation, path, nonce) {
+  if (route === "agent-file-tools") {
+    if (operation === "read")
+      return { tool: "read_file", args: { path, limit: 1 } };
+    // Replacing a random text with itself: a match changes nothing, and no
+    // match fails after the path passed the write check.
+    if (operation === "write")
+      return {
+        tool: "edit_file",
+        args: { path, old_string: nonce, new_string: nonce },
+      };
+    if (operation === "create")
+      return {
+        tool: "write_file",
+        args: { path: join(path, "created"), content: "" },
+      };
+    return null;
+  }
+  const action = {
+    read: 'true <"$1"',
+    write: 'true >>"$1"',
+    create: 'mkdir "$1/created"',
+    rename: 'mv "$1" "$1.moved"',
+    unlink: 'rm "$1/entry"',
+  }[operation];
+  return {
+    tool: "run_command",
+    args: {
+      executable: "/bin/sh",
+      args: [
+        "-c",
+        `exec 2>&1; if ${action}; then echo probe-allowed; else echo probe-failed; fi`,
+        "probe",
+        path,
+      ],
+    },
+  };
+}
+// EPERM, EACCES, ENOENT and EROFS as the shell reports them, at the end of an
+// error line, so an echoed path or label cannot match. dash (Linux /bin/sh)
+// reports ENOENT as "No such file", or on a redirection's directory as
+// "Directory nonexistent": what a sandbox that hides a path gives.
+const COMMAND_DENIAL =
+  /: (operation not permitted|permission denied|no such file( or directory)?|directory nonexistent|read-only file system)$/im;
+const FILE_DENIAL =
+  /Path outside permitted scope|Application state is outside tool scope|Agent executable and dependency files are protected|Protected path:|Symlink access refused|Hard-linked file refused|does not exist|EACCES|EPERM|ENOENT/;
+// `allowed`, `denied` or `unavailable` from one tool call's result. A tool
+// failure that is not a refusal of the path is unavailable, never a denial.
+export function routeOutcome(route, operation, { ok, text }) {
+  if (route === "agent-sandboxed-commands") {
+    // run_command returns {"code":N,"output":"..."}; the script exits 0.
+    let output = null;
+    try {
+      const result = JSON.parse(text);
+      if (ok && result.code === 0) output = String(result.output);
+    } catch {
+      // Not a command result: the command did not run.
+    }
+    if (output === null) return "unavailable";
+    if (/^probe-allowed$/m.test(output)) return "allowed";
+    return /^probe-failed$/m.test(output) && COMMAND_DENIAL.test(output)
+      ? "denied"
+      : "unavailable";
+  }
+  if (ok) return "allowed";
+  if (operation === "write" && /old_string matched 0 occurrences/.test(text))
+    return "allowed";
+  return FILE_DENIAL.test(text) ? "denied" : "unavailable";
+}
+
+// A scripted model drives the agent build under test, through the runner's
+// child wrapper, permission policy and sandbox, in the evaluated workspace
+// with its own state: each probe is one tool call. Only outcomes are kept.
+export async function startRouteAgent({ agentDirectory, workspace, state }) {
+  const require = createRequire(join(agentDirectory, "package.json"));
+  const { ClientApp, ndJsonStream } = await import(
+    pathToFileURL(require.resolve("@agentclientprotocol/sdk")).href
+  );
+  const nonce = `route-probe-${randomUUID()}`;
+  // Only the route agent knows this path: other local processes get 404.
+  const secret = `/${randomUUID()}`;
+  const pending = new Map(),
+    calls = [];
+  let waiting = null,
+    closing = false,
+    broken = null,
+    count = 0;
+  const nextCall = () =>
+    calls.length || closing
+      ? Promise.resolve(calls.shift() ?? null)
+      : new Promise((r) => (waiting = r));
+  const server = createServer(async (req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (!req.url?.startsWith(`${secret}/`)) {
+      res.statusCode = 404;
+      return res.end("{}");
+    }
+    if (req.url === `${secret}/api/models`)
+      return res.end(JSON.stringify({ data: [{ id: "route-probe" }] }));
+    let raw = "",
+      request;
+    for await (const part of req) raw += part;
+    try {
+      request = JSON.parse(raw);
+    } catch {
+      res.statusCode = 400;
+      return res.end("{}");
+    }
+    const call = request?.tools?.length ? await nextCall() : null;
+    const message = call
+      ? {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: call.id,
+              type: "function",
+              function: {
+                name: call.tool,
+                arguments: JSON.stringify(call.args),
+              },
+            },
+          ],
+        }
+      : { role: "assistant", content: "Route probes finished." };
+    res.end(
+      JSON.stringify({
+        choices: [{ message, finish_reason: call ? "tool_calls" : "stop" }],
+      }),
+    );
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  await mkdir(state, { mode: 0o700 });
+  await writeFile(
+    join(state, "config.json"),
+    JSON.stringify({
+      url: `http://127.0.0.1:${server.address().port}${secret}`,
+      model: "route-probe",
+      rounds: 100,
+    }),
+    { mode: 0o600 },
+  );
+  // A synthetic key: route probes never use the real credential.
+  const env = {
+    PATH: process.env.PATH,
+    HOME: homedir(),
+    OPENWEBUI_ACP_HOME: state,
+    OPENWEBUI_API_KEY: "synthetic-route-probe",
+  };
+  if (process.env.TMPDIR) env.TMPDIR = process.env.TMPDIR;
+  const child = spawn(process.execPath, [RUNNER, "--child", agentDirectory], {
+    cwd: workspace,
+    env,
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  const fail = (reason) => {
+    broken ??= reason;
+    for (const [, resolve] of pending)
+      resolve({ ok: false, text: `route agent unavailable: ${broken}` });
+    pending.clear();
+  };
+  child.on("exit", () => fail("agent exited"));
+  const app = new ClientApp();
+  app.onNotification("session/update", ({ params }) => {
+    const u = params.update;
+    if (
+      u.sessionUpdate === "tool_call_update" &&
+      ["completed", "failed"].includes(u.status) &&
+      pending.has(u.toolCallId)
+    ) {
+      const resolve = pending.get(u.toolCallId);
+      pending.delete(u.toolCallId);
+      resolve({ ok: u.status === "completed", text: updateText(u) });
+    }
+  });
+  app.onRequest("session/request_permission", ({ params }) => ({
+    outcome: {
+      outcome: "selected",
+      optionId: decide(params, {
+        game: true,
+        previewOrigins: new Set(),
+        browserUrl: null,
+      })
+        ? "once"
+        : "deny",
+    },
+  }));
+  const connection = app.connect(
+    ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)),
+  );
+  const close = async () => {
+    closing = true;
+    waiting?.(null);
+    waiting = null;
+    let timer;
+    await Promise.race([
+      driving,
+      new Promise((r) => (timer = setTimeout(r, 30000))),
+    ]);
+    clearTimeout(timer);
+    connection.close();
+    child.kill("SIGTERM");
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  };
+  let driving = Promise.resolve();
+  try {
+    await connection.agent.request("initialize", {
+      protocolVersion: 1,
+      clientCapabilities: {},
+    });
+    const { sessionId } = await connection.agent.request("session/new", {
+      cwd: workspace,
+      mcpServers: [],
+    });
+    // The agent ends a turn after 64 tool calls; continue until closed.
+    driving = (async () => {
+      while (!closing) {
+        const { stopReason } = await connection.agent.request(
+          "session/prompt",
+          {
+            sessionId,
+            prompt: [{ type: "text", text: "Run the route probes." }],
+          },
+        );
+        if (!closing && stopReason !== "max_turn_requests")
+          return fail(`turn ended: ${stopReason}`);
+      }
+    })().catch((error) => fail(String(error?.message ?? error)));
+  } catch (error) {
+    await close();
+    throw error;
+  }
+  const call = (tool, args) =>
+    new Promise((resolve) => {
+      if (broken)
+        return resolve({
+          ok: false,
+          text: `route agent unavailable: ${broken}`,
+        });
+      const id = `route-${++count}`;
+      const item = { id, tool, args };
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        // Never handed to the model later.
+        if (calls.includes(item)) calls.splice(calls.indexOf(item), 1);
+        resolve({ ok: false, text: "route probe timed out" });
+      }, PROBE_TIMEOUT_MS);
+      pending.set(id, (result) => {
+        clearTimeout(timer);
+        resolve(result);
+      });
+      if (waiting) {
+        const w = waiting;
+        waiting = null;
+        w(item);
+      } else calls.push(item);
+    });
+  return {
+    async probe(route, operation, path) {
+      const planned = routeCall(route, operation, path, nonce);
+      if (!planned) return "unsupported";
+      return routeOutcome(
+        route,
+        operation,
+        await call(planned.tool, planned.args),
+      );
+    },
+    close,
+  };
+}
+
+async function withRouteAgent(options, work) {
+  let agent;
+  try {
+    agent = await startRouteAgent(options);
+  } catch (error) {
+    return {
+      unavailable: `route agent did not start: ${String(error?.message ?? error).slice(0, 200)}`,
+    };
+  }
+  try {
+    return await work((...probe) => agent.probe(...probe));
+  } finally {
+    await agent.close();
+  }
+}
+
+// The administrator policy the agent reads (src/policy.ts, policyPath).
+const ADMIN_POLICY =
+  process.platform === "darwin"
+    ? "/private/etc/openwebui-acp-agent/policy.json"
+    : "/etc/openwebui-acp-agent/policy.json";
+// One entry by content: a file's SHA-256 at any size, a link by its target
+// (never followed), otherwise its kind; `absent` when missing.
+async function entryDigest(path) {
+  let info;
+  try {
+    info = await lstat(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return "absent";
+    throw error;
+  }
+  if (info.isSymbolicLink()) return `link:${await readlink(path)}`;
+  if (info.isFile()) return sha256(await readFile(path));
+  return info.isDirectory() ? "directory" : "special";
+}
+async function treeDigests(root, prefix, into) {
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    into[prefix] = "absent";
+    return;
+  }
+  for (const entry of entries.sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+  )) {
+    const path = join(root, entry.name),
+      name = `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) await treeDigests(path, name, into);
+    else into[name] = await entryDigest(path);
+  }
+}
+// Digest of what fixes the agent's capabilities for the attempt: its build,
+// dependencies and package files, the harness code that wraps it and decides
+// its permissions, the administrator policy and the configuration files the
+// checker protects. The lease is sent with the final message only if this is
+// unchanged.
+export async function capabilityPolicy(agentDirectory, configuration) {
+  const digests = {};
+  for (const tree of ["dist", "node_modules"])
+    await treeDigests(join(agentDirectory, tree), tree, digests);
+  for (const name of ["package.json", "package-lock.json"])
+    digests[name] = await entryDigest(join(agentDirectory, name));
+  digests["harness:runner"] = await entryDigest(RUNNER);
+  digests["harness:policy"] = await entryDigest(fileURLToPath(import.meta.url));
+  digests["administrator-policy"] = await entryDigest(ADMIN_POLICY);
+  for (const path of configuration) digests[path] = await entryDigest(path);
+  return sha256(canonical(digests));
+}
+
+const sameTree = (a, b) =>
+  JSON.stringify(Object.keys(a.files)) ===
+    JSON.stringify(Object.keys(b.files)) &&
+  Object.keys(a.files).every((name) => a.files[name].equals(b.files[name])) &&
+  JSON.stringify(a.refused) === JSON.stringify(b.refused);
+
+// Counts of the checker's probe rows and controls, without paths.
+const probeSummary = (record) => {
+  if (!record || typeof record !== "object") return null;
+  const tally = (rows) =>
+    (Array.isArray(rows) ? rows : []).reduce(
+      (t, row) => ({ ...t, [row.status]: (t[row.status] ?? 0) + 1 }),
+      {},
+    );
+  return {
+    status: record.status ?? null,
+    reason: record.reason ?? null,
+    probes: tally(record.probes),
+    controls: tally(record.controls),
+  };
+};
+
+// Starts the checker's private session before the agent's tools are enabled.
+// `checker` is the identity from checkerIdentity with `installed`, the private
+// copy it runs from. Returns { ready, reason, record, finish, close }; enable
+// the agent only when `ready` is true. The session stays alive until finish.
+export async function beginAcceptance({
   checker,
-  source,
+  acceptance,
   workspace,
-  state,
-  output,
+  configuration,
+  agentDirectory,
+  scratch,
   runId,
 }) {
-  const args = [
-    checker,
-    "check",
-    source,
-    output,
-    "--workspace",
-    workspace,
-    "--seal",
-    GAME_SEAL,
-  ];
-  if (state) args.push("--state", state);
-  args.push("--run-id", runId, "--attempt-id", "1");
-  const run = await python(args);
-  if (![0, 1, 3].includes(run.code))
-    return {
-      verdict: "unavailable",
-      reason: `checker failed: ${run.stderr.trim().slice(0, 300)}`,
-    };
+  const lease = `lease-${randomUUID()}`;
+  const policy = await capabilityPolicy(agentDirectory, configuration);
+  const session = openCheckerSession({
+    directory: checker.installed,
+    start: {
+      source: acceptance,
+      workspace,
+      seal: GAME_SEAL,
+      checker: checker.files,
+      configuration,
+      routes: ROUTES,
+      capability_lease: lease,
+      run_id: runId,
+      attempt_id: "1",
+    },
+  });
+  const unchanged = await readTree(workspace, { strict: false });
+  const begun = await withRouteAgent(
+    { agentDirectory, workspace, state: join(scratch, "route-probe-setup") },
+    (route) => session.begin(route),
+  );
+  const record = {
+    protocol: CHECKER_SESSION.sha256,
+    routes: ROUTES,
+    unprobedRoutes: UNPROBED_ROUTES,
+    ready: begun.ready === true,
+    setupProbes: session.probes,
+    protection: probeSummary(begun.protection),
+  };
+  let reason = begun.reason ?? begun.unavailable;
+  if (begun.ready === false && !reason)
+    reason = `protection ${record.protection?.status ?? "unknown"}${record.protection?.reason ? ` (${record.protection.reason})` : ""}`;
+  if (
+    !reason &&
+    !sameTree(unchanged, await readTree(workspace, { strict: false }))
+  )
+    reason = "the workspace changed during the setup probes";
+  if (reason) {
+    session.close();
+    record.ready = false;
+    return { ready: false, reason, record, close() {} };
+  }
+  return {
+    ready: true,
+    record,
+    close: () => session.close(),
+    // The observation is the evaluator's fresh play-through, or null when it
+    // could not run. Writes the checker's result to `output`.
+    async finish({ observation, output }) {
+      if ((await capabilityPolicy(agentDirectory, configuration)) !== policy) {
+        session.close();
+        return {
+          unavailable:
+            "the agent's capability policy changed during the attempt",
+        };
+      }
+      const before = session.probes;
+      const done = await withRouteAgent(
+        {
+          agentDirectory,
+          workspace,
+          state: join(scratch, "route-probe-final"),
+        },
+        (route) => session.finish(observation ? { observation } : {}, route),
+      );
+      record.finalProbes = session.probes - before;
+      if (done.unavailable) return done;
+      await writeFile(output, JSON.stringify(done.result, null, 2) + "\n", {
+        mode: 0o600,
+        flag: "wx",
+      });
+      return { exitCode: done.exitCode };
+    },
+  };
+}
+
+// Validates a written result with the checker's own `validate` and returns
+// the summary for the report.
+export async function summarizeResult({ checker, output }) {
   const validated = await python([checker, "validate", output]);
   if (validated.code !== 0)
     return {
@@ -559,6 +1317,7 @@ export async function runChecker({
   const result = JSON.parse(await readFile(output, "utf8"));
   const rows = result.components.external_state.checks ?? [];
   const count = (status) => rows.filter((r) => r.status === status).length;
+  const protection = result.components.protection;
   return {
     verdict: result.verdict,
     validatedVerdict: validated.stdout.trim(),
@@ -569,10 +1328,12 @@ export async function runChecker({
     components: Object.fromEntries(
       Object.entries(result.components).map(([k, v]) => [k, v.status]),
     ),
+    protection: probeSummary(protection),
     taskId: result.task_id,
     specSha256: result.spec_sha256,
-    sealSha256: result.components.protection.seal_sha256,
+    sealSha256: protection.seal_sha256,
     checkerSha256: result.checker_sha256,
+    checkerTreeSha256: protection.checker_tree_sha256 ?? null,
   };
 }
 
@@ -587,13 +1348,6 @@ const INTERACT = new Set([
   "browser_hover",
 ]);
 const LOOK = new Set(["browser_snapshot", "browser_find", "browser_wait_for"]);
-const originOf = (url) => {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return null;
-  }
-};
 // The tool calls of a saved session in order, with MCP names resolved and
 // each call's outcome: ok when it has a result and is not recorded as failed.
 export function callsFromTranscript(session, mcpTools = {}) {
