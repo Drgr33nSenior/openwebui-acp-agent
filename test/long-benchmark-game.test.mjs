@@ -10,6 +10,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
+import { ownedProcesses } from "../dist/loopback.js";
 import { createServer } from "node:http";
 import {
   appendFile,
@@ -32,7 +34,39 @@ const temporary = await realpath(
   await mkdtemp(join(tmpdir(), "ow-game-test-")),
 );
 process.env.OPENWEBUI_ACP_HOME = join(temporary, "unused-state");
-test.after(() => rm(temporary, { recursive: true, force: true }));
+const activeRuns = new Set();
+let retainScratch = false;
+test.after(async () => {
+  await Promise.all([...activeRuns]);
+  if (retainScratch)
+    console.error(`Retained cancelled game scratch: ${temporary}`);
+  else await rm(temporary, { recursive: true, force: true });
+});
+
+// Node cancellation does not await an async test body. Join its finally blocks
+// before the file-level hook can delete scratch used by runners and browsers.
+function lifecycleTest(name, options, body) {
+  test(name, options, (t) => {
+    const cancelled = () => {
+      retainScratch = true;
+    };
+    t.signal.addEventListener("abort", cancelled, { once: true });
+    const running = body(t).finally(() => {
+      t.signal.removeEventListener("abort", cancelled);
+    });
+    activeRuns.add(running);
+    t.after(async () => {
+      try {
+        await running;
+      } catch (error) {
+        if (error !== t.signal.reason) throw error;
+      } finally {
+        activeRuns.delete(running);
+      }
+    });
+    return running;
+  });
+}
 
 const GAME = await import("./manual-long-benchmark-game.mjs");
 const here = dirname(fileURLToPath(import.meta.url));
@@ -1328,33 +1362,180 @@ async function userState(url) {
   );
   return state;
 }
-function runner(label, env) {
-  return new Promise((done) => {
-    const child = spawn(
-      process.execPath,
-      [
-        join(here, "manual-long-benchmark.mjs"),
-        "--live",
-        checkout,
-        label,
-        "5",
-        "--task",
-        "game",
-      ],
-      { env, stdio: ["ignore", "pipe", "pipe"] },
+// Each runner leads a private group. Snapshot descendants as well because ACP
+// commands can lead their own groups. Never select by executable name.
+function processTable() {
+  const result = spawnSync(
+    "ps",
+    ["-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "stat="],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout
+    .trim()
+    .split("\n")
+    .map((line) => {
+      const [pid, ppid, pgid, stat] = line.trim().split(/\s+/);
+      return { pid: Number(pid), ppid: Number(ppid), pgid: Number(pgid), stat };
+    });
+}
+async function stopRunner(child) {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null)
+    return;
+  if (process.platform === "win32") {
+    const result = spawnSync("taskkill", [
+      "/pid",
+      String(child.pid),
+      "/T",
+      "/F",
+    ]);
+    assert.equal(result.status, 0, "owned runner taskkill failed");
+    return;
+  }
+  const signal = (pid, name) => {
+    try {
+      process.kill(pid, name);
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+    }
+  };
+  // Freeze each discovered descendant before taking the next snapshot so it
+  // cannot spawn more work while the tree is being stopped.
+  const owned = new Set([child.pid]);
+  signal(child.pid, "SIGSTOP");
+  for (;;) {
+    const found = ownedProcesses(processTable(), [...owned]);
+    const added = [...found].filter((pid) => !owned.has(pid));
+    for (const pid of added) {
+      signal(pid, "SIGSTOP");
+      owned.add(pid);
+    }
+    if (!added.length) break;
+  }
+  for (const pid of [...owned].reverse()) signal(pid, "SIGKILL");
+  const deadline = Date.now() + 10000;
+  while (
+    processTable().some((p) => owned.has(p.pid) && !p.stat.startsWith("Z"))
+  ) {
+    assert(
+      Date.now() < deadline,
+      "owned runner tree did not stop; retain scratch",
     );
-    let stdout = "",
-      stderr = "";
-    child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
-    child.on("close", (code) => done({ code, stdout, stderr }));
+    await delay(25);
+  }
+}
+async function ownedRunner(args, env, signal) {
+  signal.throwIfAborted();
+  const child = spawn(process.execPath, args, {
+    env,
+    detached: process.platform !== "win32",
+    stdio: ["ignore", "pipe", "pipe"],
   });
+  let stdout = "",
+    stderr = "",
+    stopping;
+  child.stdout.on("data", (d) => (stdout += d));
+  child.stderr.on("data", (d) => (stderr += d));
+  const closed = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stdout, stderr }));
+  });
+  let rejectStopped;
+  const stopped = new Promise((_, reject) => {
+    rejectStopped = reject;
+  });
+  const abort = () => {
+    stopping ??= stopRunner(child).then(async () => {
+      let timer;
+      try {
+        await Promise.race([
+          closed,
+          new Promise((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error("owned runner pipes did not close")),
+              10000,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      throw signal.reason;
+    });
+    stopping.catch(rejectStopped);
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  try {
+    const result = await Promise.race([closed, stopped]);
+    await stopping;
+    signal.throwIfAborted();
+    return result;
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+}
+function runner(label, env, signal) {
+  return ownedRunner(
+    [
+      join(here, "manual-long-benchmark.mjs"),
+      "--live",
+      checkout,
+      label,
+      "5",
+      "--task",
+      "game",
+    ],
+    env,
+    signal,
+  );
 }
 
-test(
+lifecycleTest(
+  "cancellation stops the owned runner tree before scratch cleanup",
+  { timeout: 20000 },
+  async (t) => {
+    const scratch = await mkdtemp(join(temporary, "cancel-"));
+    const marker = join(scratch, "child.pid");
+    const controller = new AbortController();
+    const descendant = `require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid));setInterval(()=>{},1000)`;
+    const code = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{detached:true,stdio:'inherit'});setInterval(()=>{},1000)`;
+    const running = ownedRunner(
+      ["-e", code],
+      { PATH: process.env.PATH },
+      AbortSignal.any([controller.signal, t.signal]),
+    );
+    const rejected = assert.rejects(running, { name: "AbortError" });
+    try {
+      let pid;
+      while (!pid) {
+        try {
+          pid = Number(await readFile(marker, "utf8"));
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+        await delay(25);
+        t.signal.throwIfAborted();
+      }
+      controller.abort();
+      await rejected;
+      if (process.platform !== "win32")
+        assert(
+          !processTable().some((p) => p.pid === pid && !p.stat.startsWith("Z")),
+        );
+      else assert.throws(() => process.kill(pid, 0));
+      await rm(scratch, { recursive: true });
+    } finally {
+      controller.abort();
+      await rejected;
+    }
+  },
+);
+
+lifecycleTest(
   "without an evaluator the runner proves isolation, then refuses to start",
   { timeout: 240000 },
-  async () => {
+  async (t) => {
     const results = join(temporary, "results-closed");
     const env = {
       PATH: process.env.PATH,
@@ -1365,7 +1546,7 @@ test(
       LONG_BENCHMARK_ACCEPTANCE_CHECKER: await checkerTree("closed-checker"),
       TMPDIR: temporary,
     };
-    const run = await runner("closed-1", env);
+    const run = await runner("closed-1", env, t.signal);
     assert.equal(run.code, 4, run.stderr);
     const report = JSON.parse(
       await readFile(join(results, "closed-1", "report.json"), "utf8"),
@@ -1433,10 +1614,10 @@ test(
   },
 );
 
-test(
+lifecycleTest(
   "a browser without the confined endpoint never gets a session",
   { timeout: 240000 },
-  async () => {
+  async (t) => {
     // A browser wrapper from before the origin boundary: it serves /mcp and
     // nothing else. The agent is given only the confined endpoint, so it has
     // no browser, the controls fail and the run stops before a session.
@@ -1448,14 +1629,18 @@ test(
     await new Promise((r) => older.listen(0, "127.0.0.1", r));
     const results = join(temporary, "results-no-confined");
     try {
-      const run = await runner("no-confined-1", {
-        PATH: process.env.PATH,
-        HOME: process.env.HOME,
-        OPENWEBUI_ACP_HOME: await userState("http://127.0.0.1:9"),
-        LONG_BENCHMARK_RESULTS: results,
-        LONG_BENCHMARK_BROWSER_MCP_URL: `http://127.0.0.1:${older.address().port}/mcp`,
-        TMPDIR: temporary,
-      });
+      const run = await runner(
+        "no-confined-1",
+        {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          OPENWEBUI_ACP_HOME: await userState("http://127.0.0.1:9"),
+          LONG_BENCHMARK_RESULTS: results,
+          LONG_BENCHMARK_BROWSER_MCP_URL: `http://127.0.0.1:${older.address().port}/mcp`,
+          TMPDIR: temporary,
+        },
+        t.signal,
+      );
       assert.equal(run.code, 4, run.stderr);
       const report = JSON.parse(
         await readFile(join(results, "no-confined-1", "report.json"), "utf8"),
@@ -1532,10 +1717,10 @@ const realBrowserSkip =
   !LOCAL_CHROMIUM &&
   "needs LONG_BENCHMARK_GAME_BROWSER=local:/abs/chromium and browser/node_modules";
 
-test(
+lifecycleTest(
   "real browser route: with a host browser, no agent path reaches the hidden file",
   { timeout: 600000, skip: realBrowserSkip },
-  async () => {
+  async (t) => {
     const browser = await realBrowser();
     try {
       // The wrapper's own layer, without the harness policy: the pinned MCP
@@ -1577,14 +1762,18 @@ test(
       // Through the agent and the runner's policy, with this same browser:
       // the isolation probes (no checker: the run stops before a session).
       const results = join(temporary, "results-browser-route");
-      const run = await runner("browser-route-1", {
-        PATH: process.env.PATH,
-        HOME: process.env.HOME,
-        OPENWEBUI_ACP_HOME: await userState("http://127.0.0.1:9"),
-        LONG_BENCHMARK_RESULTS: results,
-        LONG_BENCHMARK_BROWSER_MCP_URL: browser.url,
-        TMPDIR: temporary,
-      });
+      const run = await runner(
+        "browser-route-1",
+        {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          OPENWEBUI_ACP_HOME: await userState("http://127.0.0.1:9"),
+          LONG_BENCHMARK_RESULTS: results,
+          LONG_BENCHMARK_BROWSER_MCP_URL: browser.url,
+          TMPDIR: temporary,
+        },
+        t.signal,
+      );
       const dir = join(results, "browser-route-1");
       if (EVIDENCE)
         await cp(dir, join(EVIDENCE, "browser-route-1"), { recursive: true });
@@ -1857,24 +2046,28 @@ try { new WebSocket('ws://127.0.0.1:${foreign.port}/socket'); } catch {}
   },
 );
 
-test(
+lifecycleTest(
   "real browser route: a browser that does not confine the session never gets one",
   { timeout: 600000, skip: realBrowserSkip },
-  async () => {
+  async (t) => {
     // The same wrapper and Chromium, but its confined endpoint opens
     // ordinary sessions. Everything else is as in a real run without a
     // checker. The probes must find the open route and stop the run.
     const browser = await realBrowser({ confine: false });
     try {
       const results = join(temporary, "results-browser-unconfined");
-      const run = await runner("browser-unconfined-1", {
-        PATH: process.env.PATH,
-        HOME: process.env.HOME,
-        OPENWEBUI_ACP_HOME: await userState("http://127.0.0.1:9"),
-        LONG_BENCHMARK_RESULTS: results,
-        LONG_BENCHMARK_BROWSER_MCP_URL: browser.url,
-        TMPDIR: temporary,
-      });
+      const run = await runner(
+        "browser-unconfined-1",
+        {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          OPENWEBUI_ACP_HOME: await userState("http://127.0.0.1:9"),
+          LONG_BENCHMARK_RESULTS: results,
+          LONG_BENCHMARK_BROWSER_MCP_URL: browser.url,
+          TMPDIR: temporary,
+        },
+        t.signal,
+      );
       const dir = join(results, "browser-unconfined-1");
       if (EVIDENCE)
         await cp(dir, join(EVIDENCE, "browser-unconfined-1"), {
@@ -2037,172 +2230,180 @@ async function fakeModel(html, play, previewKey = "containerUrl") {
   };
 }
 
-test(
-  "a full run: hidden verdict, screenshots and unprompted play-testing",
-  {
-    timeout: 600000,
-    skip:
-      (!CHECKER ||
-        !BROWSER ||
-        (!LOCAL_CHROMIUM && !process.env.LONG_BENCHMARK_BROWSER_MCP_URL)) &&
-      "needs LONG_BENCHMARK_ACCEPTANCE_CHECKER, LONG_BENCHMARK_GAME_BROWSER and a real agent browser (local:/abs/chromium or LONG_BENCHMARK_BROWSER_MCP_URL)",
-  },
-  async () => {
-    // The agent's real browser: a configured one (the container) or the
-    // repository's wrapper with the local Chromium.
-    const browser = process.env.LONG_BENCHMARK_BROWSER_MCP_URL
-      ? {
-          url: process.env.LONG_BENCHMARK_BROWSER_MCP_URL,
-          previewKey: "containerUrl",
-          close: async () => {},
-        }
-      : await realBrowser();
-    const results = join(temporary, "results-full");
-    try {
-      for (const [label, game, play, verdict] of [
-        ["reference-1", "reference", true, "accepted"],
-        ["no-lock-1", "no-lock", false, "rejected"],
-      ]) {
-        const model = await fakeModel(
-          source.games[game]["index.html"].toString("utf8"),
-          play,
-          browser.previewKey,
-        );
-        try {
-          const run = await runner(label, {
-            PATH: process.env.PATH,
-            HOME: process.env.HOME,
-            OPENWEBUI_ACP_HOME: await userState(model.url),
-            OPENWEBUI_API_KEY: "synthetic-game-run",
-            LONG_BENCHMARK_RESULTS: results,
-            LONG_BENCHMARK_ACCEPTANCE_CHECKER: CHECKER,
-            LONG_BENCHMARK_GAME_BROWSER: BROWSER,
-            LONG_BENCHMARK_BROWSER_MCP_URL: browser.url,
-            TMPDIR: temporary,
-          });
-          const dir = join(results, label);
-          // Optional: keep this run's results outside the temporary tree.
-          if (EVIDENCE)
-            await cp(dir, join(EVIDENCE, label), { recursive: true });
-          assert.equal(run.code, 0, run.stderr + run.stdout.slice(-2000));
-          const report = JSON.parse(
-            await readFile(join(dir, "report.json"), "utf8"),
-          );
-          assert.equal(
-            report.isolation.established,
-            true,
-            JSON.stringify(report.isolation.findings),
-          );
-          // The browser route was probed, with a working preview control,
-          // before the attempt and again after it, under the same policy.
-          for (const iso of [report.isolation, report.isolationAfter]) {
-            assert.equal(iso.established, true, JSON.stringify(iso.findings));
-            assert(
-              iso.results["browser-look-host"].ok === true ||
-                iso.results["browser-look-container"].ok === true,
-            );
-            for (const id of [
-              "browser-navigate-file",
-              "browser-new-tab-file",
-              "browser-navigate-foreign",
-              "browser-new-tab-foreign",
-              "command-network-curl",
-              "command-network-node",
-              "server-task",
-            ])
-              assert.equal(iso.results[id].ok, false, id);
-            // The second preview was read and operated, and the second
-            // origin stayed unreached, before the attempt and after it.
-            assert.equal(iso.results["browser-foreign-look"].ok, true);
-            assert.equal(iso.results["browser-play-look"].ok, true);
-            assert.deepEqual(iso.foreignOrigin, { served: true, reached: 0 });
+for (const [label, game, play, verdict] of [
+  ["reference-1", "reference", true, "accepted"],
+  ["no-lock-1", "no-lock", false, "rejected"],
+])
+  lifecycleTest(
+    `a full run (${game}): hidden verdict, screenshots and unprompted play-testing`,
+    {
+      timeout: 600000,
+      skip:
+        (!CHECKER ||
+          !BROWSER ||
+          (!LOCAL_CHROMIUM && !process.env.LONG_BENCHMARK_BROWSER_MCP_URL)) &&
+        "needs LONG_BENCHMARK_ACCEPTANCE_CHECKER, LONG_BENCHMARK_GAME_BROWSER and a real agent browser (local:/abs/chromium or LONG_BENCHMARK_BROWSER_MCP_URL)",
+    },
+    async (t) => {
+      // The agent's real browser: a configured one (the container) or the
+      // repository's wrapper with the local Chromium.
+      const browser = process.env.LONG_BENCHMARK_BROWSER_MCP_URL
+        ? {
+            url: process.env.LONG_BENCHMARK_BROWSER_MCP_URL,
+            previewKey: "containerUrl",
+            close: async () => {},
           }
-          assert.deepEqual(report.evaluator.session.unprobedRoutes, []);
-          assert.deepEqual(
-            report.evaluator.session.harnessRoutes.map((r) => r.route),
-            [
-              "browser-mcp",
-              "sandboxed-command-network",
-              "open-webui-server-tasks",
-            ],
-          );
-          assert.equal(
-            report.hiddenChecks.verdict,
-            verdict,
-            JSON.stringify(report.hiddenChecks),
-          );
-          assert.equal(report.hiddenChecks.validatedVerdict, verdict);
-          // The session began before the agent and lived through the attempt.
-          assert.equal(report.evaluator.session.ready, true);
-          assert(report.evaluator.session.finalProbes > 0);
-          assert.equal(report.hiddenChecks.components.protection, "passed");
-          assert.equal(
-            report.hiddenChecks.passed + report.hiddenChecks.failed,
-            13,
-          );
-          assert.equal(report.hiddenChecks.sealSha256, GAME.GAME_SEAL);
-          assert.equal(
-            report.unpromptedPlaytest.observed,
+        : await realBrowser();
+      const results = join(temporary, "results-full");
+      try {
+        {
+          const model = await fakeModel(
+            source.games[game]["index.html"].toString("utf8"),
             play,
-            JSON.stringify({
-              p: report.unpromptedPlaytest,
-              t: report.toolCalls,
-              d: report.deniedOperations,
-              m: report.mcpTools,
-            }),
+            browser.previewKey,
           );
-          if (play) {
-            assert.equal(report.toolCalls["browser/browser_click"], 2);
-            assert.equal(report.toolFailuresTotal, 1);
-            assert.deepEqual(report.toolFailuresByTool, {
-              "browser/browser_click": 1,
-            });
-            assert.deepEqual(report.toolFailures, {
-              "browser/browser_click: MCP isError": 1,
-            });
-            assert.equal(report.unpromptedPlaytest.afterLastEdit, true);
-          }
-          if (verdict === "rejected")
-            assert.deepEqual(report.hiddenChecks.reasons, [
-              "external_state:solved-locked",
-            ]);
-          // Screenshots are files tied to the played bytes.
-          const state = JSON.parse(
-            await readFile(join(dir, "playthrough-state.json"), "utf8"),
-          );
-          const html = source.games[game]["index.html"];
-          assert.equal(state.entry_sha256, GAME.sha256(html));
-          assert.deepEqual(
-            state.screenshots.map((s) => s.step),
-            ["initial", "corner", "solve", "restart"],
-          );
-          for (const s of state.screenshots) {
-            const png = await readFile(join(dir, s.file));
-            assert.equal(GAME.sha256(png), s.sha256);
-            assert.equal(s.served_tree_sha256, state.served_tree_sha256);
-          }
-          assert.deepEqual((await readdir(join(dir, "screenshots"))).length, 4);
-          for (const name of [
-            "report.json",
-            "requests.jsonl",
-            "agent-text.txt",
-          ])
-            assert(
-              !(await readFile(join(dir, name), "utf8")).includes(
-                script.marker,
-              ),
-              name,
+          try {
+            const run = await runner(
+              label,
+              {
+                PATH: process.env.PATH,
+                HOME: process.env.HOME,
+                OPENWEBUI_ACP_HOME: await userState(model.url),
+                OPENWEBUI_API_KEY: "synthetic-game-run",
+                LONG_BENCHMARK_RESULTS: results,
+                LONG_BENCHMARK_ACCEPTANCE_CHECKER: CHECKER,
+                LONG_BENCHMARK_GAME_BROWSER: BROWSER,
+                LONG_BENCHMARK_BROWSER_MCP_URL: browser.url,
+                TMPDIR: temporary,
+              },
+              t.signal,
             );
-          assert.equal(report.tokens.promptReported, report.tokens.requests);
-        } finally {
-          await model.close();
+            const dir = join(results, label);
+            // Optional: keep this run's results outside the temporary tree.
+            if (EVIDENCE)
+              await cp(dir, join(EVIDENCE, label), { recursive: true });
+            assert.equal(run.code, 0, run.stderr + run.stdout.slice(-2000));
+            const report = JSON.parse(
+              await readFile(join(dir, "report.json"), "utf8"),
+            );
+            assert.equal(
+              report.isolation.established,
+              true,
+              JSON.stringify(report.isolation.findings),
+            );
+            // The browser route was probed, with a working preview control,
+            // before the attempt and again after it, under the same policy.
+            for (const iso of [report.isolation, report.isolationAfter]) {
+              assert.equal(iso.established, true, JSON.stringify(iso.findings));
+              assert(
+                iso.results["browser-look-host"].ok === true ||
+                  iso.results["browser-look-container"].ok === true,
+              );
+              for (const id of [
+                "browser-navigate-file",
+                "browser-new-tab-file",
+                "browser-navigate-foreign",
+                "browser-new-tab-foreign",
+                "command-network-curl",
+                "command-network-node",
+                "server-task",
+              ])
+                assert.equal(iso.results[id].ok, false, id);
+              // The second preview was read and operated, and the second
+              // origin stayed unreached, before the attempt and after it.
+              assert.equal(iso.results["browser-foreign-look"].ok, true);
+              assert.equal(iso.results["browser-play-look"].ok, true);
+              assert.deepEqual(iso.foreignOrigin, { served: true, reached: 0 });
+            }
+            assert.deepEqual(report.evaluator.session.unprobedRoutes, []);
+            assert.deepEqual(
+              report.evaluator.session.harnessRoutes.map((r) => r.route),
+              [
+                "browser-mcp",
+                "sandboxed-command-network",
+                "open-webui-server-tasks",
+              ],
+            );
+            assert.equal(
+              report.hiddenChecks.verdict,
+              verdict,
+              JSON.stringify(report.hiddenChecks),
+            );
+            assert.equal(report.hiddenChecks.validatedVerdict, verdict);
+            // The session began before the agent and lived through the attempt.
+            assert.equal(report.evaluator.session.ready, true);
+            assert(report.evaluator.session.finalProbes > 0);
+            assert.equal(report.hiddenChecks.components.protection, "passed");
+            assert.equal(
+              report.hiddenChecks.passed + report.hiddenChecks.failed,
+              13,
+            );
+            assert.equal(report.hiddenChecks.sealSha256, GAME.GAME_SEAL);
+            assert.equal(
+              report.unpromptedPlaytest.observed,
+              play,
+              JSON.stringify({
+                p: report.unpromptedPlaytest,
+                t: report.toolCalls,
+                d: report.deniedOperations,
+                m: report.mcpTools,
+              }),
+            );
+            if (play) {
+              assert.equal(report.toolCalls["browser/browser_click"], 2);
+              assert.equal(report.toolFailuresTotal, 1);
+              assert.deepEqual(report.toolFailuresByTool, {
+                "browser/browser_click": 1,
+              });
+              assert.deepEqual(report.toolFailures, {
+                "browser/browser_click: MCP isError": 1,
+              });
+              assert.equal(report.unpromptedPlaytest.afterLastEdit, true);
+            }
+            if (verdict === "rejected")
+              assert.deepEqual(report.hiddenChecks.reasons, [
+                "external_state:solved-locked",
+              ]);
+            // Screenshots are files tied to the played bytes.
+            const state = JSON.parse(
+              await readFile(join(dir, "playthrough-state.json"), "utf8"),
+            );
+            const html = source.games[game]["index.html"];
+            assert.equal(state.entry_sha256, GAME.sha256(html));
+            assert.deepEqual(
+              state.screenshots.map((s) => s.step),
+              ["initial", "corner", "solve", "restart"],
+            );
+            for (const s of state.screenshots) {
+              const png = await readFile(join(dir, s.file));
+              assert.equal(GAME.sha256(png), s.sha256);
+              assert.equal(s.served_tree_sha256, state.served_tree_sha256);
+            }
+            assert.deepEqual(
+              (await readdir(join(dir, "screenshots"))).length,
+              4,
+            );
+            for (const name of [
+              "report.json",
+              "requests.jsonl",
+              "agent-text.txt",
+            ])
+              assert(
+                !(await readFile(join(dir, name), "utf8")).includes(
+                  script.marker,
+                ),
+                name,
+              );
+            assert.equal(report.tokens.promptReported, report.tokens.requests);
+          } finally {
+            await model.close();
+          }
         }
+      } finally {
+        await browser.close();
       }
-    } finally {
-      await browser.close();
-    }
-  },
-);
+    },
+  );
 
 test("the evaluator CLI refuses an unknown browser transport", () => {
   const run = spawnSync(

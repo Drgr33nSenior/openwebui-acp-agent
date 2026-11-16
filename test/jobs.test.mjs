@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, realpath, access } from "node:fs/promises";
+import { readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -297,12 +298,54 @@ test("a command's natural exit also releases descendants retaining its pipes", a
 
 for (const sandboxed of [false, true]) {
   test(`a failed progress callback stops its owned process (${sandboxed ? "sandboxed" : "local"})`, async () => {
-    const args = ["-e", "console.log('ready');setInterval(()=>{},1000)"];
+    const pidFile = join(root, `callback-${sandboxed}.pid`);
+    const args = [
+      "-e",
+      `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));console.log('ready');setInterval(()=>{},1000)`,
+    ];
     const limits = { timeoutMs: 5000, outputBytes: 10000 };
+    let failedAt;
+    let hostPid;
+    let identityError;
     const output = () => {
+      failedAt ??= performance.now();
+      try {
+        if (hostPid === undefined) {
+          if (sandboxed && process.platform === "linux") {
+            // --unshare-pid makes the child's process.pid namespace-local.
+            // Match the unique fixture argv in the host's procfs while alive.
+            const matches = readdirSync("/proc").filter((pid) => {
+              if (!/^\d+$/.test(pid)) return false;
+              try {
+                const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split(
+                  "\0",
+                );
+                return (
+                  argv[0] === process.execPath &&
+                  argv[1] === "-e" &&
+                  argv[2] === args[1]
+                );
+              } catch (error) {
+                if (["ENOENT", "ESRCH", "EACCES", "EPERM"].includes(error.code))
+                  return false;
+                throw error;
+              }
+            });
+            assert.equal(matches.length, 1, "unique live fixture host PID");
+            hostPid = Number(matches[0]);
+          } else hostPid = Number(readFileSync(pidFile, "utf8"));
+          assert(Number.isSafeInteger(hostPid) && hostPid > 0);
+          assert.equal(
+            process.kill(hostPid, 0),
+            true,
+            "fixture was alive before cancellation",
+          );
+        }
+      } catch (error) {
+        identityError = error;
+      }
       throw new Error("Synthetic private callback failure");
     };
-    const started = Date.now();
     const raw = sandboxed
       ? await sandboxCommand(
           process.execPath,
@@ -320,7 +363,11 @@ for (const sandboxed of [false, true]) {
           limits,
           output,
         );
-    assert(Date.now() - started < 4000);
+    assert.notEqual(failedAt, undefined, "progress callback ran");
+    assert(performance.now() - failedAt < 4000, "callback cleanup exceeded 4s");
+    assert.equal(identityError, undefined);
+    assert(Number.isSafeInteger(hostPid) && hostPid > 0);
+    assert.throws(() => process.kill(hostPid, 0), { code: "ESRCH" });
     const actual = JSON.parse(raw);
     assert.equal(actual.limitedOrCancelled, true);
     assert.equal(actual.output, "ready\n");
