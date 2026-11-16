@@ -148,9 +148,9 @@ mechanisms but needs separate acceptance testing.
 
 Commands have bounded duration/output and POSIX process-group cleanup. Stop,
 revocation and disconnect cancel owned processes and pending network decisions.
-If the agent itself is killed or crashes, unsandboxed commands are ended by
-their process-group watchdog, which also enforces the command timeout, and
-sandboxed commands by their broker.
+If the agent itself is killed or crashes, unsandboxed commands are ended by the
+agent's command supervisor, which also enforces their timeouts, and sandboxed
+commands by their broker.
 Late decisions cannot restore execution or save grants. Background jobs are
 session-owned and never restored. This boundary is not a VM or a complete
 hostile-code audit. Unusual IPC, detached processes and platform-specific alias

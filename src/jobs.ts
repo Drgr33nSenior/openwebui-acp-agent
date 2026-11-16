@@ -264,8 +264,8 @@ export class Jobs {
   }
 
   // Synchronous last resort while the agent process exits: SIGKILL each running
-  // job's reported process group without waiting for results. Each unsandboxed
-  // command's watchdog also ends its group when the agent's IPC channel closes.
+  // job's reported process group without waiting for results. The command
+  // supervisor also ends these groups when this process's IPC channel closes.
   killAllNow(): void {
     for (const job of this.jobs.values())
       if (job.info.state === "running" && job.pid !== undefined)

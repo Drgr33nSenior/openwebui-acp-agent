@@ -306,12 +306,18 @@ Jobs can continue after a successful turn. Stop, logout, disconnect, session
 close, revocation and relevant permission/model changes stop owned jobs.
 Interrupted turns also stop their jobs. Jobs and commands also end when the
 agent process ends without a clean shutdown, for example when the client kills
-it or it crashes. On macOS and Linux each unsandboxed command runs under a small
-watchdog process that leads its process group; it kills the group when the
-agent's connection to it closes or the timeout passes, so neither depends on the
-agent still running. A sandboxed command's broker likewise stops it when the
-agent's connection closes. Native Windows has no such lifecycle yet; see the
-[Windows plan](windows-plan.md). Jobs are not restored or copied to forks.
+it or it crashes. On macOS and Linux each unsandboxed command still leads its
+own process group, and the agent also registers that group and its timeout with
+one supervisor process, which it starts on first use. The supervisor kills each
+group at its timeout and kills every registered group when its connection to the
+agent closes, so neither depends on the agent still running. Registration
+happens immediately after the command starts; an agent killed between those two
+steps can still leave that one command running. If the supervisor itself stops,
+the agent starts a new one with the next unsandboxed command and registers the
+running commands again; until then, the agent's own timeouts and its exit and
+crash cleanup of background jobs apply. A sandboxed command's broker stops it
+when the agent's connection closes. Native Windows has no such lifecycle yet;
+see the [Windows plan](windows-plan.md). Jobs are not restored or copied to forks.
 Process cleanup cannot undo completed writes, external requests or detached
 work on a remote server. A process that deliberately leaves its process group
 and parent, such as a daemon that calls `setsid`, is not tracked.

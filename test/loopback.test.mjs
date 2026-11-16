@@ -20,7 +20,6 @@ import {
   reaches,
   sensitiveLoopbackPorts,
 } from "../dist/loopback.js";
-import { command } from "../dist/commands.js";
 
 test("only literal loopback addresses and locally resolved localhost qualify", async () => {
   for (const a of ["127.0.0.1", "127.9.8.7", "::1", "0:0:0:0:0:0:0:1"])
@@ -310,46 +309,5 @@ test(
     await once(child, "exit");
     await delay(1600); // Past the positive-answer cache.
     assert.equal(await ownsLoopbackListener(query), false);
-  },
-);
-
-test(
-  "real listeners: the unsandboxed runner's reported root owns its command's listener",
-  { skip: !posix && "macOS and Linux only", timeout: 20000 },
-  async () => {
-    // The runner reports its watchdog, not the command, as the job's root.
-    let root;
-    let reported;
-    const listening = new Promise((resolve) => (reported = resolve));
-    const controller = new AbortController();
-    const run = command(
-      process.execPath,
-      [
-        "-e",
-        "const s = require('node:net').createServer().listen(0, '127.0.0.1', () => console.log(process.pid, s.address().port)); setInterval(() => {}, 1000)",
-      ],
-      process.cwd(),
-      controller.signal,
-      { timeoutMs: 15000, outputBytes: 1000 },
-      (snapshot) => {
-        if (/\n/.test(snapshot)) reported(snapshot);
-      },
-      (pid) => (root = pid),
-    );
-    try {
-      const [listener, port] = (await listening).trim().split(" ").map(Number);
-      assert(Number.isInteger(root) && root !== listener && port > 0);
-      assert.equal(
-        await ownsLoopbackListener({
-          roots: [root],
-          targets: ["127.0.0.1"],
-          port,
-        }),
-        true,
-      );
-    } finally {
-      controller.abort();
-      assert.equal(JSON.parse(await run).limitedOrCancelled, true);
-    }
   },
 );

@@ -23,7 +23,7 @@ async function main() {
     case "acp": {
       const agent = createAgent();
       // Crashes skip close(). Exit handlers must be synchronous; SIGKILL is
-      // covered by each unsandboxed command's watchdog instead.
+      // covered by the unsandboxed command supervisor instead.
       process.on("exit", agent.killJobsNow);
       process.on("uncaughtExceptionMonitor", agent.killJobsNow);
       const connection = agent.app.connect(

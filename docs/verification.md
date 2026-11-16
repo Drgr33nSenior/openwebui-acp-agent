@@ -911,14 +911,29 @@ prompt rendering of the new option was not checked in a live IDE.
 ## Process lifetime after agent exit (unreleased)
 
 `test/process-lifetime.test.mjs` starts the real CLI with a fake Open WebUI
-service and an approved unsandboxed background job whose command has a child.
-It checks that the job's process group is led by the command watchdog, not the
-agent, then SIGKILLs the agent and requires every live group member to be gone
-within five seconds. A second case stops the agent with SIGSTOP, so the agent's
-timers cannot run, and requires the group to end at the job's three-second
-timeout. Both are skipped on Windows. `test/loopback.test.mjs` also checks,
-through the real runner, that the reported root owns its command's listener;
-the existing ACP loopback test covers the same shape end to end.
+service and an approved unsandboxed background job. Skipped on Windows, it checks:
+
+- the command still leads its own process group, and the supervisor is a
+  separate child of the agent in a group of its own;
+- after SIGKILL of the agent, every live member of the job's group and the
+  supervisor are gone within five seconds;
+- with the agent stopped by SIGSTOP, so its timers cannot run, the group ends at
+  the job's three-second timeout;
+- a job that tries `setpgid(0, 0)` and `setsid()` is refused both, as a session
+  leader, and still ends with the agent; through `command()` the same script is
+  stopped at an 800 ms timeout (both need `python3`);
+- `kill -TERM 0` reaches only the command's own trap (exit code 0), and the
+  `trap "kill -- -$$" EXIT` idiom finds the command's group and stops its
+  background child;
+- after the supervisor is killed, the next command starts a replacement that
+  takes over the first command's deadline while the test process's event loop
+  is blocked.
+
+On macOS 27.0 with Node 26.11.1, 20 sequential `/usr/bin/true` runs through
+`command()` took a median 3.3–4.2 ms on this branch and 3.3–3.8 ms on main. The
+first command also forks the supervisor without waiting for it. The supervisor
+used about 42 MiB RSS, once per agent process. Command environments are
+unchanged.
 
 ## T3 desktop compatibility (unreleased)
 
