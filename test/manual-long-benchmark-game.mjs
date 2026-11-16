@@ -720,7 +720,9 @@ export function probePlan({
       id: "control-write",
       kind: "control",
       tool: "write_file",
-      args: { path: "probe-control.txt", content: nonce },
+      // End the marker's line so conservative credential-prefix redaction at
+      // EOF cannot mask an innocent final character of the nonce.
+      args: { path: "probe-control.txt", content: `${nonce}\n` },
     },
     {
       id: "control-read",

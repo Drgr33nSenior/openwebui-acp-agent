@@ -448,6 +448,43 @@ test("isolation is established only when controls work and nothing leaks", () =>
     assert.equal(GAME.parseTransport(bad), null, bad);
 });
 
+test("command control markers survive proxy-credential prefix redaction", async () => {
+  const nonce = "control-marker";
+  const workspace = await mkdtemp(join(temporary, "redaction-control-"));
+  const plan = GAME.probePlan({
+    workspace,
+    acceptance: join(temporary, "acceptance"),
+    hidden: join(temporary, "acceptance/playthrough.json"),
+    repoHidden: [],
+    nonce,
+    browser: false,
+  });
+  const ending = plan
+    .find((probe) => probe.id === "control-write")
+    .args.content.slice(nonce.length);
+  const { sandboxCommand } = await import("../dist/sandbox.js");
+  // Force the collision with the runtime's synthetic proxy credential. Never
+  // print that credential: assertions below expose only booleans on failure.
+  const result = JSON.parse(
+    await sandboxCommand(
+      process.execPath,
+      [
+        "-e",
+        `const prefix = new URL(process.env.HTTP_PROXY).password[0];
+         process.stdout.write("control-marker-" + prefix + ${JSON.stringify(ending)});`,
+      ],
+      { mode: "workspace", root: workspace, network: async () => false },
+      AbortSignal.timeout(20000),
+    ),
+  );
+  assert.equal(result.code, 0);
+  assert.equal(
+    /^control-marker-[0-9a-f]\n$/.test(result.output),
+    true,
+    "the complete control marker must survive prefix redaction",
+  );
+});
+
 // ---- Through the runner --------------------------------------------------
 async function userState(url) {
   const state = await mkdtemp(join(temporary, "user-state-"));
