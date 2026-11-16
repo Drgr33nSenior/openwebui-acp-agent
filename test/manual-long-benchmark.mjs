@@ -44,82 +44,7 @@ const CONTINUE_PROMPT = "Continue with the remaining work.";
 const USAGE_WAIT_MS = 2000;
 const args = process.argv.slice(2);
 
-// The browser tools an evaluated agent may use: the wrapper's allowlist.
-const BROWSER_TOOLS = new Set(
-  JSON.parse(
-    await readFile(
-      new URL("../browser/allowed-tools.json", import.meta.url),
-      "utf8",
-    ),
-  ),
-);
-const originOf = (url) => {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return null;
-  }
-};
-const updateText = (u) =>
-  (u.content ?? [])
-    .filter((c) => c.type === "content" && c.content?.type === "text")
-    .map((c) => c.content.text)
-    .join("\n");
-
-// One permission decision for the evaluated session and the isolation probes.
-// Allowed: workspace activation, edits (the agent refuses paths outside the
-// workspace before asking), commands in the workspace sandbox without extra
-// paths or escalation. For the game task also a static preview and the
-// allowlisted browser tools, with navigation only to a preview this session
-// started. Everything else is denied.
-function decide(params, { game, previewOrigins, browserUrl }) {
-  const title = params.toolCall.title ?? "",
-    input = params.toolCall.rawInput ?? {};
-  if (title.startsWith("Activate exact workspace ")) return true;
-  if (params.toolCall.kind === "edit") return true;
-  if (
-    title.startsWith("Run ") &&
-    title.includes("OS sandbox: workspace") &&
-    !/extra reads|extra writes/.test(title) &&
-    !input.additional_read_paths?.length &&
-    !input.additional_write_paths?.length &&
-    input.sandbox_permissions !== "require_escalated"
-  )
-    return true;
-  if (!game) return false;
-  if (title.startsWith("Start static preview of ")) return true;
-  // Connecting the configured browser server, and no other MCP server.
-  if (browserUrl && title.startsWith(`MCP browser: http ${browserUrl};`))
-    return true;
-  // The agent marks every HTTP MCP server as running outside its sandbox.
-  const call = title.match(
-    /^Call browser\/(browser_[a-z_]+)(?: \(runs on this machine outside the sandbox\))?: (.*)$/s,
-  );
-  if (!call || !BROWSER_TOOLS.has(call[1])) return false;
-  if (call[1] !== "browser_navigate") return true;
-  try {
-    return previewOrigins.has(originOf(JSON.parse(call[2]).url));
-  } catch {
-    return false;
-  }
-}
-
-// Records the origins of a preview the agent started, from its result.
-function trackPreview(u, tools, previewOrigins) {
-  if (
-    u.sessionUpdate !== "tool_call_update" ||
-    u.status !== "completed" ||
-    tools.get(u.toolCallId) !== "start_preview"
-  )
-    return;
-  try {
-    const info = JSON.parse(updateText(u));
-    for (const url of [info.url, info.containerUrl])
-      if (originOf(url)) previewOrigins.add(originOf(url));
-  } catch {
-    // Not a preview result.
-  }
-}
+const { BROWSER_TOOLS, decide, trackPreview, updateText } = GAME;
 
 const textOf = (content) =>
   typeof content === "string"
@@ -447,7 +372,14 @@ if (args[0] === "--child") {
     report.evaluator = {
       seal: GAME.GAME_SEAL,
       transport: gameSetup.transport?.kind ?? null,
-      checker: gameSetup.checker ? { files: gameSetup.checker.files } : null,
+      checker: gameSetup.checker
+        ? {
+            treeSha256: gameSetup.checker.treeSha256,
+            files: Object.keys(gameSetup.checker.files).length,
+            taskAcceptanceSha256: gameSetup.checker.files["task_acceptance.py"],
+            sessionSha256: gameSetup.checker.files[GAME.CHECKER_SESSION.file],
+          }
+        : null,
       references: gameSetup.references
         ? Object.fromEntries(
             Object.entries(gameSetup.references.outcomes).map(([k, v]) => [
@@ -458,6 +390,30 @@ if (args[0] === "--child") {
         : null,
     };
     report.isolation = gameSetup.isolation;
+    if (!gameSetup.problems.length) {
+      // The checker's private session starts before the agent's tools are
+      // enabled and stays alive for the whole attempt.
+      try {
+        gameSetup.attempt = await GAME.beginAcceptance({
+          checker: gameSetup.checker,
+          acceptance: gameSetup.acceptance,
+          workspace,
+          configuration: gameSetup.configuration,
+          agentDirectory,
+          scratch: root,
+          runId: label,
+        });
+        report.evaluator.session = gameSetup.attempt.record;
+        if (!gameSetup.attempt.ready)
+          gameSetup.problems.push(
+            `checker session not established: ${gameSetup.attempt.reason}`,
+          );
+      } catch (error) {
+        gameSetup.problems.push(
+          `checker session not established: ${error.message}`,
+        );
+      }
+    }
     if (gameSetup.problems.length) {
       // Fail closed: no evaluated session without every precondition.
       report.error = "game preconditions not met; no session was started";
@@ -722,7 +678,6 @@ if (args[0] === "--child") {
             state,
             sessionId,
             results,
-            label,
             mcpTools: report.mcpTools,
           }),
         );
@@ -731,6 +686,9 @@ if (args[0] === "--child") {
     } catch (error) {
       report.inspectError = sanitize(error.message).slice(0, 500);
     }
+    gameSetup?.attempt?.close();
+    if (report.hiddenChecks?.reason)
+      report.hiddenChecks.reason = sanitize(report.hiddenChecks.reason);
     report.scratch = root;
     const write = (name, text) =>
       writeFile(join(results, name), text, { mode: 0o600 });
@@ -940,6 +898,8 @@ async function inspect(workspace, state, sessionId, task) {
 // stops the run. Site settings come only from the environment:
 //   LONG_BENCHMARK_GAME_BROWSER        container:NAME or local:/abs/chromium
 //   LONG_BENCHMARK_ACCEPTANCE_CHECKER  /abs/.../lib/workstation/task_acceptance.py
+//     in a stack checkout whose task_acceptance_session.py is the protocol
+//     pinned in GAME.CHECKER_SESSION
 //   LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256  optional pin of that file
 //   LONG_BENCHMARK_BROWSER_MCP_URL     http://127.0.0.1:PORT/mcp for the agent
 async function prepareGame(context) {
@@ -950,6 +910,7 @@ async function prepareGame(context) {
     source: null,
     transport: null,
     checker: null,
+    configuration: [join(state, "config.json")],
     references: null,
     isolation: null,
     browserMcp: null,
@@ -994,18 +955,29 @@ async function prepareGame(context) {
     await writeFile(join(state, "mcp.json"), JSON.stringify(mcpJson), {
       mode: 0o600,
     });
+    // The agent's capability configuration: protected by the checker.
+    setup.configuration.push(join(state, "mcp.json"));
   }
-  const checkerPath = process.env.LONG_BENCHMARK_ACCEPTANCE_CHECKER;
-  const identity = await GAME.checkerIdentity(checkerPath);
+  const identity = await GAME.checkerIdentity(
+    process.env.LONG_BENCHMARK_ACCEPTANCE_CHECKER,
+  );
+  const pin = process.env.LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256;
   if (identity.unavailable) problem(identity.unavailable);
+  else if (pin && pin !== identity.files["task_acceptance.py"])
+    problem(
+      "task_acceptance.py does not match LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256",
+    );
   else {
-    const pin = process.env.LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256;
-    const seal = await GAME.checkerSeal(checkerPath, setup.acceptance);
-    if (pin && pin !== identity.files["task_acceptance.py"])
-      problem(
-        "task_acceptance.py does not match LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256",
-      );
-    else if (seal !== GAME.GAME_SEAL)
+    // The checker runs from a private copy of the bytes just verified.
+    identity.installed = await GAME.installChecker(
+      identity,
+      join(root, "checker"),
+    );
+    const seal = await GAME.checkerSeal(
+      join(identity.installed, "task_acceptance.py"),
+      setup.acceptance,
+    );
+    if (seal !== GAME.GAME_SEAL)
       problem(
         `the checker's seal of the source (${seal}) is not the pinned seal`,
       );
@@ -1282,7 +1254,6 @@ async function inspectGame({
   state,
   sessionId,
   results,
-  label,
   mcpTools,
 }) {
   const out = {};
@@ -1302,16 +1273,18 @@ async function inspectGame({
     workspace,
     out: results,
   });
-  const hidden = await GAME.runChecker({
-    checker: setup.checker.path,
-    source: setup.acceptance,
-    workspace,
-    state: observation.unavailable
-      ? null
-      : join(results, "playthrough-state.json"),
-    output: join(results, "acceptance-result.json"),
-    runId: label,
+  // The fresh observation goes to the session started before the attempt.
+  const output = join(results, "acceptance-result.json");
+  const finished = await setup.attempt.finish({
+    observation: observation.unavailable ? null : observation,
+    output,
   });
+  const hidden = finished.unavailable
+    ? { verdict: "unavailable", reason: finished.unavailable }
+    : await GAME.summarizeResult({
+        checker: join(setup.checker.installed, "task_acceptance.py"),
+        output,
+      });
   hidden.observation = observation.unavailable
     ? { unavailable: observation.unavailable }
     : {
