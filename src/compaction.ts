@@ -190,10 +190,13 @@ function summaryInput(
       content: JSON.stringify({
         previousSummary: state.summary || null,
         previousUserRequest: previousUser?.content ?? null,
-        history: messages.slice(
-          Math.max(state.through, leadingSystems(messages)),
-          through,
-        ),
+        history: messages
+          .slice(Math.max(state.through, leadingSystems(messages)), through)
+          .map((message) => {
+            const copy = { ...message };
+            delete copy.reasoning_content;
+            return copy;
+          }),
       }),
     },
   ];

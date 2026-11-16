@@ -339,3 +339,33 @@ See [session behavior](sessions.md), [sandbox](sandbox.md) and
 
 Use the pinned source and package schemas when changing a contract. Moving
 website examples can describe different protocol or server versions.
+
+### Private reasoning replay
+
+The client retains string `reasoning_content` (or the response alias `reasoning`)
+separately from assistant `content`. It never renders structured reasoning as
+assistant text. Conflicting aliases and non-string fields reject the reply before
+any tool executes. Reasoning retention is limited to 1,000,000 characters per
+reply, independently of the visible-output limit. Exceeding that limit rejects
+the reply; the client does not replay a partial reasoning prefix.
+
+An `api/models` entry must declare
+`provider_capabilities: { "reasoning_replay": "reasoning_content" }` to enable
+replay for that exact opaque model ID. The server must resolve this declaration
+for aliases and restrict it to providers that accept assistant
+`reasoning_content`. Missing, false, or unknown declarations omit the field from
+requests. Model names, reasoning-effort controls and vision flags do not enable
+replay. This contract requires the corresponding server support from API-01;
+older servers retain the existing request format. Sampling and reasoning-effort
+selection are unchanged.
+
+Private session storage and forks retain redacted structured reasoning within
+the existing record and context budgets. Restoring history does not execute
+recorded tools. Rewind removes reasoning with its assistant message. Compaction
+omits reasoning from summary input and preserves it only on assistant messages
+that remain in context. JSON and Markdown exports omit structured reasoning.
+When fitting a saved record, the client drops whole reasoning fields before
+shortening visible history. Structured reasoning does not appear in ACP
+updates, tool diagnostics or telemetry. Providers that embed reasoning directly
+in `content` remain responsible for their content format; this contract covers
+separate structured fields only.

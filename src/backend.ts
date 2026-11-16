@@ -4,6 +4,8 @@ import { completionContextTokens, promptContextTokens } from "./usage.js";
 export type Message = {
   role: string;
   content: string | null;
+  // Private provider state; never render as assistant text.
+  reasoning_content?: string;
   tool_calls?: Call[];
   tool_call_id?: string;
 };
@@ -103,6 +105,7 @@ function retryAfter(r: Response): number | undefined {
 class StreamTimeout extends Error {}
 export class Backend {
   private secrets: string[] = [];
+  private reasoningReplay = new Set<string>();
   constructor(
     readonly config: Config,
     private secret: string,
@@ -193,7 +196,20 @@ export class Backend {
       raw.data.some((x: any) => typeof x.id !== "string")
     )
       throw new Error("Malformed model list");
+    this.setModelMetadata(raw.data);
     return raw.data as Array<{ id: string; [key: string]: unknown }>;
+  }
+  setModelMetadata(models: Array<{ id: string; [key: string]: unknown }>) {
+    // Discovery is authoritative for opaque IDs, including aliases. Refreshes
+    // revoke stale declarations; unknown values fail closed for strict providers.
+    this.reasoningReplay = new Set(
+      models
+        .filter(
+          (m: any) =>
+            m.provider_capabilities?.reasoning_replay === "reasoning_content",
+        )
+        .map((m: any) => m.id),
+    );
   }
   async models(signal: AbortSignal) {
     return (await this.modelMetadata(signal)).map((m) => m.id);
@@ -214,6 +230,14 @@ export class Backend {
     maxResponseChars = MAX,
     onUsage?: (used: number, prompt?: number) => Promise<void>,
   ): Promise<Message> {
+    messages = messages.map(({ reasoning_content, ...message }) => ({
+      ...message,
+      ...(message.role === "assistant" &&
+      this.reasoningReplay.has(this.config.model) &&
+      reasoning_content !== undefined
+        ? { reasoning_content }
+        : {}),
+    }));
     if (textChars(messages) > MAX)
       throw new Error(
         "Context budget exceeded; start a new session. History retained.",
@@ -304,8 +328,9 @@ export class Backend {
     const calls = new Map<number, Call>();
     let finish: string | undefined;
     let usage: unknown, prompt: number | undefined;
-    // Reasoning characters received; never output, never counted in limits.
+    // Reasoning has its own retention limit, independent of visible output.
     let thought = 0;
+    let reasoningContent = "";
     let produced = 0;
     const count = (value: string) => {
       produced += value.length;
@@ -344,8 +369,22 @@ export class Backend {
         choice.finish_reason
       )
         active();
+      for (const field of [d.reasoning_content, d.reasoning])
+        if (field != null && typeof field !== "string")
+          throw new ModelReplyError("malformed", "Malformed reasoning");
+      if (
+        d.reasoning_content != null &&
+        d.reasoning != null &&
+        d.reasoning_content !== d.reasoning
+      )
+        throw new ModelReplyError("malformed", "Conflicting reasoning aliases");
       const reasoning = d.reasoning_content ?? d.reasoning;
-      if (typeof reasoning === "string") thought += reasoning.length;
+      if (typeof reasoning === "string") {
+        thought += reasoning.length;
+        if (thought > MAX)
+          throw new Error("Reasoning retention limit exceeded");
+        reasoningContent += reasoning;
+      }
       if (d.content != null) {
         if (typeof d.content !== "string")
           throw new ModelReplyError("malformed", "Malformed text");
@@ -466,6 +505,9 @@ export class Backend {
     return {
       role: "assistant",
       content: this.redact(content),
+      ...(reasoningContent
+        ? { reasoning_content: this.redact(reasoningContent) }
+        : {}),
       ...(all.length ? { tool_calls: all } : {}),
     };
   }
