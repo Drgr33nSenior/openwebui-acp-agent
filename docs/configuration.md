@@ -27,9 +27,11 @@ available. Each command has a separate `timeout_ms`: default 120000, maximum 600
 
 `outputTokenBudget` guides the model toward small file edits when its catalog has
 no valid `max_output_tokens` value at the top level or under `openai`. Catalog
-metadata takes precedence and is reevaluated for the selected model each round.
+metadata takes precedence and is reevaluated for the selected model each round;
+at `xhigh` the guidance uses the reply cap the agent sends instead.
 The guidance reserves space for reasoning when reasoning shares the allowance.
-Coding requests carry no output cap. A compaction summary request sends
+Coding requests carry no output cap except at `xhigh` (see
+[sessions](sessions.md#models-and-context)). A compaction summary request sends
 `max_tokens` of at most 6,000, lowered to the catalog `max_output_tokens` or this
 value when either is smaller. Neither raises or bypasses the server's actual cap.
 

@@ -266,7 +266,6 @@ import {
 } from "./server-tools.js";
 import {
   defaultReasoning,
-  lowerEffortChoice,
   reasoningChoices,
   reasoningPayload,
   type ReasoningChoice,
@@ -4300,11 +4299,16 @@ export function createAgent(
           const availableTools = tools.map(
             (t) => (t as { function: { name: string } }).function.name,
           );
+          // The per-reply allowance the request actually gets: the cap the
+          // agent sends itself (xhigh), else the server's advertised one.
           const runtimeGuidance = runtimeInstruction(
             tools,
             s.mcp.tools,
             s.serverCatalog?.features.includes("web_search") ?? false,
-            outputAllowance(s.metadata.find((m) => m.id === s.config.model)) ??
+            replyCap(s) ??
+              outputAllowance(
+                s.metadata.find((m) => m.id === s.config.model),
+              ) ??
               s.config.outputTokenBudget,
           );
           if (runtimeGuidance)
@@ -4477,9 +4481,6 @@ export function createAgent(
         for (let round = 0; round < s.config.rounds; round++) {
           let message: Message | undefined;
           let availableTools: string[] = [];
-          // The re-ask after a reply whose thinking used the whole output
-          // limit runs once at the next lower effort; the session keeps its own.
-          let lowered: ReasoningChoice | undefined;
           for (let attempt = 0; attempt < 2; attempt++) {
             const request = await prepareRequest();
             const { modelContext, tools } = request;
@@ -4487,12 +4488,9 @@ export function createAgent(
             let contextNotice: string | undefined;
             try {
               const imageTokens = liveImageTokens(modelContext, s.images);
-              const cap = lowered
-                ? replyTokenCap(
-                    lowered.effort,
-                    s.metadata.find((m) => m.id === s.config.model),
-                  )
-                : replyCap(s);
+              // The re-ask, including one after thinking used the whole
+              // limit, keeps the session's level and that level's cap.
+              const cap = replyCap(s);
               s.backend.setModelMetadata(s.metadata);
               message = await s.backend.complete(
                 withImages(modelContext, s.images),
@@ -4506,11 +4504,7 @@ export function createAgent(
                   await text(client, s, t);
                 },
                 {
-                  ...reasoningPayload(
-                    s.config.model,
-                    lowered?.value ?? s.reasoning,
-                    s.choices,
-                  ),
+                  ...reasoningPayload(s.config.model, s.reasoning, s.choices),
                   ...(cap === undefined ? {} : { max_tokens: cap }),
                 },
                 undefined,
@@ -4589,8 +4583,6 @@ export function createAgent(
               const reason = s.backend.redact(error.message).slice(0, 300);
               const thinkingOnly =
                 error.kind === "truncated" && error.thinkingOnly;
-              if (thinkingOnly && attempt === 0)
-                lowered = lowerEffortChoice(s.choices, s.reasoning);
               const note = `[Your last reply was ${error.kind === "truncated" ? "cut off" : "malformed"}: ${reason}. No tool from that reply was executed.${
                 attempt === 0
                   ? " " +
@@ -4625,7 +4617,7 @@ export function createAgent(
                 client,
                 s,
                 thinkingOnly
-                  ? `\n[${reason}: its thinking used the whole limit before any reply. Asking once again${lowered ? ` at ${lowered.name}` : " for shorter thinking"}. No tools from that reply ran.]\n`
+                  ? `\n[${reason}: its thinking used the whole limit before any reply. Asking once more at the same reasoning level for briefer thinking. No tools from that reply ran.]\n`
                   : `\n[${reason}. Asking once for a ${error.kind === "truncated" ? "shorter reply with smaller tool calls" : "corrected reply"}. No tools from that reply ran.]\n`,
               );
             }

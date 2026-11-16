@@ -17,7 +17,7 @@ import {
   OUTPUT_LIMIT_CUTOFF,
   OUTPUT_LIMIT_NOTICE,
 } from "../dist/backend.js";
-import { lowerEffortChoice, reasoningChoices } from "../dist/reasoning.js";
+import { reasoningChoices } from "../dist/reasoning.js";
 
 const fresh = () => compactionStateSchema.parse({});
 const signal = () => AbortSignal.timeout(10000);
@@ -384,25 +384,6 @@ test("summary requests use fixed low reasoning, a capped reply and room for it i
     },
   });
   assert.deepEqual(summaryReasoning("m", efforts), { reasoning_effort: "low" });
-  // A thinking-only cut-off is asked again one ranked level lower, never at Off.
-  const lower = (value) =>
-    lowerEffortChoice(efforts, JSON.stringify(["reasoning_effort", value]))
-      ?.effort;
-  assert.deepEqual(
-    ["xhigh", "high", "medium", "low", "none", "unknown"].map(lower),
-    ["high", "medium", "low", undefined, undefined, undefined],
-  );
-  assert.equal(
-    lowerEffortChoice(
-      reasoningChoices({
-        provider_model_controls: {
-          reasoning_effort: { options: { deep: {}, quick: {} } },
-        },
-      }),
-      JSON.stringify(["reasoning_effort", "deep"]),
-    ),
-    undefined,
-  );
   assert.deepEqual(
     summaryReasoning(
       "m",

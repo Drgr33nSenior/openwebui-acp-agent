@@ -108,15 +108,3 @@ const EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max"];
 export function effortRank(choice: ReasoningChoice): number {
   return choice.effort === undefined ? -1 : EFFORT_ORDER.indexOf(choice.effort);
 }
-// The declared reasoning_effort choice one level below the given one, or
-// undefined at the lowest level and where the order is unknown.
-export function lowerEffortChoice(
-  choices: ReasoningChoice[],
-  value: string,
-): ReasoningChoice | undefined {
-  const current = choices.find((c) => c.value === value);
-  const below = current ? effortRank(current) : -1;
-  return choices
-    .filter((c) => effortRank(c) >= 0 && effortRank(c) < below)
-    .sort((a, b) => effortRank(b) - effortRank(a))[0];
-}
