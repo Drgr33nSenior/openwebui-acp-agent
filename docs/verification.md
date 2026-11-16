@@ -349,9 +349,11 @@ the attempt is always `unavailable` with
    capability lease.
 3. Performs every probe of the checker through the agent's real routes. A
    scripted fake model drives the same agent build, child process, permission
-   policy and sandbox in the evaluated workspace, with separate state; each
-   probe is one tool call, and only its outcome (`allowed`, `denied`,
-   `unavailable` or `unsupported`) goes back:
+   policy and sandbox in the evaluated workspace. Its configuration is
+   separate: its own state, a `config.json` that points at the fake model
+   (a loopback address with a random path) and no `mcp.json`. Each probe is
+   one tool call, and only its outcome (`allowed`, `denied`, `unavailable` or
+   `unsupported`) goes back:
 
    | Route                      | Probe                                                                                                    |
    | -------------------------- | -------------------------------------------------------------------------------------------------------- |
@@ -360,16 +362,25 @@ the attempt is always `unavailable` with
 
    The file tools have no rename or delete, so those probes are
    `unsupported`. Every file tool, and `start_preview`, resolves paths through
-   the same workspace guard; the browser reaches files only through a preview,
-   because the permission policy allows navigation to preview origins only.
+   the same workspace guard. The browser MCP tools are not a registered route
+   and are not probed: the permission policy allows `browser_navigate` only to
+   preview origins and the browser container mounts no host directory, but
+   other browser tools (for example `browser_tabs`, or clicking a link) are
+   not checked. A browser MCP server whose browser runs on the host would be
+   an unprobed route to host files. The report records this in
+   `evaluator.session.unprobedRoutes`.
 4. Starts the evaluated session only when the checker answers `ready` and the
-   workspace still holds exactly the fixture. Otherwise the run stops with
-   status 4 (below).
+   workspace is unchanged since before the setup probes. Otherwise the run
+   stops with status 4 (below).
 5. After the session, plays the attempt and sends the observation over the
    same session, with the same lease, while the route agent services the
-   final probes. The lease is sent only if the agent build (`dist/`) and its
-   configuration files are unchanged since the start; otherwise the result is
-   `unavailable`.
+   final probes. The lease is sent only if the capability policy is unchanged
+   since the start; otherwise the result is `unavailable`. That policy is a
+   digest of the agent's `dist/` and `node_modules/` (every file by content at
+   any size, links by target), `package.json`, `package-lock.json`, the runner
+   and game evaluator files (the `--child` wrapper and the permission
+   decisions), the administrator `policy.json` if present, and the agent's
+   `config.json` and `mcp.json`.
 
 **Isolation.** The hidden source is in the scratch directory next to the
 workspace and in the harness checkout. Before the evaluated session, the runner
@@ -454,7 +465,14 @@ another one, runs each checker probe kind through the agent's real file tools
 and command sandbox (controls allowed, paths outside the workspace denied, no
 bytes changed), and drives the session protocol against a scripted bootstrap
 (`python3`): probes only for declared routes under the parent's lease, a
-not-ready session, and a session that stops. It also runs the runner without an
+not-ready session, and a session that stops. Through `beginAcceptance` with a
+scripted bootstrap and the real routes, it checks that the lease and
+observation reach the checker while the capability policy is unchanged, that a
+configuration change during the attempt gives `unavailable` without a result,
+and that a workspace changed during the setup probes never starts the attempt.
+It checks that the policy digest changes with the build, a file over 2 MiB, a
+dependency file, a link target, the package files and the configuration, and
+that a refusal is recognised only at the end of an error line. It also runs the runner without an
 evaluator and with a checker from before the protocol: the probes pass on the
 platform and the run stops before a session.
 
@@ -483,11 +501,14 @@ and a fake browser server:
   `7c2ff06`. A checker with another `task_acceptance_session.py` is refused
   until the harness is updated and `CHECKER_SESSION` re-pinned; rerun the
   self-test with that checker.
-- The route probes run in a second agent process of the same build,
-  configuration and policy, not inside the evaluated process. The capability
-  lease is the runner's: it holds the same build, configuration and permission
-  policy for the attempt and checks the build and configuration digests before
-  it sends the observation.
+- The route probes run in a second agent process with the same build and
+  policy but a separate configuration (its own state and fake model, no
+  `mcp.json`), not inside the evaluated process. The capability lease is the
+  runner's: it keeps the build, dependencies, harness code and configuration
+  fixed for the attempt and checks their digest before it sends the
+  observation.
+- The browser MCP tools are not a registered route (see the checker session,
+  step 3).
 - Each probe phase takes a few hundred tool calls; on macOS each sandboxed
   command takes about 0.4 s, so a phase takes about two minutes.
 - The probes demonstrate the boundary on the platform where they run. The

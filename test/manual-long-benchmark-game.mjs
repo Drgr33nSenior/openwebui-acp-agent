@@ -18,7 +18,14 @@
 // gives its declared outcome. No model is involved.
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  readlink,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
@@ -593,6 +600,14 @@ export const CHECKER_SESSION = {
 //   agent-sandboxed-commands: run_command, foreground or background, in the
 //     agent's OS sandbox.
 export const ROUTES = ["agent-file-tools", "agent-sandboxed-commands"];
+// What the registered routes do not cover, recorded with every session.
+export const UNPROBED_ROUTES = [
+  {
+    route: "browser-mcp",
+    reason:
+      "not registered with the checker: the permission policy allows browser_navigate only to preview origins and the browser container mounts no host directory, but other browser tools (for example browser_tabs or clicking a link) are not probed; a browser MCP server with a browser on the host would be an unprobed route to host files",
+  },
+];
 const OPERATIONS = new Set(["read", "write", "create", "rename", "unlink"]);
 const CHECKER_VARIABLE = "LONG_BENCHMARK_ACCEPTANCE_CHECKER";
 const MAX_CHECKER_FILE = 2 * 1024 * 1024;
@@ -874,11 +889,12 @@ export function routeCall(route, operation, path, nonce) {
     },
   };
 }
-// EPERM, EACCES, ENOENT and EROFS as the shell reports them. dash (Linux
-// /bin/sh) reports ENOENT on a redirection's directory as "Directory
-// nonexistent", which is what a sandbox that hides a path gives.
+// EPERM, EACCES, ENOENT and EROFS as the shell reports them, at the end of an
+// error line, so an echoed path or label cannot match. dash (Linux /bin/sh)
+// reports ENOENT as "No such file", or on a redirection's directory as
+// "Directory nonexistent": what a sandbox that hides a path gives.
 const COMMAND_DENIAL =
-  /operation not permitted|permission denied|no such file|directory nonexistent|read-only file system/i;
+  /: (operation not permitted|permission denied|no such file( or directory)?|directory nonexistent|read-only file system)$/im;
 const FILE_DENIAL =
   /Path outside permitted scope|Application state is outside tool scope|Agent executable and dependency files are protected|Protected path:|Symlink access refused|Hard-linked file refused|does not exist|EACCES|EPERM|ENOENT/;
 // `allowed`, `denied` or `unavailable` from one tool call's result. A tool
@@ -914,6 +930,8 @@ export async function startRouteAgent({ agentDirectory, workspace, state }) {
     pathToFileURL(require.resolve("@agentclientprotocol/sdk")).href
   );
   const nonce = `route-probe-${randomUUID()}`;
+  // Only the route agent knows this path: other local processes get 404.
+  const secret = `/${randomUUID()}`;
   const pending = new Map(),
     calls = [];
   let waiting = null,
@@ -926,11 +944,22 @@ export async function startRouteAgent({ agentDirectory, workspace, state }) {
       : new Promise((r) => (waiting = r));
   const server = createServer(async (req, res) => {
     res.setHeader("Content-Type", "application/json");
-    if (req.url === "/api/models")
+    if (!req.url?.startsWith(`${secret}/`)) {
+      res.statusCode = 404;
+      return res.end("{}");
+    }
+    if (req.url === `${secret}/api/models`)
       return res.end(JSON.stringify({ data: [{ id: "route-probe" }] }));
-    let raw = "";
+    let raw = "",
+      request;
     for await (const part of req) raw += part;
-    const call = JSON.parse(raw).tools?.length ? await nextCall() : null;
+    try {
+      request = JSON.parse(raw);
+    } catch {
+      res.statusCode = 400;
+      return res.end("{}");
+    }
+    const call = request?.tools?.length ? await nextCall() : null;
     const message = call
       ? {
           role: "assistant",
@@ -958,7 +987,7 @@ export async function startRouteAgent({ agentDirectory, workspace, state }) {
   await writeFile(
     join(state, "config.json"),
     JSON.stringify({
-      url: `http://127.0.0.1:${server.address().port}`,
+      url: `http://127.0.0.1:${server.address().port}${secret}`,
       model: "route-probe",
       rounds: 100,
     }),
@@ -1063,15 +1092,17 @@ export async function startRouteAgent({ agentDirectory, workspace, state }) {
           text: `route agent unavailable: ${broken}`,
         });
       const id = `route-${++count}`;
+      const item = { id, tool, args };
       const timer = setTimeout(() => {
         pending.delete(id);
+        // Never handed to the model later.
+        if (calls.includes(item)) calls.splice(calls.indexOf(item), 1);
         resolve({ ok: false, text: "route probe timed out" });
       }, PROBE_TIMEOUT_MS);
       pending.set(id, (result) => {
         clearTimeout(timer);
         resolve(result);
       });
-      const item = { id, tool, args };
       if (waiting) {
         const w = waiting;
         waiting = null;
@@ -1108,18 +1139,58 @@ async function withRouteAgent(options, work) {
   }
 }
 
-// Digest of what fixes the agent's capabilities for the attempt: its build
-// and the configuration files the checker protects. The lease is sent with
-// the final message only if this is unchanged.
-async function capabilityPolicy(agentDirectory, configuration) {
-  const { files, refused } = await readTree(join(agentDirectory, "dist"), {
-    strict: false,
-  });
-  const digests = { refused };
-  for (const [name, data] of Object.entries(files))
-    digests[`dist/${name}`] = sha256(data);
-  for (const path of configuration)
-    digests[path] = sha256(await readFile(path));
+// The administrator policy the agent reads (src/policy.ts, policyPath).
+const ADMIN_POLICY =
+  process.platform === "darwin"
+    ? "/private/etc/openwebui-acp-agent/policy.json"
+    : "/etc/openwebui-acp-agent/policy.json";
+// One entry by content: a file's SHA-256 at any size, a link by its target
+// (never followed), otherwise its kind; `absent` when missing.
+async function entryDigest(path) {
+  let info;
+  try {
+    info = await lstat(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return "absent";
+    throw error;
+  }
+  if (info.isSymbolicLink()) return `link:${await readlink(path)}`;
+  if (info.isFile()) return sha256(await readFile(path));
+  return info.isDirectory() ? "directory" : "special";
+}
+async function treeDigests(root, prefix, into) {
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    into[prefix] = "absent";
+    return;
+  }
+  for (const entry of entries.sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+  )) {
+    const path = join(root, entry.name),
+      name = `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) await treeDigests(path, name, into);
+    else into[name] = await entryDigest(path);
+  }
+}
+// Digest of what fixes the agent's capabilities for the attempt: its build,
+// dependencies and package files, the harness code that wraps it and decides
+// its permissions, the administrator policy and the configuration files the
+// checker protects. The lease is sent with the final message only if this is
+// unchanged.
+export async function capabilityPolicy(agentDirectory, configuration) {
+  const digests = {};
+  for (const tree of ["dist", "node_modules"])
+    await treeDigests(join(agentDirectory, tree), tree, digests);
+  for (const name of ["package.json", "package-lock.json"])
+    digests[name] = await entryDigest(join(agentDirectory, name));
+  digests["harness:runner"] = await entryDigest(RUNNER);
+  digests["harness:policy"] = await entryDigest(fileURLToPath(import.meta.url));
+  digests["administrator-policy"] = await entryDigest(ADMIN_POLICY);
+  for (const path of configuration) digests[path] = await entryDigest(path);
   return sha256(canonical(digests));
 }
 
@@ -1182,6 +1253,7 @@ export async function beginAcceptance({
   const record = {
     protocol: CHECKER_SESSION.sha256,
     routes: ROUTES,
+    unprobedRoutes: UNPROBED_ROUTES,
     ready: begun.ready === true,
     setupProbes: session.probes,
     protection: probeSummary(begun.protection),
@@ -1193,7 +1265,7 @@ export async function beginAcceptance({
     !reason &&
     !sameTree(unchanged, await readTree(workspace, { strict: false }))
   )
-    reason = "the route probes changed the workspace";
+    reason = "the workspace changed during the setup probes";
   if (reason) {
     session.close();
     record.ready = false;

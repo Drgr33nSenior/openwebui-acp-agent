@@ -19,6 +19,7 @@ import {
   readdir,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -612,6 +613,7 @@ test("probe outcomes: refusals are denials, other failures are unavailable", () 
   assert.equal(outcome(command("probe-allowed\n")), "allowed");
   for (const refusal of [
     "probe: /x/pin.json: Operation not permitted", // macOS sandbox
+    "cat: /x/pin.json: No such file or directory", // GNU
     "sh: 1: cannot create /x/pin.json: Directory nonexistent", // dash
     "sh: 1: cannot open /x/pin.json: No such file", // dash
     "mkdir: cannot create directory '/x/created': Permission denied",
@@ -622,6 +624,15 @@ test("probe outcomes: refusals are denials, other failures are unavailable", () 
   assert.equal(
     outcome(
       command("mkdir: cannot create directory: File exists\nprobe-failed\n"),
+    ),
+    "unavailable",
+  );
+  // A path or label that merely contains refusal words is not a refusal.
+  assert.equal(
+    outcome(
+      command(
+        "mkdir: cannot create directory '/x/Permission denied/created': File exists\nprobe-failed\n",
+      ),
     ),
     "unavailable",
   );
@@ -675,11 +686,7 @@ send({"result": {"final": final, "outcomes": outcomes, "start": start}})
 `;
 
 test("the parent speaks the session protocol over private pipes (scripted session)", async () => {
-  const directory = await mkdtemp(join(temporary, "scripted-session-"));
-  await writeFile(
-    join(directory, "task_acceptance_session.py"),
-    SCRIPTED_SESSION,
-  );
+  const directory = await scriptedChecker("scripted-session", SCRIPTED_SESSION);
   const start = (behaviour) => ({
     source: "/evaluator/source",
     workspace: "/evaluator/workspace",
@@ -737,6 +744,137 @@ test("the parent speaks the session protocol over private pipes (scripted sessio
     refused.reason,
     /status 3: session unavailable: checker tree does not match/,
   );
+});
+
+// ---- Capability lease (scripted sessions through beginAcceptance) ---------
+async function scriptedChecker(name, script) {
+  const directory = await mkdtemp(join(temporary, `${name}-`));
+  await writeFile(join(directory, "task_acceptance_session.py"), script);
+  return directory;
+}
+// One read probe of the brief through the real file tools, then ready; after
+// the final message one more probe, then the final message echoed back.
+// `dirty` writes into the workspace during setup, as a misbehaving probe would.
+const LEASE_SESSION = (dirty) => `import json, os, sys
+def receive():
+    return json.loads(sys.stdin.readline())
+def send(value):
+    print(json.dumps(value), flush=True)
+start = receive()
+lease = start["capability_lease"]
+probe = {"probe": "read", "path": os.path.join(start["workspace"], "BRIEF.md"),
+         "route": "agent-file-tools", "capability_lease": lease}
+send(probe)
+setup = receive()["outcome"]
+${dirty ? 'open(os.path.join(start["workspace"], "left-behind"), "w").close()' : ""}
+send({"ready": setup == "allowed", "protection": {"status": "passed"}, "capability_lease": lease})
+final = receive()
+send(probe)
+send({"result": {"final": final, "setup": setup, "after": receive()["outcome"]}})
+`;
+async function leaseSetup(name, script) {
+  const root = await realpath(await mkdtemp(join(temporary, `${name}-`)));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  await writeFile(join(workspace, "BRIEF.md"), "brief\n");
+  const configuration = [join(root, "config.json")];
+  await writeFile(configuration[0], '{"model":"fixture"}');
+  return {
+    root,
+    workspace,
+    configuration,
+    acceptance: join(root, "acceptance"),
+    checker: { installed: await scriptedChecker(name, script), files: {} },
+    agentDirectory: checkout,
+    scratch: root,
+    runId: name,
+  };
+}
+
+test("the lease goes to the checker only while the capability policy is unchanged", async () => {
+  // Unchanged: the final message carries the lease and the observation.
+  const kept = await leaseSetup("lease-kept", LEASE_SESSION(false));
+  const attempt = await GAME.beginAcceptance(kept);
+  assert.equal(attempt.ready, true, attempt.reason);
+  assert.deepEqual(attempt.record.unprobedRoutes, GAME.UNPROBED_ROUTES);
+  const output = join(kept.root, "result.json");
+  assert.deepEqual(
+    await attempt.finish({ observation: { complete: true }, output }),
+    { exitCode: 0 },
+  );
+  const echoed = JSON.parse(await readFile(output, "utf8"));
+  assert.deepEqual(echoed.final.observation, { complete: true });
+  assert.match(echoed.final.capability_lease, /^lease-/);
+  assert.equal(echoed.setup, "allowed");
+  assert.equal(echoed.after, "allowed");
+  // Configuration changed during the attempt: no lease, no result.
+  const changed = await leaseSetup("lease-changed", LEASE_SESSION(false));
+  const second = await GAME.beginAcceptance(changed);
+  assert.equal(second.ready, true, second.reason);
+  await writeFile(changed.configuration[0], '{"model":"other"}');
+  const refused = join(changed.root, "result.json");
+  assert.deepEqual(await second.finish({ observation: {}, output: refused }), {
+    unavailable: "the agent's capability policy changed during the attempt",
+  });
+  await assert.rejects(readFile(refused));
+});
+
+test("a workspace changed during the setup probes never starts the attempt", async () => {
+  const setup = await leaseSetup("lease-dirty", LEASE_SESSION(true));
+  const attempt = await GAME.beginAcceptance(setup);
+  assert.equal(attempt.ready, false);
+  assert.equal(attempt.reason, "the workspace changed during the setup probes");
+  assert.equal(attempt.record.ready, false);
+});
+
+test("the capability policy covers build, dependencies, package files and configuration", async () => {
+  const agent = await mkdtemp(join(temporary, "policy-agent-"));
+  for (const dir of ["dist", "node_modules/pkg"])
+    await mkdir(join(agent, dir), { recursive: true });
+  await writeFile(join(agent, "dist/agent.js"), "agent");
+  // Over the 2 MiB limit of the source reader: still hashed by content.
+  const large = 3 * 1024 * 1024;
+  await writeFile(join(agent, "dist/large.js"), Buffer.alloc(large));
+  await writeFile(join(agent, "node_modules/pkg/index.js"), "pkg");
+  await symlink("index.js", join(agent, "node_modules/pkg/link.js"));
+  await writeFile(join(agent, "package.json"), "{}");
+  await writeFile(join(agent, "package-lock.json"), "{}");
+  const config = join(agent, "config.json");
+  await writeFile(config, "{}");
+  const policy = () => GAME.capabilityPolicy(agent, [config]);
+  assert.equal(await policy(), await policy());
+  for (const [name, change] of [
+    ["dist/agent.js", () => writeFile(join(agent, "dist/agent.js"), "agent2")],
+    [
+      "dist/large.js",
+      () =>
+        writeFile(
+          join(agent, "dist/large.js"),
+          Buffer.concat([Buffer.alloc(large - 1), Buffer.from("x")]),
+        ),
+    ],
+    [
+      "node_modules/pkg/index.js",
+      () => writeFile(join(agent, "node_modules/pkg/index.js"), "pkg2"),
+    ],
+    [
+      "node_modules/pkg/link.js",
+      async () => {
+        await rm(join(agent, "node_modules/pkg/link.js"));
+        await symlink("other.js", join(agent, "node_modules/pkg/link.js"));
+      },
+    ],
+    ["package.json", () => writeFile(join(agent, "package.json"), "[]")],
+    [
+      "package-lock.json",
+      () => writeFile(join(agent, "package-lock.json"), "[]"),
+    ],
+    ["config.json", () => writeFile(config, "[]")],
+  ]) {
+    const before = await policy();
+    await change();
+    assert.notEqual(await policy(), before, name);
+  }
 });
 
 // Builds a game attempt for the real checker: the copied source, the
