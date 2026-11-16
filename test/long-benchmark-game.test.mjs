@@ -271,6 +271,31 @@ test("the judge passes the reference rules and fails each known bug as declared"
   ]);
 });
 
+test("a click on a disabled light counts as a click without effect (#72)", () => {
+  // The driver records clicks on disabled lights instead of timing out; the
+  // judge then decides on the observed board, moves and status alone.
+  const locked = simulate("reference");
+  locked.steps.find((s) => s.id === "after-solved").disabledClicks = 1;
+  assert.deepEqual(failing(locked), []);
+  // A real action failure on that step still fails the check.
+  const broken = simulate("reference");
+  broken.steps.find((s) => s.id === "after-solved").error =
+    "locator.click: Timeout 3000ms exceeded.";
+  assert.deepEqual(failing(broken), ["solved-locked"]);
+  // The derived games that --check-browser plays in a real browser.
+  const variants = GAME.disabledVariants(source.games.reference);
+  const lock = variants["derived:disabled-lock"]["index.html"].toString();
+  assert(!lock.includes("if (solved) return;"));
+  assert(lock.includes("button.disabled = solved;"));
+  const always = variants["derived:always-disabled"]["index.html"].toString();
+  assert(always.includes("button.disabled = true;"));
+  assert.deepEqual(GAME.DISABLED_VARIANTS["derived:always-disabled"].expect, [
+    "corner-move",
+    "edge-move",
+    "solve",
+  ]);
+});
+
 test("the judge fails on page faults, missing elements and missing screenshots", () => {
   assert.deepEqual(failing(simulate("reference", { pageErrors: 1 })), [
     "no-page-errors",

@@ -490,11 +490,56 @@ const payloadFor = (script, files) => ({
   ),
 });
 
-// Plays the trusted reference and every known-bug mutant. The play-through is
-// trusted only when the reference passes every check and each mutant fails at
+// Games derived from the sealed reference to prove how the driver treats
+// disabled lights; they live here, not in the sealed fixture. `pass` games
+// must pass every check, the others must fail at least the listed checks.
+const LOCK = "if (solved) return;";
+const RENDER = "undoEl.disabled = history.length === 0;";
+export const DISABLED_VARIANTS = {
+  // Locks the solved board only by disabling the lights (no guard in play()).
+  "derived:disabled-lock": {
+    pass: true,
+    edit: (html) =>
+      html
+        .replace(LOCK, "")
+        .replace(
+          RENDER,
+          `${RENDER}\n        for (const button of buttons) button.disabled = solved;`,
+        ),
+  },
+  // Disabled from the start: skipping disabled lights must not hide a game
+  // that cannot be played.
+  "derived:always-disabled": {
+    expect: ["corner-move", "edge-move", "solve"],
+    edit: (html) =>
+      html.replace(
+        RENDER,
+        `${RENDER}\n        for (const button of buttons) button.disabled = true;`,
+      ),
+  },
+};
+export function disabledVariants(reference) {
+  const html = reference["index.html"].toString("utf8");
+  if (!html.includes(LOCK) || !html.includes(RENDER))
+    throw new Error("the sealed reference no longer has the edited lines");
+  return Object.fromEntries(
+    Object.entries(DISABLED_VARIANTS).map(([name, v]) => [
+      name,
+      { ...reference, "index.html": Buffer.from(v.edit(html)) },
+    ]),
+  );
+}
+
+// Plays the trusted reference, every known-bug mutant and the derived
+// disabled-light games. The play-through is trusted only when the reference
+// and `derived:disabled-lock` pass every check and each other game fails at
 // least the checks it was built to break.
 export async function proveReferences(source, transport) {
-  const { script, games } = source;
+  const { script } = source;
+  const games = {
+    ...source.games,
+    ...disabledVariants(source.games[script.references.trusted]),
+  };
   const outcomes = {};
   let ok = true;
   for (const [name, files] of Object.entries(games)) {
@@ -503,12 +548,14 @@ export async function proveReferences(source, transport) {
       await runDriver(transport, payloadFor(script, files)),
     );
     const failed = Object.keys(checks).filter((id) => !checks[id]);
-    const expected =
-      name === script.references.trusted ? [] : script.references.mutants[name];
-    const matches =
-      name === script.references.trusted
-        ? failed.length === 0
-        : expected.every((id) => failed.includes(id));
+    const derived = DISABLED_VARIANTS[name];
+    const clean = name === script.references.trusted || derived?.pass;
+    const expected = clean
+      ? []
+      : (derived?.expect ?? script.references.mutants[name]);
+    const matches = clean
+      ? failed.length === 0
+      : expected.every((id) => failed.includes(id));
     if (!matches) ok = false;
     outcomes[name] = { expectedToFail: expected, failed, matches, failures };
   }
