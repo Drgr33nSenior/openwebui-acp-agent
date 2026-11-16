@@ -1,6 +1,6 @@
 # Testing and compatibility
 
-## OpenMettle branding (unreleased)
+## OpenMettle branding (included in 0.7.0)
 
 The rename is based on main `f219d6e`. It changes package, executable, ACP/MCP
 metadata, proposed registry identity and repository links to OpenMettle ACP.
@@ -52,7 +52,7 @@ public release, first download the `.tgz` and verify it against `SHA256SUMS` fro
 GitHub Releases:
 
 ```sh
-npm install --prefix /path/to/isolated-install --ignore-scripts ./openwebui-acp-agent-0.6.0.tgz
+npm install --prefix /path/to/isolated-install --ignore-scripts ./openmettle-acp-0.7.0.tgz
 npm audit --prefix /path/to/isolated-install --omit=dev --audit-level=high
 node test/package-install.mjs /path/to/isolated-install
 ```
@@ -1054,7 +1054,7 @@ skips, zero failures**. `npm pack`, installation into a fresh temporary prefix
 and `test/package-install.mjs` passed. Checkout and installed production audits
 found zero vulnerabilities. No live Open WebUI or IDE session was run.
 
-## Image viewing and interactive definition of done (unreleased)
+## Image viewing and interactive definition of done (included in 0.7.0)
 
 `test/view-image.test.mjs` covers the following:
 
@@ -1092,7 +1092,7 @@ Reported usage rose from 4,733 to 5,153 tokens between the two requests. That
 fits the 302-token estimate plus the call, result, label and answer. No IDE UI
 was driven, and no model play-test of a real game was run.
 
-## Content-only write_file (unreleased)
+## Content-only write_file (included in 0.7.0)
 
 `test/edit-file.test.mjs` covers the following through the ACP loop:
 
@@ -1165,7 +1165,7 @@ failures**. `npm pack`, installation into a fresh prefix,
 zero vulnerabilities. The Linux `/proc` path ran only in CI. The JetBrains
 prompt rendering of the new option was not checked in a live IDE.
 
-## Process lifetime after agent exit (unreleased)
+## Process lifetime after agent exit (included in 0.7.0)
 
 `test/process-lifetime.test.mjs` starts the real CLI with a fake Open WebUI
 service and an approved unsandboxed background job. Skipped on Windows, it checks:
@@ -1192,7 +1192,7 @@ first command also forks the supervisor without waiting for it. The supervisor
 used about 42 MiB RSS, once per agent process. Command environments are
 unchanged.
 
-## T3 desktop compatibility (unreleased)
+## T3 desktop compatibility (included in 0.7.0)
 
 On macOS 27.0, T3 Code Beta 0.1.6 and Node 26.11.1, published 0.6.0 launched
 and completed `/status` in a dedicated scratch project. Its first coding prompt
@@ -1230,6 +1230,38 @@ full suite reported **565 tests, 557 passed, eight skips, zero failures**.
 The packed installation and installed production audit passed with zero
 vulnerabilities. The earlier live result applies to the 0.6.0-based preview;
 live inference was not repeated against the newer source.
+
+## 0.7.0 release candidate
+
+This candidate includes main `6dc631a` and updates package, lockfile, ACP/MCP
+metadata and registry pins to 0.7.0 without dependency changes. It is the first
+release packaged as `openmettle-acp`.
+
+On macOS 27.0 (arm64) with Node 26.11.1 and a private temporary
+`OPENWEBUI_ACP_HOME`, `npm ci --ignore-scripts`, lint, typecheck, the required
+Prettier check, build and `npm test` passed: **621 tests, 606 passed, 15 skips,
+zero failures**. Six skips are Linux-only cases; nine are opt-in benchmark
+cases that need an external acceptance checker or browser. The browser wrapper passed all
+26 tests, and its pinned Playwright catalog passed the agent integration check
+without launching a browser. Production audits of the checkout and the browser
+wrapper found zero vulnerabilities.
+
+`npm pack --dry-run` listed `openmettle-acp-0.7.0.tgz` with 1,224 files: 92 from
+the package (`dist`, `docs`, `registry`, the browser wrapper sources and tests,
+README, AGENTS.md, LICENSE and NOTICE) and the bundled sandbox runtime. No
+repository test files, local settings or logs were included. The packed tarball
+installed into a fresh prefix outside the checkout. Its production audit found
+zero vulnerabilities, and `test/package-install.mjs` passed: ACP v1 handshake
+with version 0.7.0, both `openmettle-acp` and `openwebui-acp-agent` commands,
+terminal authentication and logout discovery, context usage, the static preview
+lifecycle and a real sandbox command.
+
+Platform CI results are recorded in the release PR, and publication and
+public-download results in the publication workflow. No live inference or
+interactive IDE acceptance was run for this candidate, and the browser container
+was not built locally; the CI browser job builds and tests its own disposable
+container. Windows CI checks unsupported-platform behavior, not native Windows
+support.
 
 ## Compatibility
 

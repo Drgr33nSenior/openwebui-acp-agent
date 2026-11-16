@@ -1,6 +1,6 @@
 {
   "name": "openmettle-acp",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "OpenMettle ACP coding agent for compatible clients, powered by Open WebUI",
   "repository": {
     "type": "git",

@@ -2664,7 +2664,7 @@ export function createAgent(
       agentInfo: {
         name: "openmettle-acp",
         title: "OpenMettle ACP",
-        version: "0.6.0",
+        version: "0.7.0",
       },
       agentCapabilities: {
         auth: { logout: {} },
