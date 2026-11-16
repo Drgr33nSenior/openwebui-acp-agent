@@ -908,6 +908,18 @@ failures**. `npm pack`, installation into a fresh prefix,
 zero vulnerabilities. The Linux `/proc` path ran only in CI. The JetBrains
 prompt rendering of the new option was not checked in a live IDE.
 
+## Process lifetime after agent exit (unreleased)
+
+`test/process-lifetime.test.mjs` starts the real CLI with a fake Open WebUI
+service and an approved unsandboxed background job whose command has a child.
+It checks that the job's process group is led by the command watchdog, not the
+agent, then SIGKILLs the agent and requires every live group member to be gone
+within five seconds. A second case stops the agent with SIGSTOP, so the agent's
+timers cannot run, and requires the group to end at the job's three-second
+timeout. Both are skipped on Windows. `test/loopback.test.mjs` also checks,
+through the real runner, that the reported root owns its command's listener;
+the existing ACP loopback test covers the same shape end to end.
+
 ## T3 desktop compatibility (unreleased)
 
 On macOS 27.0, T3 Code Beta 0.1.6 and Node 26.11.1, published 0.6.0 launched

@@ -4879,6 +4879,10 @@ export function createAgent(
   return {
     app,
     sessions,
+    // Synchronous, for process exit and crash handlers; close() is the normal path.
+    killJobsNow: () => {
+      for (const s of sessions.values()) s.jobs.killAllNow();
+    },
     close: async () => {
       for (const s of sessions.values()) {
         cancelTurn(s);

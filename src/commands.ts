@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { fork, spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { abortable } from "./cancel.js";
 import { StringDecoder } from "node:string_decoder";
 
@@ -114,21 +115,43 @@ export async function command(
   signal: AbortSignal,
   limits = { timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS, outputBytes: 100000 },
   onOutput?: OutputCallback,
-  // Called with the child's PID, which leads its own process group on POSIX.
+  // Called with the child's PID. On POSIX it is the command's watchdog, which
+  // leads the process group that contains the command and its descendants.
   onSpawn?: (pid: number) => void,
 ) {
   signal.throwIfAborted();
   validateCommandTimeout(limits.timeoutMs);
   return new Promise<string>((resolve, reject) => {
-    const child = spawn(executable, args, {
-      cwd,
-      env: childEnv(),
-      shell: false,
-      detached: process.platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    // The watchdog ends the group when this process exits by any means and
+    // enforces the timeout itself. Native Windows has no process groups here
+    // and keeps the direct child; see docs/windows-plan.md.
+    const child =
+      process.platform === "win32"
+        ? spawn(executable, args, {
+            cwd,
+            env: childEnv(),
+            shell: false,
+            stdio: ["ignore", "pipe", "pipe"],
+          })
+        : fork(
+            fileURLToPath(new URL("./command-watchdog.js", import.meta.url)),
+            [String(limits.timeoutMs), executable, ...args],
+            {
+              cwd,
+              env: childEnv(),
+              execArgv: [],
+              detached: true,
+              serialization: "json",
+              stdio: ["ignore", "pipe", "pipe", "ipc"],
+            },
+          );
     if (child.pid) onSpawn?.(child.pid);
     let failed = false;
+    let startFailed = false;
+    child.on("message", (message: { type?: unknown } | null) => {
+      if (message?.type === "timeout") failed = true;
+      if (message?.type === "error") startFailed = true;
+    });
     const stop = () => {
       failed = true;
       try {
@@ -145,8 +168,8 @@ export async function command(
     const collect = (b: Buffer, channel: "stdout" | "stderr") => {
       if (output.write(b, channel)) stop();
     };
-    child.stdout.on("data", (b) => collect(b, "stdout"));
-    child.stderr.on("data", (b) => collect(b, "stderr"));
+    child.stdout!.on("data", (b: Buffer) => collect(b, "stdout"));
+    child.stderr!.on("data", (b: Buffer) => collect(b, "stderr"));
     child.once("exit", () => {
       // Descendants retaining stdout/stderr can delay close indefinitely after
       // their parent exits. They still belong to this command's process group.
@@ -165,6 +188,10 @@ export async function command(
     child.once("close", async (code) => {
       clearTimeout(timer);
       signal.removeEventListener("abort", stop);
+      if (startFailed) {
+        await output.finish();
+        return reject(new Error("Command could not start"));
+      }
       resolve(
         JSON.stringify({
           code,

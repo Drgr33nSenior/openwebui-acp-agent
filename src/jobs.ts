@@ -263,6 +263,22 @@ export class Jobs {
     return this.poll(id);
   }
 
+  // Synchronous last resort while the agent process exits: SIGKILL each running
+  // job's reported process group without waiting for results. Each unsandboxed
+  // command's watchdog also ends its group when the agent's IPC channel closes.
+  killAllNow(): void {
+    for (const job of this.jobs.values())
+      if (job.info.state === "running" && job.pid !== undefined)
+        try {
+          process.kill(
+            process.platform === "win32" ? job.pid : -job.pid,
+            "SIGKILL",
+          );
+        } catch {
+          /* Already exited. */
+        }
+  }
+
   async stopAll(): Promise<void> {
     const jobs = [...this.jobs.values()];
     for (const job of jobs)

@@ -22,6 +22,10 @@ async function main() {
   switch (mode(args)) {
     case "acp": {
       const agent = createAgent();
+      // Crashes skip close(). Exit handlers must be synchronous; SIGKILL is
+      // covered by each unsandboxed command's watchdog instead.
+      process.on("exit", agent.killJobsNow);
+      process.on("uncaughtExceptionMonitor", agent.killJobsNow);
       const connection = agent.app.connect(
         ndJsonStream(
           Writable.toWeb(process.stdout),
