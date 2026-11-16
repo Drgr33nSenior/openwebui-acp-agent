@@ -2893,6 +2893,7 @@ export function createAgent(
               .object({
                 role: z.enum(["system", "user", "assistant", "tool"]),
                 content: z.string().nullable(),
+                reasoning_content: z.string().max(1_000_000).optional(),
                 tool_call_id: z.string().optional(),
                 tool_calls: z
                   .array(
@@ -2907,7 +2908,11 @@ export function createAgent(
                   )
                   .optional(),
               })
-              .strict(),
+              .strict()
+              .refine(
+                (m) =>
+                  m.reasoning_content === undefined || m.role === "assistant",
+              ),
           )
           .max(SESSION_MESSAGE_LIMIT),
       })
@@ -4474,6 +4479,7 @@ export function createAgent(
             let contextNotice: string | undefined;
             try {
               const imageTokens = liveImageTokens(modelContext, s.images);
+              s.backend.setModelMetadata(s.metadata);
               message = await s.backend.complete(
                 withImages(modelContext, s.images),
                 tools,

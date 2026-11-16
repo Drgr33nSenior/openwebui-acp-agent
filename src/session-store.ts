@@ -49,6 +49,7 @@ const messageSchema = z
   .object({
     role: z.enum(["system", "user", "assistant", "tool"]),
     content: z.string().max(1_000_000).nullable(),
+    reasoning_content: z.string().max(1_000_000).optional(),
     tool_call_id: z.string().max(1000).optional(),
     tool_calls: z
       .array(
@@ -68,7 +69,8 @@ const messageSchema = z
       .max(64)
       .optional(),
   })
-  .strict();
+  .strict()
+  .refine((m) => m.reasoning_content === undefined || m.role === "assistant");
 
 // Known conversation fields only. Additional per-session runtime state is never
 // copied by fork/export. The agent remains responsible for activation and load.
@@ -312,6 +314,9 @@ function redactedConversation(
     messages: record.messages.map((message) => ({
       ...message,
       content: message.content === null ? null : redact(message.content),
+      ...(message.reasoning_content !== undefined
+        ? { reasoning_content: redact(message.reasoning_content) }
+        : {}),
       ...(message.tool_calls
         ? {
             tool_calls: message.tool_calls.map((call) => ({
@@ -385,7 +390,14 @@ export async function exportStoredSession(
 ): Promise<string> {
   const format = z.enum(["json", "markdown"]).parse(options.format);
   const source = await readStoredSession(id, scope);
-  const { messages, plan } = redactedConversation(source, options.redact);
+  const conversation = redactedConversation(source, options.redact);
+  const plan = conversation.plan;
+  // Exports are user-facing. Private provider state stays in private storage.
+  const messages = conversation.messages.map((message) => {
+    const copy = { ...message };
+    delete copy.reasoning_content;
+    return copy;
+  });
   const title = source.title
     ? options.redact(source.title)
     : "Untitled session";
@@ -519,6 +531,17 @@ export function fitSessionRecord<T extends Fittable>(
   let checkpointTurns = input.checkpointTurns;
   let unrestorableTurn = input.unrestorableTurn;
   let trimmed = 0;
+  // Drop whole private fields before shortening useful transcript text. Never
+  // replay a truncated reasoning prefix as if it were complete provider state.
+  for (const m of messages) {
+    if (size <= limit) break;
+    if (m.reasoning_content !== undefined) {
+      const before = byteSize(m);
+      delete m.reasoning_content;
+      size += byteSize(m) - before;
+      trimmed++;
+    }
+  }
 
   const kept = () => {
     const keep = new Set<number>();

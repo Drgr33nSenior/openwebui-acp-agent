@@ -559,3 +559,38 @@ test("compaction failure reasons name the cause without reply content", () => {
     "The model stream stalled for 300 s",
   );
 });
+
+test("compaction never embeds private reasoning in summary text and retains it only with surviving assistant messages", async () => {
+  const messages = history();
+  for (const m of messages)
+    if (m.role === "assistant") m.reasoning_content = "private-provider-state";
+  const original = structuredClone(messages);
+  const next = await compactHistory(
+    messages,
+    fresh(),
+    async (input) => {
+      assert.equal(
+        JSON.stringify(input).includes("private-provider-state"),
+        false,
+      );
+      assert.equal(JSON.stringify(input).includes("reasoning_content"), false);
+      return response();
+    },
+    signal(),
+  );
+  assert.deepEqual(messages, original);
+  const context = contextMessages(messages, next);
+  assert(
+    context.some(
+      (m) =>
+        m.role === "assistant" &&
+        m.reasoning_content === "private-provider-state",
+    ),
+  );
+  assert.equal(
+    context
+      .filter((m) => m.role !== "assistant")
+      .some((m) => m.content?.includes("private-provider-state")),
+    false,
+  );
+});

@@ -602,3 +602,48 @@ test("a trimmed record near the byte limit is stored, listed and loaded", async 
     1,
   );
 });
+
+test("private reasoning persists and forks with redaction but never appears in exports", async () => {
+  const value = record();
+  value.messages[2].reasoning_content = "private synthetic-secret";
+  const id = await write(value);
+  const saved = await readStoredSession(id, scope);
+  assert.equal(saved.messages[2].reasoning_content, "private synthetic-secret");
+  const fork = await forkStoredSession(id, scope, { redact });
+  ids.push(fork.sessionId);
+  assert.equal(fork.record.messages[2].reasoning_content, "private [REDACTED]");
+  for (const format of ["json", "markdown"]) {
+    const exported = await exportStoredSession(id, scope, { format, redact });
+    assert.equal(exported.includes("private"), false);
+    assert.equal(exported.includes("reasoning_content"), false);
+  }
+  const { turnSummaries, userTurns } = await import("../dist/rewind.js");
+  assert.equal(
+    JSON.stringify(turnSummaries(saved.messages, [], {})).includes("private"),
+    false,
+  );
+  const rewound = saved.messages.slice(0, userTurns(saved.messages)[0] + 1);
+  assert.equal(
+    rewound.some((m) => m.reasoning_content),
+    false,
+  );
+});
+test("record fitting drops complete private reasoning before visible history and validates its role/size", async () => {
+  const value = record();
+  value.messages[2].reasoning_content = "p".repeat(50_000);
+  const { storedSessionSchema } = await import("../dist/session-store.js");
+  const parsed = storedSessionSchema.parse(value);
+  const original = structuredClone(parsed);
+  const fitted = fitSessionRecord(parsed, 10_000).record;
+  assert.equal(fitted.messages[2].reasoning_content, undefined);
+  assert.deepEqual(
+    fitted.messages.map((m) => m.content),
+    value.messages.map((m) => m.content),
+  );
+  assert.deepEqual(parsed, original);
+  value.messages[0].reasoning_content = "invalid system state";
+  assert.equal(storedSessionSchema.safeParse(value).success, false);
+  delete value.messages[0].reasoning_content;
+  value.messages[2].reasoning_content = "p".repeat(1_000_001);
+  assert.equal(storedSessionSchema.safeParse(value).success, false);
+});
