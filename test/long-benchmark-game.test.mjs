@@ -602,6 +602,53 @@ test("checker probes go through the agent's real file tools and command sandbox"
   ]);
 });
 
+test("probe outcomes: refusals are denials, other failures are unavailable", () => {
+  const command = (output, code = 0, ok = true) => ({
+    ok,
+    text: JSON.stringify({ code, output, limitedOrCancelled: false }),
+  });
+  const outcome = (result, operation = "write") =>
+    GAME.routeOutcome("agent-sandboxed-commands", operation, result);
+  assert.equal(outcome(command("probe-allowed\n")), "allowed");
+  for (const refusal of [
+    "probe: /x/pin.json: Operation not permitted", // macOS sandbox
+    "sh: 1: cannot create /x/pin.json: Directory nonexistent", // dash
+    "sh: 1: cannot open /x/pin.json: No such file", // dash
+    "mkdir: cannot create directory '/x/created': Permission denied",
+    "mv: cannot move '/x' to '/x.moved': Read-only file system",
+  ])
+    assert.equal(outcome(command(`${refusal}\nprobe-failed\n`)), "denied");
+  // A failure that is not a refusal, or a command that did not run.
+  assert.equal(
+    outcome(
+      command("mkdir: cannot create directory: File exists\nprobe-failed\n"),
+    ),
+    "unavailable",
+  );
+  assert.equal(outcome(command("", 1, false)), "unavailable");
+  assert.equal(
+    outcome({ ok: false, text: "Sandbox failed to start" }),
+    "unavailable",
+  );
+  const file = (ok, text, operation) =>
+    GAME.routeOutcome("agent-file-tools", operation, { ok, text });
+  assert.equal(file(true, "1→x", "read"), "allowed");
+  assert.equal(
+    file(
+      false,
+      "old_string matched 0 occurrences; expected at least 1.",
+      "write",
+    ),
+    "allowed",
+  );
+  assert.equal(
+    file(false, "Path outside permitted scope or sensitive", "read"),
+    "denied",
+  );
+  assert.equal(file(false, "Tool call limit exceeded", "read"), "unavailable");
+  assert.equal(GAME.routeCall("agent-file-tools", "rename", "/x", "n"), null);
+});
+
 // A scripted session bootstrap that speaks the protocol: probes through each
 // declared route, one probe with an unknown route and one with another lease,
 // then echoes what the parent sent.

@@ -874,8 +874,11 @@ export function routeCall(route, operation, path, nonce) {
     },
   };
 }
+// EPERM, EACCES, ENOENT and EROFS as the shell reports them. dash (Linux
+// /bin/sh) reports ENOENT on a redirection's directory as "Directory
+// nonexistent", which is what a sandbox that hides a path gives.
 const COMMAND_DENIAL =
-  /operation not permitted|permission denied|no such file|read-only file system/i;
+  /operation not permitted|permission denied|no such file|directory nonexistent|read-only file system/i;
 const FILE_DENIAL =
   /Path outside permitted scope|Application state is outside tool scope|Agent executable and dependency files are protected|Protected path:|Symlink access refused|Hard-linked file refused|does not exist|EACCES|EPERM|ENOENT/;
 // `allowed`, `denied` or `unavailable` from one tool call's result. A tool
