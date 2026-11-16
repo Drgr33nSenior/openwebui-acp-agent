@@ -844,11 +844,42 @@ test("server error codes and Retry-After are reported; raw bodies are not", asyn
     await retrySuffix({ "Retry-After": "7" }),
     /busy \(retry after 7 s\)$/,
   );
+  const retrySeconds = async (value) =>
+    Number(
+      /retry after (\d+) s\)$/.exec(
+        await retrySuffix({ "Retry-After": value }),
+      )?.[1],
+    );
+  const inRange = (n, lo, hi) =>
+    assert.ok(n >= lo && n <= hi, `${n} not in ${lo}-${hi}`);
+  inRange(
+    await retrySeconds(new Date(Date.now() + 120_000).toUTCString()),
+    115,
+    120,
+  );
+  const asctime = (d) =>
+    `${d.toUTCString().slice(0, 3)} ${d.toUTCString().slice(8, 11)} ${String(d.getUTCDate()).padStart(2, " ")} ${d.toISOString().slice(11, 19)} ${d.getUTCFullYear()}`;
+  const zone = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    inRange(
+      await retrySeconds(asctime(new Date(Date.now() + 120_000))),
+      115,
+      120,
+    );
+  } finally {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  }
+  assert.match(
+    await retrySuffix({ "Retry-After": "86401" }),
+    /HTTP 503\): busy$/,
+  );
   assert.match(
     await retrySuffix({
-      "Retry-After": new Date(Date.now() + 30_000).toUTCString(),
+      "Retry-After": new Date(Date.now() + 90_000_000).toUTCString(),
     }),
-    /busy \(retry after (29|30) s\)$/,
+    /HTTP 503\): busy$/,
   );
   assert.match(
     await retrySuffix({

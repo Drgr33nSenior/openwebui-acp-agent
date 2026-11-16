@@ -83,6 +83,11 @@ async function errorDetail(r: Response): Promise<string | undefined> {
     return undefined;
   }
 }
+// RFC 9110 asctime dates carry no zone and are GMT; Date.parse would use local time.
+const httpDate = (v: string) =>
+  /^[A-Za-z]{3} [A-Za-z]{3} [ \d]\d \d\d:\d\d:\d\d \d{4}$/.test(v)
+    ? v + " GMT"
+    : v;
 // Positive delay in seconds from a Retry-After header (delta-seconds or
 // HTTP-date); undefined when absent, unparsable, non-positive or implausible.
 function retryAfter(r: Response): number | undefined {
@@ -90,7 +95,7 @@ function retryAfter(r: Response): number | undefined {
   if (!header) return undefined;
   const value = /^\d+$/.test(header)
     ? Number(header)
-    : Math.ceil((Date.parse(header) - Date.now()) / 1000);
+    : Math.ceil((Date.parse(httpDate(header)) - Date.now()) / 1000);
   return Number.isFinite(value) && value > 0 && value <= 86400
     ? value
     : undefined;
