@@ -481,7 +481,7 @@ test(
     const pidFile = join(c.cwd, "pid.json"),
       marker = join(c.cwd, "descendant-must-not-finish.txt");
     const childCode = `setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(marker)},'unwanted'),900);setInterval(()=>{},1000)`;
-    const code = `const child=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(childCode)}],{stdio:'inherit'});require('node:fs').writeFileSync(${JSON.stringify(pidFile)},JSON.stringify({parent:process.pid,child:child.pid}));setInterval(()=>{},1000)`;
+    const code = `const child=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(childCode)}],{stdio:'inherit'});const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidFile + ".tmp")},JSON.stringify({parent:process.pid,child:child.pid}));fs.renameSync(${JSON.stringify(pidFile + ".tmp")},${JSON.stringify(pidFile)});setInterval(()=>{},1000)`;
     respond = (request, res) => {
       if (latestUser(request) === "replacement") {
         assert(
@@ -1137,7 +1137,7 @@ test(
           executable: process.execPath,
           args: [
             "-e",
-            `require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`,
+            `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidFile + ".tmp")},String(process.pid));fs.renameSync(${JSON.stringify(pidFile + ".tmp")},${JSON.stringify(pidFile)});setInterval(()=>{},1000)`,
           ],
         }),
       ]);
