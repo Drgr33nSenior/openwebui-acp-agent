@@ -99,3 +99,24 @@ export function reasoningPayload(
       }
     : {};
 }
+
+// Ordered levels of the reasoning_effort request parameter. "none" (thinking
+// off) is deliberately absent, so it is never chosen by rank.
+const EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max"];
+// A choice's place in that order; -1 for named workspace controls and values
+// outside the standard levels, which have no known order.
+export function effortRank(choice: ReasoningChoice): number {
+  return choice.effort === undefined ? -1 : EFFORT_ORDER.indexOf(choice.effort);
+}
+// The declared reasoning_effort choice one level below the given one, or
+// undefined at the lowest level and where the order is unknown.
+export function lowerEffortChoice(
+  choices: ReasoningChoice[],
+  value: string,
+): ReasoningChoice | undefined {
+  const current = choices.find((c) => c.value === value);
+  const below = current ? effortRank(current) : -1;
+  return choices
+    .filter((c) => effortRank(c) >= 0 && effortRank(c) < below)
+    .sort((a, b) => effortRank(b) - effortRank(a))[0];
+}

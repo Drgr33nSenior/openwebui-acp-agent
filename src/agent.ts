@@ -266,6 +266,7 @@ import {
 } from "./server-tools.js";
 import {
   defaultReasoning,
+  lowerEffortChoice,
   reasoningChoices,
   reasoningPayload,
   type ReasoningChoice,
@@ -4476,6 +4477,9 @@ export function createAgent(
         for (let round = 0; round < s.config.rounds; round++) {
           let message: Message | undefined;
           let availableTools: string[] = [];
+          // The re-ask after a reply whose thinking used the whole output
+          // limit runs once at the next lower effort; the session keeps its own.
+          let lowered: ReasoningChoice | undefined;
           for (let attempt = 0; attempt < 2; attempt++) {
             const request = await prepareRequest();
             const { modelContext, tools } = request;
@@ -4483,6 +4487,12 @@ export function createAgent(
             let contextNotice: string | undefined;
             try {
               const imageTokens = liveImageTokens(modelContext, s.images);
+              const cap = lowered
+                ? replyTokenCap(
+                    lowered.effort,
+                    s.metadata.find((m) => m.id === s.config.model),
+                  )
+                : replyCap(s);
               s.backend.setModelMetadata(s.metadata);
               message = await s.backend.complete(
                 withImages(modelContext, s.images),
@@ -4496,10 +4506,12 @@ export function createAgent(
                   await text(client, s, t);
                 },
                 {
-                  ...reasoningPayload(s.config.model, s.reasoning, s.choices),
-                  ...(replyCap(s) === undefined
-                    ? {}
-                    : { max_tokens: replyCap(s) }),
+                  ...reasoningPayload(
+                    s.config.model,
+                    lowered?.value ?? s.reasoning,
+                    s.choices,
+                  ),
+                  ...(cap === undefined ? {} : { max_tokens: cap }),
                 },
                 undefined,
                 async (used, prompt) => {
@@ -4575,6 +4587,10 @@ export function createAgent(
                 partialText = "";
               }
               const reason = s.backend.redact(error.message).slice(0, 300);
+              const thinkingOnly =
+                error.kind === "truncated" && error.thinkingOnly;
+              if (thinkingOnly && attempt === 0)
+                lowered = lowerEffortChoice(s.choices, s.reasoning);
               const note = `[Your last reply was ${error.kind === "truncated" ? "cut off" : "malformed"}: ${reason}. No tool from that reply was executed.${
                 attempt === 0
                   ? " " +
@@ -4582,6 +4598,7 @@ export function createAgent(
                       error.kind,
                       error.inToolCall,
                       availableTools,
+                      thinkingOnly,
                     ) +
                     " Prior completed tools must not be repeated."
                   : " Recovery failed; stop and report the remaining work."
@@ -4607,7 +4624,9 @@ export function createAgent(
               await text(
                 client,
                 s,
-                `\n[${reason}. Asking once for a ${error.kind === "truncated" ? "shorter reply with smaller tool calls" : "corrected reply"}. No tools from that reply ran.]\n`,
+                thinkingOnly
+                  ? `\n[${reason}: its thinking used the whole limit before any reply. Asking once again${lowered ? ` at ${lowered.name}` : " for shorter thinking"}. No tools from that reply ran.]\n`
+                  : `\n[${reason}. Asking once for a ${error.kind === "truncated" ? "shorter reply with smaller tool calls" : "corrected reply"}. No tools from that reply ran.]\n`,
               );
             }
           }

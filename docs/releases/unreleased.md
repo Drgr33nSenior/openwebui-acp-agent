@@ -61,6 +61,13 @@ No changes after [0.6.0](0.6.0.md).
 - Start the reasoning selector on the server's declared default level and send
   it explicitly. **Model default** remains only when no default is declared.
   Levels keep the server's order; Off appears only when declared.
+- At Max (`xhigh`), send the output limit the server declares for that level
+  (`maxOutputTokens` on its `supportedReasoningEfforts` entry), within half the
+  context window, and reserve it when sizing input. Without it the cap is the
+  advertised `max_output_tokens` as before. A reply whose thinking used the whole
+  limit is no longer asked for "a shorter reply with smaller tool calls": the
+  notice says thinking ran out of room and the one re-ask runs at the next lower
+  declared level.
 - Show Open WebUI model display names in the model selector.
 - Document ACP v2 readiness: client `fs/*` is optional with local fallback and
   `terminal/*` is unused. Other v2 shapes are deferred while the project

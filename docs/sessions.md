@@ -115,14 +115,25 @@ visible output. It does not sum billing totals or estimate missing counts.
 Client rendering can retain an old value until the next usage update.
 
 At the `xhigh` reasoning effort the agent sends `max_tokens` itself: the
-advertised `max_output_tokens`, or 32,768 when absent, and never more than half the
-advertised `context_window`. A server that leaves that level uncapped would
-otherwise let one reply think until the window is full. The same amount is
-reserved when requests are sized. Other levels send no `max_tokens`, and a
-model without an advertised `context_window` gets none. 32,768 is a fixed
-figure, not a measured percentile of reply sizes. An explicit cap must respect
-the advertised output limit even if the server permits uncapped replies when
-the parameter is omitted. Reasoning effort remains `xhigh`.
+`maxOutputTokens` the model list declares on the `xhigh` entry of
+`supportedReasoningEfforts` (top level, then `openai`), else the advertised
+`max_output_tokens`, else 32,768, and never more than half the advertised
+`context_window`. Thinking counts against `max_tokens`, so a server that
+allows a larger limit for that level declares it there. A server that leaves
+that level uncapped would otherwise let one reply think until the window is
+full. The same amount is reserved when requests are sized. Other levels send
+no `max_tokens`, and a model without an advertised `context_window` gets none.
+32,768 is a fixed figure, not a measured percentile of reply sizes. Without a
+level-specific value, an explicit cap respects the advertised output limit even
+if the server permits uncapped replies when the parameter is omitted. Reasoning
+effort remains `xhigh`.
+
+A reply cut off by the output limit before it produced any text or tool call
+used the whole limit thinking. Asking for a shorter reply would not help, so
+the single re-ask says so and runs once at the next lower declared level (by
+the `reasoning_effort` order used for summaries; never Off), with that level's
+own cap. Where no lower level is known it runs at the same level and asks for
+briefer thinking. The session's selected level does not change.
 
 ### Clearing older tool results
 

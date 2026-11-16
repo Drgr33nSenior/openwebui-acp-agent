@@ -32,6 +32,7 @@ const {
 const {
   completionContextTokens,
   contextLimits,
+  effortOutputAllowance,
   replyTokenCap,
   XHIGH_OUTPUT_TOKENS,
 } = await import("../dist/usage.js");
@@ -589,6 +590,69 @@ test("xhigh gets an explicit reply cap that fits the window, and the input is si
   );
 });
 
+test("xhigh uses the limit advertised for that level, within half the window", () => {
+  const level = (maxOutputTokens, effort = "xhigh") => ({
+    reasoningEffort: effort,
+    label: "Max",
+    maxOutputTokens,
+  });
+  const family = { context_window: 100768, max_output_tokens: 12288 };
+  const advertised = {
+    ...family,
+    supportedReasoningEfforts: [{ reasoningEffort: "low" }, level(32768)],
+  };
+  assert.equal(effortOutputAllowance(advertised, "xhigh"), 32768);
+  assert.equal(effortOutputAllowance(advertised, "low"), undefined);
+  assert.equal(replyTokenCap("xhigh", advertised), 32768);
+  // Open WebUI also keeps the provider's entry under `openai`.
+  assert.equal(
+    replyTokenCap("xhigh", {
+      ...family,
+      openai: { supportedReasoningEfforts: [level(24576)] },
+    }),
+    24576,
+  );
+  // Clamped to half the window.
+  assert.equal(
+    replyTokenCap("xhigh", {
+      context_window: 40000,
+      max_output_tokens: 12288,
+      supportedReasoningEfforts: [level(65536)],
+    }),
+    20000,
+  );
+  // Absent, malformed or for another level: the general limit, as before.
+  for (const supportedReasoningEfforts of [
+    undefined,
+    "xhigh",
+    [level(0)],
+    [level(-1)],
+    [level("32768")],
+    [level(1.5)],
+    [level(32768, "medium")],
+    [null, { reasoningEffort: "xhigh" }],
+  ])
+    assert.equal(
+      replyTokenCap("xhigh", { ...family, supportedReasoningEfforts }),
+      12288,
+    );
+  assert.equal(
+    replyTokenCap("xhigh", {
+      context_window: 100768,
+      supportedReasoningEfforts: [level(0)],
+    }),
+    XHIGH_OUTPUT_TOKENS,
+  );
+  // Other levels still send no cap.
+  for (const effort of [undefined, "low", "medium", "high"])
+    assert.equal(replyTokenCap(effort, advertised), undefined);
+  // The input is sized against the cap actually sent.
+  assert.deepEqual(
+    contextLimits(advertised, 12288, replyTokenCap("xhigh", advertised)),
+    { size: 100768, usable: 68000 },
+  );
+});
+
 test("the plan counts as visible only when the latest update_plan call states it", () => {
   const plan = [
     { content: "Read", priority: "high", status: "completed" },
@@ -1052,6 +1116,96 @@ test("a first-prompt HTTP 400 does not reset reasoning or mode in saved ACP stat
     assert.equal(restored.state().workflow, "plan");
   } finally {
     await restored.close();
+  }
+});
+
+test("Max sends the limit advertised for Max, which the gateway accepts", async () => {
+  const ceiling = 32768;
+  model = {
+    id: "fixture",
+    context_window: 100768,
+    max_output_tokens: 12288,
+    // As Open WebUI lists the gateway's model: the slider and the raw levels.
+    supportedReasoningEfforts: [
+      { reasoningEffort: "medium", label: "Medium" },
+      { reasoningEffort: "xhigh", label: "Max", maxOutputTokens: ceiling },
+    ],
+    ...efforts,
+  };
+  // The gateway's rule: up to the advertised ceiling at xhigh, else the allowance.
+  reply = (request, res) => {
+    const limit =
+      request.reasoning_effort === "xhigh" ? ceiling : model.max_output_tokens;
+    if (request.max_tokens > limit) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { code: "output_limit_exceeded" } }));
+      return true;
+    }
+  };
+  const c = await client();
+  try {
+    await c.prompt();
+    assert(!("max_tokens" in coding().at(-1)));
+    await c.select("reasoning", JSON.stringify(["reasoning_effort", "xhigh"]));
+    await c.prompt();
+    assert.equal(coding().at(-1).reasoning_effort, "xhigh");
+    assert.equal(coding().at(-1).max_tokens, ceiling);
+    assert(!JSON.stringify(c.updates).includes("output_limit_exceeded"));
+  } finally {
+    await c.close();
+  }
+});
+
+test("a reply whose thinking used the whole limit is asked again once at the next lower effort", async () => {
+  model = {
+    id: "fixture",
+    context_window: 100768,
+    max_output_tokens: 12288,
+    ...efforts,
+  };
+  let cut = 0;
+  reply = (request, res) => {
+    if (request.tools.length === 0 || cut++ > 0) return false;
+    res.setHeader("Content-Type", "text/event-stream");
+    const events = [
+      { choices: [{ delta: { reasoning_content: "thinking ".repeat(50) } }] },
+      { choices: [{ delta: {}, finish_reason: "length" }] },
+    ];
+    res.end(
+      events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("") +
+        "data: [DONE]\n\n",
+    );
+    return true;
+  };
+  const c = await client();
+  const reasoning = '["reasoning_effort","xhigh"]';
+  try {
+    await c.select("reasoning", reasoning);
+    assert.equal((await c.prompt()).stopReason, "end_turn");
+    assert.deepEqual(
+      coding().map((r) => [r.reasoning_effort, r.max_tokens]),
+      [
+        ["xhigh", 12288],
+        ["high", undefined],
+      ],
+    );
+    const text = c.updates
+      .filter((u) => u.sessionUpdate === "agent_message_chunk")
+      .map((u) => u.content.text)
+      .join("");
+    assert.match(
+      text,
+      /cut off by its output limit: its thinking used the whole limit before any reply\. Asking once again at Reasoning effort: high\./,
+    );
+    assert.doesNotMatch(text, /shorter reply with smaller tool calls/);
+    const marker = coding()[1].messages.find((m) =>
+      m.content?.startsWith("[Your last reply"),
+    );
+    assert.match(marker.content, /Your thinking used the whole output limit/);
+    // The session keeps its own choice.
+    assert.equal(c.state().reasoning, reasoning);
+  } finally {
+    await c.close();
   }
 });
 
