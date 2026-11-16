@@ -1409,6 +1409,59 @@ async function loopbackClient(choose = () => "deny", dependencies = {}) {
     },
   };
 }
+// Every fixture server pid, so a test can prove none outlives its session.
+const fixturePids = new Set();
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    throw error;
+  }
+};
+// Closes the session (which must stop its owned jobs), then requires every
+// fixture process it started to be gone within a short bounded wait.
+async function closeAndAssertNoFixtureServers(t) {
+  const pids = [...fixturePids];
+  try {
+    await t.c.close();
+    const end = Date.now() + 5000;
+    while (pids.some(alive) && Date.now() < end)
+      await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(
+      pids.filter(alive),
+      [],
+      "Session close must stop its fixture servers",
+    );
+  } finally {
+    for (const pid of pids)
+      if (alive(pid))
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          /* Already exited. */
+        }
+    for (const pid of pids) fixturePids.delete(pid);
+  }
+}
+// Backstop for a run that ends before teardown: kill recorded fixture groups on
+// exit, and on SIGINT/SIGTERM (which skip "exit" handlers) kill them and then
+// re-raise the signal with the default disposition. SIGKILL cannot be caught.
+const killFixtureGroups = () => {
+  for (const pid of fixturePids)
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      /* Already exited. */
+    }
+};
+process.once("exit", killFixtureGroups);
+for (const sig of ["SIGINT", "SIGTERM"])
+  process.once(sig, () => {
+    killFixtureGroups();
+    process.kill(process.pid, sig);
+  });
 // An unsandboxed background job (explicit escalation) that serves loopback.
 async function startOwnServer({ c, cwd }) {
   await invoke(c, [
@@ -1416,7 +1469,7 @@ async function startOwnServer({ c, cwd }) {
       executable: process.execPath,
       args: [
         "-e",
-        "const s=require('node:net').createServer(c=>c.end()).listen(0,'127.0.0.1',()=>require('node:fs').writeFileSync('port.txt',String(s.address().port)));setInterval(()=>{},1000)",
+        "const s=require('node:net').createServer(c=>c.end()).listen(0,'127.0.0.1',()=>{const f=require('node:fs');f.writeFileSync('pid.txt',String(process.pid));f.writeFileSync('port.txt',String(s.address().port))});setInterval(()=>{},1000)",
       ],
       background: true,
       timeout_ms: 60000,
@@ -1427,7 +1480,10 @@ async function startOwnServer({ c, cwd }) {
   const end = Date.now() + 10000;
   for (;;) {
     const text = await readFile(join(cwd, "port.txt"), "utf8").catch(() => "");
-    if (text) return Number(text);
+    if (text) {
+      fixturePids.add(Number(await readFile(join(cwd, "pid.txt"), "utf8")));
+      return Number(text);
+    }
     if (Date.now() > end) throw new Error("Fixture server did not start");
     await new Promise((r) => setTimeout(r, 20));
   }
@@ -1476,7 +1532,7 @@ test(
       assert.deepEqual(optionIds(t.networkPrompts()[1]), ["once", "deny"]);
     } finally {
       other.close();
-      await t.c.close();
+      await closeAndAssertNoFixtureServers(t);
     }
   },
 );
@@ -1565,7 +1621,7 @@ test(
             assert.deepEqual(optionIds(prompt), expectedOptions);
         }
       } finally {
-        await t.c.close();
+        await closeAndAssertNoFixtureServers(t);
       }
     }
   },
