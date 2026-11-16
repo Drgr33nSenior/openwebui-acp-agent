@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { fork, spawn, type ChildProcess } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { abortable } from "./cancel.js";
 import { StringDecoder } from "node:string_decoder";
 
@@ -107,6 +108,65 @@ export function childEnv() {
   }
   return env;
 }
+// Unsandboxed POSIX commands lead their own process groups, and their timeout
+// timers live in this process. A supervisor process, started on first use,
+// also holds each running command's group and deadline, so the timeout still
+// holds and the group is killed when this process dies without cleanup. The
+// map is in memory only and lists only this process's running commands; it
+// re-registers them if a supervisor has to be restarted.
+const supervised = new Map<number, number>();
+let supervisor: ChildProcess | undefined;
+function tellSupervisor(message: object) {
+  try {
+    supervisor?.send(message, (error) => {
+      if (error) supervisor = undefined;
+    });
+  } catch {
+    supervisor = undefined;
+  }
+}
+function supervise(group: number, timeoutMs: number) {
+  supervised.set(group, Date.now() + timeoutMs);
+  if (!supervisor?.connected) {
+    supervisor = undefined;
+    try {
+      const child = fork(
+        fileURLToPath(new URL("./command-supervisor.js", import.meta.url)),
+        [],
+        {
+          cwd: "/",
+          env: childEnv(),
+          execArgv: [],
+          detached: true,
+          serialization: "json",
+          stdio: ["ignore", "ignore", "ignore", "ipc"],
+        },
+      );
+      child.once("error", () => {});
+      child.once("disconnect", () => {
+        if (supervisor === child) supervisor = undefined;
+      });
+      // It must not keep an otherwise finished agent process running.
+      child.unref();
+      child.channel?.unref();
+      supervisor = child;
+    } catch {
+      // The command keeps this process's timeout and exit cleanup.
+      return;
+    }
+    for (const [running, deadline] of supervised)
+      tellSupervisor({
+        type: "watch",
+        group: running,
+        timeoutMs: Math.max(1, deadline - Date.now()),
+      });
+  } else tellSupervisor({ type: "watch", group, timeoutMs });
+}
+function unsupervise(group: number) {
+  if (!supervised.delete(group)) return;
+  tellSupervisor({ type: "unwatch", group });
+}
+
 export async function command(
   executable: string,
   args: string[],
@@ -127,7 +187,12 @@ export async function command(
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
+    // Register before anything can yield to the event loop: the message is
+    // written to the supervisor's channel synchronously.
+    if (process.platform !== "win32" && child.pid)
+      supervise(child.pid, limits.timeoutMs);
     if (child.pid) onSpawn?.(child.pid);
+    const deadline = Date.now() + limits.timeoutMs;
     let failed = false;
     const stop = () => {
       failed = true;
@@ -150,12 +215,14 @@ export async function command(
     child.once("exit", () => {
       // Descendants retaining stdout/stderr can delay close indefinitely after
       // their parent exits. They still belong to this command's process group.
-      if (process.platform !== "win32" && child.pid)
+      if (process.platform !== "win32" && child.pid) {
         try {
           process.kill(-child.pid, "SIGKILL");
         } catch {
           /* Already exited. */
         }
+        unsupervise(child.pid);
+      }
     });
     child.once("error", () => {
       clearTimeout(timer);
@@ -165,6 +232,8 @@ export async function command(
     child.once("close", async (code) => {
       clearTimeout(timer);
       signal.removeEventListener("abort", stop);
+      // The supervisor may have ended the group while this process was stalled.
+      if (code === null && Date.now() >= deadline) failed = true;
       resolve(
         JSON.stringify({
           code,
