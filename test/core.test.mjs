@@ -817,6 +817,45 @@ test("server error codes and Retry-After are reported; raw bodies are not", asyn
     ),
     /HTTP 504\): first_token_deadline \(retry after 5 s\)$/,
   );
+  const retrySuffix = async (headers) => {
+    response = async (_, res) =>
+      res
+        .writeHead(503, { "Content-Type": "application/json", ...headers })
+        .end(JSON.stringify({ error: { code: "busy" } }));
+    try {
+      await new Backend(conf, "secret").complete(
+        [],
+        [],
+        AbortSignal.timeout(5000),
+        async () => {},
+      );
+    } catch (error) {
+      return error.message;
+    }
+    assert.fail("expected rejection");
+  };
+  assert.match(await retrySuffix({}), /HTTP 503\): busy$/);
+  assert.match(await retrySuffix({ "Retry-After": "0" }), /HTTP 503\): busy$/);
+  assert.match(
+    await retrySuffix({ "Retry-After": "soon" }),
+    /HTTP 503\): busy$/,
+  );
+  assert.match(
+    await retrySuffix({ "Retry-After": "7" }),
+    /busy \(retry after 7 s\)$/,
+  );
+  assert.match(
+    await retrySuffix({
+      "Retry-After": new Date(Date.now() + 30_000).toUTCString(),
+    }),
+    /busy \(retry after (29|30) s\)$/,
+  );
+  assert.match(
+    await retrySuffix({
+      "Retry-After": new Date(Date.now() - 30_000).toUTCString(),
+    }),
+    /HTTP 503\): busy$/,
+  );
   response = async (_, res) =>
     res
       .writeHead(400, { "Content-Type": "application/json" })

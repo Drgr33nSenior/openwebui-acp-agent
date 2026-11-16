@@ -83,9 +83,15 @@ async function errorDetail(r: Response): Promise<string | undefined> {
     return undefined;
   }
 }
+// Positive delay in seconds from a Retry-After header (delta-seconds or
+// HTTP-date); undefined when absent, unparsable, non-positive or implausible.
 function retryAfter(r: Response): number | undefined {
-  const value = Number(r.headers.get("retry-after"));
-  return Number.isFinite(value) && value >= 0 && value <= 86400
+  const header = r.headers.get("retry-after")?.trim();
+  if (!header) return undefined;
+  const value = /^\d+$/.test(header)
+    ? Number(header)
+    : Math.ceil((Date.parse(header) - Date.now()) / 1000);
+  return Number.isFinite(value) && value > 0 && value <= 86400
     ? value
     : undefined;
 }
