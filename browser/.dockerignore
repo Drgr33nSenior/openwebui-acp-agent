@@ -6,5 +6,6 @@
 !worker.mjs
 !server.mjs
 !connection.mjs
+!boundary.mjs
 !settings.mjs
 !allowed-tools.json

@@ -2,6 +2,13 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
+// /mcp opens an ordinary session. /mcp/confined opens a session behind an
+// origin boundary (boundary.mjs). A session keeps the path that opened it.
+const PATHS = new Map([
+  ["/mcp", { confined: false }],
+  ["/mcp/confined", { confined: true }],
+]);
+
 export async function startHttpServer({
   createConnection,
   host = "127.0.0.1",
@@ -54,11 +61,15 @@ export async function startHttpServer({
           403,
           "Browser-origin and non-loopback-host requests are refused",
         );
-      if (req.url !== "/mcp") return reply(res, 404, "Not found");
+      const mode = PATHS.get(req.url);
+      if (!mode) return reply(res, 404, "Not found");
       if (!["GET", "POST", "DELETE"].includes(req.method))
         return reply(res, 405, "Method not allowed");
       const id = req.headers["mcp-session-id"];
-      if (Array.isArray(id) || (id && (id.length > 100 || !sessions.has(id))))
+      if (
+        Array.isArray(id) ||
+        (id && (id.length > 100 || sessions.get(id)?.path !== req.url))
+      )
         return reply(res, 404, "Session not found");
       let body;
       if (req.method === "POST") {
@@ -97,7 +108,7 @@ export async function startHttpServer({
       let connection;
       let transport;
       try {
-        connection = await createConnection();
+        connection = await createConnection(mode);
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: randomUUID,
           // The SDK awaits this callback before acknowledging DELETE. Wait
@@ -107,6 +118,7 @@ export async function startHttpServer({
             sessions.set(sessionId, {
               connection,
               transport,
+              path: req.url,
               lastUsed: Date.now(),
             });
           },

@@ -1,10 +1,17 @@
 // The pinned MCP API accepts a caller-owned context but does not close the
 // browser it launches itself. Keep ownership here so MCP DELETE/cancellation
 // releases Chromium instead of leaving it alive until the idle timeout.
+//
+// A confined connection also owns an origin boundary (boundary.mjs): its
+// Chromium is launched behind that proxy, which replaces any configured
+// proxy, and each MCP message is shown to the boundary before the server.
+import { startOriginBoundary } from "./boundary.mjs";
+
 export async function createOwnedConnection({
   createConnection,
   chromium,
   settings,
+  confined = false,
 }) {
   const owned = new Set();
   const disposals = new WeakMap();
@@ -15,6 +22,7 @@ export async function createOwnedConnection({
   let closing;
   let idle;
   let connection;
+  let boundary;
 
   function dispose(browser) {
     let promise = disposals.get(browser);
@@ -36,6 +44,7 @@ export async function createOwnedConnection({
       await Promise.allSettled([...owned].map(dispose));
       await pending?.catch(() => {});
       await Promise.allSettled([...owned].map(dispose));
+      await boundary?.close();
     })();
     return releasing;
   }
@@ -56,7 +65,11 @@ export async function createOwnedConnection({
       pending = (async () => {
         let browser;
         try {
-          browser = await chromium.launch(settings.browser.launchOptions);
+          browser = await chromium.launch(
+            boundary
+              ? { ...settings.browser.launchOptions, proxy: boundary.proxy }
+              : settings.browser.launchOptions,
+          );
           owned.add(browser);
           if (closed) throw new Error("Browser MCP session is closed");
           const created = await browser.newContext(
@@ -85,6 +98,8 @@ export async function createOwnedConnection({
     return pending;
   }
   try {
+    // Without its boundary a confined connection never exists.
+    if (confined) boundary = await startOriginBoundary();
     // false selects the supplied context in MCP's SimpleBrowser adapter.
     // The context above is freshly created with newContext, never persistent.
     connection = await createConnection(
@@ -124,6 +139,7 @@ export async function createOwnedConnection({
       const onmessage = transport.onmessage;
       transport.onmessage = (...args) => {
         touch();
+        boundary?.observe(args[0]);
         onmessage?.(...args);
       };
     } catch (error) {

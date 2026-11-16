@@ -375,9 +375,10 @@ the attempt is always `unavailable` with
    `unsupported`. Every file tool, and `start_preview`, resolves paths through
    the same workspace guard. The browser MCP tools are not a checker route: the
    checker's controls need host-file access, and the browser has none. The
-   harness probes the browser itself, through the agent's real browser tools
-   and the same permission policy, before and after the attempt (see
-   isolation, below). The report lists it in
+   harness probes the browser itself, and the agent's other routes to a
+   network (sandboxed commands and Open WebUI server tasks), through the
+   agent's real tools and the same permission policy, before and after the
+   attempt (see isolation, below). The report lists them in
    `evaluator.session.harnessRoutes`; `evaluator.session.unprobedRoutes` is
    empty.
 4. Starts the evaluated session only when the checker answers `ready` and the
@@ -394,11 +395,25 @@ the attempt is always `unavailable` with
    `config.json` and `mcp.json`.
 
 **Isolation.** The hidden source is in the scratch directory next to the
-workspace and in the harness checkout. Before the evaluated session, and again
-after it ends, the runner proves that the agent cannot read or change it. A scripted fake model sends
-tool calls through the same agent build, child process, permission policy,
-sandbox and browser configuration as the evaluated session, from a sibling
-workspace. The calls are:
+workspace and in the harness checkout. The harness repository is public, so the
+same files can also be read from the network. Before the evaluated session, and
+again after it ends, the runner proves that the agent cannot read or change the
+local copies and cannot read any origin other than its own preview. A scripted
+fake model sends tool calls through the same agent build, child process,
+permission policy, sandbox and browser endpoint as the evaluated session, from
+a sibling workspace.
+
+For the network probes the runner starts a **foreign origin**: a second HTTP
+origin that the harness owns, on the address that a preview uses
+(`127.0.0.1`). It answers every request with a unique marker, allows
+cross-origin reads and counts its connections. The runner first reads the
+marker itself. That read is a control: it shows that the origin serves. The
+foreign origin stands for every origin other than a preview; no probe contacts
+a public host.
+
+The calls run in three agent turns, because the agent ends a turn after 64
+tool calls and a preview and a browser session live for one turn. The calls
+are:
 
 - controls that must work: write, read and `cat` a workspace file;
 - `read_file`, `view_image`, `edit_file` and `write_file` on the hidden source,
@@ -407,7 +422,12 @@ workspace. The calls are:
 - `run_command` with `cat`, `ls`, a symbolic link, a copy, an append and a new
   file, on the scratch copy and on the checkout copy;
 - `start_preview` of a hidden file;
-- the browser route (the game task always configures the browser):
+- the agent's other routes to a network, aimed at the foreign origin:
+  `run_command` with `curl`, `run_command` with a Node script that tries a
+  direct connection and a request through the sandbox proxy, and an
+  `openwebui_task` call that asks for `web_search`;
+- the browser route to the hidden file (the game task always configures the
+  browser):
   - a positive control: the agent writes pages in its workspace, starts a
     preview and opens it; the browser must show the page's nonce, through the
     host `url` or, for the browser container, the `containerUrl`;
@@ -416,23 +436,52 @@ workspace. The calls are:
     meta refresh and a script redirect, then history back. After each attempt
     the browser state is read (`browser_snapshot`, `browser_tabs`), and every
     read must succeed;
-  - browser-initiated navigation: `browser_navigate` to the hidden file,
-    `browser_tabs` `new` at the hidden file, and `browser_navigate` to another
-    origin. The permission policy must refuse all three.
+  - browser-initiated navigation: `browser_navigate` to the hidden file and
+    `browser_tabs` `new` at the hidden file. The permission policy must refuse
+    both;
+- the browser route to the foreign origin, under the host name through which
+  the browser read the first preview (`127.0.0.1` or `host.docker.internal`):
+  - positive controls: the agent writes a second set of pages, starts a
+    preview and opens it; the browser must show the nonce, and a click on a
+    button must change the page, so the preview is still playable;
+  - page-initiated requests to the foreign origin: a link, then history back
+    and `history.forward()`; a `location.href` change; a new-tab link and
+    `window.open`, each with tab listing and selection; a page with a meta
+    refresh and `location.replace`; and a page with a frame, an image, a style
+    sheet, a script, two `fetch` calls, `sendBeacon` and a WebSocket. After
+    each attempt the browser state is read, and every read must succeed;
+  - browser-initiated navigation: `browser_navigate` and `browser_tabs` `new`
+    at the foreign origin, one under each host name. The permission policy
+    must refuse both.
 
-Every probe that is not a control or a browser read must fail or show
-nothing, no result may reveal the hidden marker (or, outside the browser, the
-hidden file names), and the source seal must be unchanged afterwards. A
-control that does not work, a browser read that fails or a probe that did not
-run leaves isolation not established: the run does not start, or, after the
-attempt, the verdict is `unavailable`. The
-report keeps only the outcome and the first line of each refusal. The
-boundary that this demonstrates:
+Isolation is established only when all of the following hold:
+
+- every probe that is not a control or a browser read fails or shows nothing;
+- no result reveals the hidden marker (or, outside the browser, the hidden
+  file names) or the marker of the foreign origin;
+- the foreign origin served its marker to the runner and then counted no
+  connection;
+- the source seal is unchanged afterwards.
+
+A control that does not work, a browser read that fails or a probe that did
+not run leaves isolation not established. The run then does not start, or,
+after the attempt, the verdict is `unavailable`. The report keeps only the
+outcome and the first line of each refusal, and what the foreign origin saw
+(`isolation.foreignOrigin`: `served` and `reached`). The boundary that this
+demonstrates:
 
 - the file tools refuse paths outside the workspace;
 - the command sandbox denies reads of the home directory, `/tmp`, `$TMPDIR` and
   the agent state, except the workspace;
 - the runner approves no extra read or write paths and no escalation;
+- the runner approves no network connection of a sandboxed command, no
+  unsandboxed command and no Open WebUI server task, and it never enables
+  server tools;
+- the runner connects the agent only to the
+  [confined endpoint](browser.md#confined-sessions) of the browser wrapper:
+  `/mcp/confined` under `LONG_BENCHMARK_BROWSER_MCP_URL`. A browser session
+  there loads only origins that the agent opened through an approved
+  navigation;
 - the runner approves browser-initiated navigation (`browser_navigate`, and
   `browser_tabs` `new` with a URL) only to a preview that the agent started,
   allows `browser_tabs` otherwise only to list, select or close, and refuses
@@ -443,6 +492,11 @@ boundary that this demonstrates:
 - the preview serves only listed workspace files;
 - the browser container mounts no host directory. The probes do not rely on
   this: they pass with a browser on the host.
+
+The runner does not trust the name of the endpoint. A wrapper without the
+confined endpoint gives the agent no browser, so the controls fail. A browser
+that serves the endpoint but does not enforce the boundary reaches the foreign
+origin, so the probes fail. In both cases no session starts.
 
 The evaluator plays the reference and mutants before the session and the
 attempt after it ends, from memory; neither play-through uses the agent's tools
@@ -465,7 +519,7 @@ starts no session and exits with status 4:
 | `LONG_BENCHMARK_GAME_BROWSER`              | Evaluator browser: `container:NAME` (the browser container) or `local:/abs/chromium` (needs `npm ci --ignore-scripts` in `browser/`) |
 | `LONG_BENCHMARK_ACCEPTANCE_CHECKER`        | Absolute path of `lib/workstation/task_acceptance.py` in a stack checkout whose complete checker manifest matches `CHECKER_MANIFEST` (stack commit `59eac79`) |
 | `LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256` | Optional. SHA-256 that `task_acceptance.py` must have                                   |
-| `LONG_BENCHMARK_BROWSER_MCP_URL`           | The agent's browser: `http://127.0.0.1:PORT/mcp` of the browser container               |
+| `LONG_BENCHMARK_BROWSER_MCP_URL`           | The agent's browser: `http://127.0.0.1:PORT/mcp` of the browser container. The runner connects the agent to `/mcp/confined` under it; build the image from this checkout |
 
 The checker must implement the supported session protocol, its own `seal` of
 the copied source must equal the pinned seal, the reference and mutants must
@@ -505,7 +559,13 @@ It checks that the policy digest changes with the build, a file over 2 MiB, a
 dependency file, a link target, the package files and the configuration, and
 that a refusal is recognised only at the end of an error line. It also runs the runner without an
 evaluator and with a checker from before the protocol: the probes pass on the
-platform and the run stops before a session.
+platform and the run stops before a session. In that run the probes of the
+agent's other network routes go through the real agent and sandbox: `curl`,
+the Node script and the `openwebui_task` call all fail, and the foreign origin,
+after it served its marker to the runner, counts no connection. A second run
+gives the runner a browser address that serves `/mcp` only, as a wrapper from
+before the confined endpoint does: the agent gets no browser, isolation is not
+established and no session starts.
 
 With `LONG_BENCHMARK_ACCEPTANCE_CHECKER` set to a stack checkout, two more
 tests use the real checker without a browser. One runs a whole attempt through
@@ -515,21 +575,44 @@ that a one-shot `check` of the same attempt is `unavailable` with
 `protection:attempt-lifetime-not-established`. The other changes a checker
 file after the manifest was pinned; the session never becomes ready.
 
-In CI, unit tests cover the browser permission policy (navigation and new
-tabs only to the agent's preview, no other URL argument) and the judging of
-every browser probe kind: a missing preview control, a failed browser read, a
-skipped step, a marker in a page and a refused navigation that succeeded each
-leave isolation not established.
+In CI, unit tests cover the permission policy and the judging of every probe
+kind. The policy admits navigation and new tabs only to the agent's preview
+and no other URL argument. It admits the confined endpoint and no other MCP
+server, and it refuses a sandbox network connection, an unsandboxed command
+and a server task. A missing preview control, a page that does not respond to
+a click, a failed browser read, a skipped step, a marker in a page, a refused
+call that succeeded, a connection to the foreign origin and a foreign origin
+that did not serve its marker each leave isolation not established. The tests
+also check that each group of probes fits one agent turn, and that the pages
+for the foreign origin use the host name of the first preview.
 
-With `LONG_BENCHMARK_GAME_BROWSER=local:/abs/chromium` (skipped in CI), a test
-runs the repository's browser wrapper (`browser/`: its HTTP listener, owned
-connection, settings and the pinned `@playwright/mcp` tools) on host loopback
-with that Chromium. A browser on the host is the worst case: it could read
-host files. The test shows that the wrapper refuses browser-initiated `file:`
-navigation by itself, and runs the runner's isolation probes through the agent
-with that browser: the preview control passes, every page-initiated attempt
-runs without reaching the hidden file, and the policy refuses every
-browser-initiated one.
+With `LONG_BENCHMARK_GAME_BROWSER=local:/abs/chromium` (skipped in CI), three
+tests run the repository's browser wrapper (`browser/`: its HTTP listener,
+owned connection, origin boundary, settings and the pinned `@playwright/mcp`
+tools) on host loopback with that Chromium. A browser on the host is the worst
+case: it could read host files and every local origin.
+
+- The first test shows that the wrapper refuses browser-initiated `file:`
+  navigation by itself, and runs the runner's isolation probes through the
+  agent with that browser. Both preview controls pass and the click control
+  passes. Every page-initiated attempt runs, as a completed tool call, without
+  reaching the hidden file or the foreign origin. The policy refuses every
+  browser-initiated one, and the foreign origin counts no connection.
+- The second test uses the wrapper without the agent. An MCP client opens a
+  page on one harness-owned origin in a confined session. That page has no
+  content security policy and tries a link, an HTTP redirect, a location
+  change, a meta refresh, history, a new-tab link, `window.open`, a frame, an
+  image, a script, `fetch` and a WebSocket to the foreign origin, also from a
+  second browser context. The session reads and operates the opened page, no
+  tool result holds the marker and the foreign origin counts no connection. An
+  ordinary session of the same wrapper then follows the same link and reads
+  the marker, which shows that the attempts were real and that ordinary
+  sessions are unchanged.
+- The third test removes the boundary from the same wrapper: its confined
+  endpoint opens ordinary sessions. The runner's probes then read the foreign
+  origin through the link, history, the location change, the new tabs and the
+  redirect page, the foreign origin counts a connection, and the run stops
+  with status 4 before a session.
 
 One test needs the checker and an evaluator browser, and a real agent browser:
 `LONG_BENCHMARK_GAME_BROWSER=local:/abs/chromium` (the wrapper as above) or
@@ -540,10 +623,14 @@ scripted model:
 - a model that writes the reference and plays it (preview, navigation, a click
   on a light by its snapshot reference, a page read) is `accepted` (13
   passed) and the play-test is observed;
+- before that successful interaction, a stale-reference `browser_click`
+  returns MCP `isError: true` in a completed ACP call. The report must count
+  exactly one browser failure, grouped as `browser/browser_click: MCP isError`;
 - a model that writes the `no-lock` mutant without playing it is `rejected`
   with `external_state:solved-locked`, and no play-test is observed;
-- in both, isolation including the browser route is established before and
-  after the attempt, and the session lists no unprobed route.
+- in both, isolation including the browser route and the other network routes
+  is established before and after the attempt, the foreign origin counts no
+  connection, and the session lists no unprobed route.
 
 **Limits.**
 
@@ -560,9 +647,20 @@ scripted model:
   runner's: it keeps the build, dependencies, harness code and configuration
   fixed for the attempt and checks their digest before it sends the
   observation.
-- The browser is probed by the harness, not by the checker (see the checker
-  session, step 3). Pages served by other processes on the host are outside
-  the harness: the hidden files are served by none of its processes.
+- The browser and the other network routes are probed by the harness, not by
+  the checker (see the checker session, step 3).
+- The origin boundary is the browser wrapper's, and the probes establish it
+  by behaviour for the configured browser before and after each attempt. The
+  browser container was not run on the development machine for this change;
+  the browser container workflow runs the wrapper's smoke check, which
+  includes the confined endpoint, in the container.
+- The foreign origin stands for every other origin, and it speaks plain HTTP.
+  HTTPS is covered by the wrapper's tests (the boundary opens no tunnel), not
+  by a probe of a public host.
+- The inference server is outside the harness. The runner never enables
+  server tools and the agent sends no server-tool fields with a coding
+  request, but the harness cannot observe a tool that a server gives a model
+  by itself.
 - Each probe phase takes a few hundred tool calls; on macOS each sandboxed
   command takes about 0.4 s, so a phase takes about two minutes.
 - The probes demonstrate the boundary on the platform where they run. The

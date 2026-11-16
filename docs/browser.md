@@ -60,7 +60,10 @@ are resolved during the image build. Build the image locally; no prebuilt image 
 `host.docker.internal` routing. It verifies navigation, finding controls, typing,
 clicking, text snapshots and six successive fresh MCP browser sessions. The
 repeated sessions exercise browser cleanup under the container's existing PID
-limit. It does not call public web services or make a model inference request.
+limit. It also checks the [confined endpoint](#confined-sessions) with a second
+fixture origin: an ordinary session follows a link to it, and a confined session
+reaches it neither by that link nor by a redirect.
+It does not call public web services or make a model inference request.
 This is a direct MCP smoke check; interactive ACP/IDE acceptance is separate.
 
 Stop this package's container when it is no longer needed:
@@ -199,9 +202,62 @@ A malicious local page can redirect, load remote resources, submit a form or
 make requests from page scripts. Checking the initial URL cannot confine those
 effects to localhost. A server can also attach effects to a nominally read-only
 tool. Before reducing approvals, implement and test an origin boundary that
-covers those paths. Static preview does not grant a browser session trust. The current
+covers those paths. A [confined session](#confined-sessions) has such a boundary
+in the wrapper; the agent does not use it to reduce approvals. Static preview
+does not grant a browser session trust. The current
 per-call approvals, tool allowlist and download/code-execution restrictions stay
 in force.
+
+## Confined sessions
+
+The wrapper serves a second endpoint, `http://127.0.0.1:8931/mcp/confined`. A
+session opened there has an origin boundary. A session opened at `/mcp` is an
+ordinary session and is unchanged. A session keeps the endpoint that opened it.
+
+In a confined session:
+
+- An origin becomes allowed when the MCP client opens a plain-HTTP URL there
+  with `browser_navigate`, or with `browser_tabs` `new` and a `url`. Nothing
+  that a page does allows an origin.
+- The browser loads allowed origins only. A link, a new tab, `window.open`, a
+  location change, a meta refresh, an HTTP redirect, a frame, a subresource, a
+  script request, a history step and a second browser context all fail for
+  every other origin. A blocked page shows
+  `Blocked by the browser origin boundary`.
+- HTTPS and WebSocket connections fail for every origin, because the boundary
+  opens no tunnel.
+
+The wrapper enforces the boundary at the network. Each confined session has its
+own loopback proxy in the wrapper process, and its Chromium sends every request
+through that proxy, loopback addresses included (`<-loopback>`). The proxy
+forwards plain HTTP to allowed origins. It refuses every other request and
+every `CONNECT`. It replaces a proxy configured through `HTTP_PROXY` or
+`HTTPS_PROXY` for that session and connects to allowed origins directly.
+
+Request interception does not give this boundary. In the pinned Playwright
+(`1.66.0-alpha-2026-11-09`), route handlers do not receive a redirect hop or a
+WebSocket handshake. Upstream's `network.allowedOrigins` option uses route
+handlers. In a run with Chromium on 2026-11-16, a redirect from an allowed
+origin and a WebSocket both reached another origin under that option, and
+neither did through the proxy.
+
+Limits:
+
+- The boundary trusts the client's own navigation. It does not decide which
+  origins a client may open; the client's approval of each call does.
+- `file:` URLs do not use a proxy. As in an ordinary session, the pinned MCP
+  server refuses browser-initiated `file:` navigation, and Chromium does not
+  load a `file:` URL from a web page.
+- WebRTC, WebTransport and DNS lookups were not tested. None of them reads an
+  ordinary HTTP or HTTPS resource.
+- The endpoint has no authentication, like `/mcp`.
+- An image that was built before this endpoint existed does not serve it, and
+  the image tag did not change. Build the image again after you update the
+  checkout.
+
+`npm test` covers the proxy, the endpoint and the session wiring without a
+browser. The smoke check and the long-benchmark tests in
+[testing](verification.md#interactive-game-task) use Chromium.
 
 ## Isolation and trust limits
 
@@ -221,11 +277,13 @@ runtime is the boundary. Playwright MCP itself is not a security boundary. The
 macOS agent sandbox is not applied to the container's browser or its network.
 The container can make outbound Internet and LAN requests permitted by Docker
 and the host network. It does not use the agent's per-host/per-port proxy approval.
+The browser of a [confined session](#confined-sessions) can reach only the
+origins that its client opened.
 
-The HTTP port is published only at `127.0.0.1`. The wrapper accepts only `/mcp`,
-requires a loopback Host name, rejects duplicate Host headers, rejects Origin
-headers and cross-site/same-site fetch metadata, and bounds JSON requests and
-concurrent sessions. These checks reduce browser-origin and DNS-rebinding access;
+The HTTP port is published only at `127.0.0.1`. The wrapper accepts only `/mcp`
+and `/mcp/confined`. It requires a loopback Host name, rejects duplicate Host
+headers, rejects Origin headers and cross-site/same-site fetch metadata, and
+bounds JSON requests and concurrent sessions. These checks reduce browser-origin and DNS-rebinding access;
 they are **not authentication**. Other local processes, or containers explicitly
 attached to this service's network, can reach the endpoint. This route is for
 one trusted local OS user. Do not expose the port to a LAN, shared host or remote

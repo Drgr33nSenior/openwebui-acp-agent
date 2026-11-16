@@ -530,9 +530,21 @@ if (args[0] === "--child") {
       report.toolCallsTotal++;
       if (u.title === "view_image") report.viewImage.calls++;
     }
+    const message = updateText(u);
+    let mcpError = false;
     if (
       u.sessionUpdate === "tool_call_update" &&
-      u.status === "failed" &&
+      u.status === "completed" &&
+      tools.get(u.toolCallId)?.startsWith("mcp_")
+    )
+      try {
+        mcpError = JSON.parse(message)?.isError === true;
+      } catch {
+        // A non-JSON result does not establish an MCP error.
+      }
+    if (
+      u.sessionUpdate === "tool_call_update" &&
+      (u.status === "failed" || mcpError) &&
       tools.has(u.toolCallId) &&
       !failed.has(u.toolCallId)
     ) {
@@ -542,19 +554,17 @@ if (args[0] === "--child") {
       report.toolFailuresByTool[name] =
         (report.toolFailuresByTool[name] ?? 0) + 1;
       if (name === "view_image") report.viewImage.failed++;
-      const message = (u.content ?? [])
-        .filter((c) => c.type === "content" && c.content.type === "text")
-        .map((c) => c.content.text)
-        .join("\n");
       if (/Checkpoint (storage budget exceeded|limit reached)/.test(message))
         report.checkpointBlocks++;
       const exit =
         name === "run_command" && message.match(/^\s*\{"code":\s*(-?\d+)/);
       if (exit && exit[1] !== "0") report.nonzeroCommandExits++;
       // Grouped by tool and failure; command output is not part of the key.
-      const key = exit
-        ? `${name}: exit code ${exit[1]}`
-        : name + ": " + sanitize(message.split("\n", 1)[0]).slice(0, 200);
+      const key = mcpError
+        ? `${name}: MCP isError`
+        : exit
+          ? `${name}: exit code ${exit[1]}`
+          : name + ": " + sanitize(message.split("\n", 1)[0]).slice(0, 200);
       report.toolFailures[key] = (report.toolFailures[key] ?? 0) + 1;
     }
     if (u.sessionUpdate === "agent_message_chunk" && u.content.type === "text")
@@ -904,7 +914,8 @@ async function inspect(workspace, state, sessionId, task) {
 //     in a stack checkout whose complete checker manifest matches
 //     GAME.CHECKER_MANIFEST (and whose bootstrap is GAME.CHECKER_SESSION)
 //   LONG_BENCHMARK_ACCEPTANCE_CHECKER_SHA256  optional pin of that file
-//   LONG_BENCHMARK_BROWSER_MCP_URL     http://127.0.0.1:PORT/mcp for the agent
+//   LONG_BENCHMARK_BROWSER_MCP_URL     http://127.0.0.1:PORT/mcp of the browser
+//     wrapper; the agent is connected to its confined endpoint only
 async function prepareGame(context) {
   const { root, workspace, state } = context;
   const setup = {
@@ -936,13 +947,18 @@ async function prepareGame(context) {
   else if (!/^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}\/mcp$/.test(mcpUrl))
     problem("LONG_BENCHMARK_BROWSER_MCP_URL must be http://127.0.0.1:PORT/mcp");
   else {
-    setup.browserMcp = mcpUrl;
-    // The browser wrapper's documented entry (browser/config.mjs --agent).
+    // The wrapper's confined endpoint: its browser loads only origins that
+    // the agent opens explicitly, and the policy admits only the agent's own
+    // preview. The isolation probes establish this for the configured
+    // browser before any session; a browser without it never gets one.
+    setup.browserMcp = GAME.confinedEndpoint(mcpUrl);
+    // Apart from that endpoint, the browser wrapper's documented entry
+    // (browser/config.mjs --agent).
     mcpJson = [
       {
         type: "http",
         name: "browser",
-        url: mcpUrl,
+        url: setup.browserMcp,
         headersFrom: {},
         options: {
           includeTools: [...BROWSER_TOOLS],
@@ -1017,10 +1033,11 @@ async function prepareGame(context) {
 }
 
 // Isolation probes: a scripted fake model sends tool calls through the same
-// agent build, child wrapper, permission policy and sandbox as the evaluated
-// session, from a sibling workspace, while the hidden source sits where it
-// stays during that session. Only pass/fail per probe is kept; tool output is
-// discarded so that a leak cannot reach the report.
+// agent build, child wrapper, permission policy, sandbox and browser endpoint
+// as the evaluated session, from a sibling workspace, while the hidden source
+// sits where it stays during that session and the harness's foreign origin
+// listens. Only pass/fail per probe is kept; tool output is discarded so that
+// a leak cannot reach the report.
 async function runProbes({
   root,
   name = "probe",
@@ -1046,6 +1063,10 @@ async function runProbes({
   )
     repoHidden.push(agentCopy);
   const nonce = randomUUID();
+  // The foreign origin: what every network route is aimed at. It must serve
+  // its marker to the harness and to nothing else.
+  const foreign = await GAME.startForeignOrigin();
+  const served = await foreign.serves();
   const plan = GAME.probePlan({
     workspace,
     acceptance: setup.acceptance,
@@ -1053,8 +1074,11 @@ async function runProbes({
     repoHidden,
     nonce,
     browser: Boolean(mcpJson),
+    foreignPort: foreign.port,
   });
-  const queue = [...plan];
+  // One agent turn per group of probes; the scripted model serves `queue`.
+  const turns = [...new Set(plan.map((p) => p.turn ?? 0))];
+  let queue = [];
   // Computed browser steps share what earlier results showed (the preview).
   const memo = {};
   let previous = null;
@@ -1148,10 +1172,18 @@ async function runProbes({
   const tools = new Map(),
     previewOrigins = new Set(),
     app = new ClientApp();
+  // What the agent itself said: the reason when it could not start a turn.
+  let said = "";
   app.onNotification("session/update", ({ params }) => {
     const u = params.update;
     trackPreview(u, tools, previewOrigins);
     if (u.sessionUpdate === "tool_call") tools.set(u.toolCallId, u.title);
+    if (
+      u.sessionUpdate === "agent_message_chunk" &&
+      u.content?.type === "text" &&
+      said.length < 2000
+    )
+      said += u.content.text;
     if (
       u.sessionUpdate === "tool_call_update" &&
       ["completed", "failed"].includes(u.status) &&
@@ -1188,10 +1220,16 @@ async function runProbes({
       cwd: workspace,
       mcpServers: [],
     });
-    await connection.agent.request("session/prompt", {
-      sessionId,
-      prompt: [{ type: "text", text: "Run the isolation probe." }],
-    });
+    for (const turn of turns) {
+      queue = plan.filter((p) => (p.turn ?? 0) === turn);
+      const before = Object.keys(outcomes).length;
+      await connection.agent.request("session/prompt", {
+        sessionId,
+        prompt: [{ type: "text", text: "Run the isolation probe." }],
+      });
+      // A turn without one tool call: the agent cannot run probes.
+      if (Object.keys(outcomes).length === before) break;
+    }
   } catch (e) {
     error = String(e?.message ?? e).slice(0, 300);
   } finally {
@@ -1201,6 +1239,21 @@ async function runProbes({
     server.closeAllConnections();
     await new Promise((r) => server.close(r));
   }
+  // Without one tool call the agent never asked the scripted model: for
+  // example, it could not connect the configured browser endpoint.
+  if (!error && !Object.keys(outcomes).length)
+    error = `no probe ran; the agent said: ${
+      said
+        .trim()
+        .split("\n", 1)[0]
+        .replaceAll(root, "[SCRATCH]")
+        .replaceAll(homedir(), "[HOME]")
+        .slice(0, 240) || "nothing"
+    }`;
+  // The browser and the agent are gone or idle: what the foreign origin
+  // counted is final.
+  const reached = foreign.reached();
+  await foreign.close();
   const after = await GAME.readTree(setup.acceptance, { strict: false });
   const sealUnchanged =
     after.refused.length === 0 && GAME.sealOf(after.files) === GAME.GAME_SEAL;
@@ -1219,10 +1272,12 @@ async function runProbes({
     sealUnchanged,
     created,
     repoUnchanged,
+    foreign: { marker: foreign.marker, served, reached },
   });
   if (error) {
     judged.established = false;
-    judged.findings.push(`probe session failed: ${error}`);
+    // First: it explains the probes that did not run.
+    judged.findings.unshift(`probe session failed: ${error}`);
   }
   return {
     ...judged,
@@ -1242,13 +1297,19 @@ async function runProbes({
           {
             kind: p.kind,
             ok: o?.ok ?? null,
-            ...(o && !o.ok && !line.includes(setup.source.script.marker)
+            ...(o &&
+            !o.ok &&
+            !line.includes(setup.source.script.marker) &&
+            !line.includes(foreign.marker)
               ? { reason: line }
               : {}),
           },
         ];
       }),
     ),
+    // The foreign origin: served its marker to the harness (the control) and
+    // the connections it counted from anything else during the probes.
+    foreignOrigin: { served, reached },
     paths: {
       workspaceSibling: true,
       repositorySources: repoHidden.length,

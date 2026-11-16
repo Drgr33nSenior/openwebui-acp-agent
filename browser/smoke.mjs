@@ -33,13 +33,38 @@ assert.ok(
 const allowed = JSON.parse(
   await readFile(new URL("./allowed-tools.json", import.meta.url), "utf8"),
 );
-let fixtureRequests = 0;
-const fixture = http.createServer((_req, res) => {
-  fixtureRequests++;
+// A second origin for the origin-boundary check: it serves a marker and
+// counts its connections.
+const marker = `second-origin-${Math.random().toString(36).slice(2)}`;
+let elsewhereConnections = 0;
+const elsewhere = http.createServer((_req, res) => {
   res.writeHead(200, {
     "Content-Type": "text/html",
     "Cache-Control": "no-store",
   });
+  res.end(`<!doctype html><title>Elsewhere</title><p>${marker}</p>`);
+});
+elsewhere.on("connection", () => elsewhereConnections++);
+await new Promise((resolve) => elsewhere.listen(0, "127.0.0.1", resolve));
+const second = `http://${fixtureHost}:${elsewhere.address().port}/`;
+let fixtureRequests = 0;
+const fixture = http.createServer((req, res) => {
+  fixtureRequests++;
+  if (req.url === "/hop") {
+    res.writeHead(302, {
+      Location: `${second}hop`,
+      "Cache-Control": "no-store",
+    });
+    return res.end();
+  }
+  res.writeHead(200, {
+    "Content-Type": "text/html",
+    "Cache-Control": "no-store",
+  });
+  if (req.url === "/boundary")
+    return res.end(
+      `<!doctype html><html lang="en"><title>Boundary fixture</title><p>Boundary fixture</p><a href="${second}link">Elsewhere</a></html>`,
+    );
   res.end(`<!doctype html><html lang="en"><title>Browser fixture</title><label>Name<input aria-label="Name"></label><button>Save</button><output role="status">Fresh profile</output><script>
     const input = document.querySelector('input');
     const output = document.querySelector('output');
@@ -50,8 +75,8 @@ const fixture = http.createServer((_req, res) => {
 });
 await new Promise((resolve) => fixture.listen(0, "127.0.0.1", resolve));
 const target = `http://${fixtureHost}:${fixture.address().port}/`;
-async function connect() {
-  const transport = new StreamableHTTPClientTransport(url, {
+async function connect(endpointUrl = url) {
+  const transport = new StreamableHTTPClientTransport(endpointUrl, {
     fetch: (input, init) =>
       fetch(input, {
         ...init,
@@ -153,12 +178,47 @@ try {
     await session.close();
     session = undefined;
   }
+  // Origin boundary. Control: the second origin serves its marker to this
+  // script, and an ordinary session follows the fixture's link to it.
+  const direct = await fetch(`http://127.0.0.1:${elsewhere.address().port}/`);
+  assert.ok((await direct.text()).includes(marker));
+  const follow = async () => {
+    await call("browser_navigate", { url: `${target}boundary` });
+    const page = await call("browser_snapshot", {});
+    assert.match(page, /Boundary fixture/);
+    await call("browser_click", {
+      target: ref(page, "link", "Elsewhere"),
+      element: "Link to the second origin",
+    });
+    return call("browser_snapshot", {});
+  };
+  session = await connect();
+  assert.ok((await follow()).includes(marker), "Ordinary sessions changed");
+  await session.close();
+  // A session of the confined endpoint reads the same fixture, but neither
+  // its link nor a redirect from it reaches the second origin.
+  elsewhereConnections = 0;
+  session = await connect(new URL(`${url.href}/confined`));
+  const seen = [await follow()];
+  seen.push(await call("browser_navigate", { url: `${target}hop` }));
+  seen.push(await call("browser_snapshot", {}));
+  await session.close();
+  session = undefined;
+  for (const text of seen)
+    assert.ok(!text.includes(marker), "Confined session read another origin");
+  assert.match(seen[0], /Blocked by the browser origin boundary/);
+  assert.match(seen[2], /Blocked by the browser origin boundary/);
+  assert.equal(
+    elsewhereConnections,
+    0,
+    "Confined session reached another origin",
+  );
   console.log(
     JSON.stringify({
       smoke: "passed",
       toolsCalled: calls,
       fixtureRequests,
-      sessions: 6,
+      sessions: 8,
       checks: [
         "navigate",
         "find",
@@ -166,12 +226,16 @@ try {
         "click",
         "snapshot",
         "six successive isolated sessions",
+        "ordinary session follows a link to a second origin",
+        "confined session reaches no second origin by link or redirect",
       ],
       externalServices: false,
     }),
   );
 } finally {
   await session?.close();
-  fixture.closeAllConnections();
-  await new Promise((resolve) => fixture.close(resolve));
+  for (const server of [fixture, elsewhere]) {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
 }

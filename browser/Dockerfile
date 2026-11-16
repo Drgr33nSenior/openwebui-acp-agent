@@ -5,7 +5,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --omit=dev --no-audit \
     && node node_modules/playwright/cli.js install --with-deps --only-shell chromium \
     && rm -rf /var/lib/apt/lists/* /root/.npm
-COPY index.mjs worker.mjs server.mjs connection.mjs settings.mjs allowed-tools.json ./
+COPY index.mjs worker.mjs server.mjs connection.mjs boundary.mjs settings.mjs allowed-tools.json ./
 RUN mkdir -p /workspace && chmod -R a-w /opt/openwebui-browser
 USER node
 WORKDIR /workspace
