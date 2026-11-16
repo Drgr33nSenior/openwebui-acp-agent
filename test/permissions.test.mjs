@@ -1442,19 +1442,26 @@ async function closeAndAssertNoFixtureServers(t) {
         } catch {
           /* Already exited. */
         }
+    for (const pid of pids) fixturePids.delete(pid);
   }
-  for (const pid of pids) fixturePids.delete(pid);
 }
-// Backstop for an interrupted run: tests that never reach their teardown must
-// not leave loopback listeners behind.
-process.once("exit", () => {
+// Backstop for a run that ends before teardown: kill recorded fixture groups on
+// exit, and on SIGINT/SIGTERM (which skip "exit" handlers) kill them and then
+// re-raise the signal with the default disposition. SIGKILL cannot be caught.
+const killFixtureGroups = () => {
   for (const pid of fixturePids)
     try {
       process.kill(-pid, "SIGKILL");
     } catch {
       /* Already exited. */
     }
-});
+};
+process.once("exit", killFixtureGroups);
+for (const sig of ["SIGINT", "SIGTERM"])
+  process.once(sig, () => {
+    killFixtureGroups();
+    process.kill(process.pid, sig);
+  });
 // An unsandboxed background job (explicit escalation) that serves loopback.
 async function startOwnServer({ c, cwd }) {
   await invoke(c, [
