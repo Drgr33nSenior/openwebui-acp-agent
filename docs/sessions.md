@@ -114,13 +114,15 @@ the completion count is split by the characters received as reasoning and as
 visible output. It does not sum billing totals or estimate missing counts.
 Client rendering can retain an old value until the next usage update.
 
-At the `xhigh` reasoning effort the agent sends `max_tokens` itself: 32,768, or
-the advertised `max_output_tokens` when larger, and never more than half the
+At the `xhigh` reasoning effort the agent sends `max_tokens` itself: the
+advertised `max_output_tokens`, or 32,768 when absent, and never more than half the
 advertised `context_window`. A server that leaves that level uncapped would
 otherwise let one reply think until the window is full. The same amount is
 reserved when requests are sized. Other levels send no `max_tokens`, and a
 model without an advertised `context_window` gets none. 32,768 is a fixed
-figure, not a measured percentile of reply sizes.
+figure, not a measured percentile of reply sizes. An explicit cap must respect
+the advertised output limit even if the server permits uncapped replies when
+the parameter is omitted. Reasoning effort remains `xhigh`.
 
 ### Clearing older tool results
 

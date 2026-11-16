@@ -83,8 +83,9 @@ const CAPPED_EFFORT = "xhigh";
 // The cap for one coding request, or undefined to send none. It needs the
 // declared reasoning_effort level and an explicit context_window: a cap is
 // never guessed from a model name, and never set where the window it must fit
-// is unknown. It is at least the advertised allowance and at most half the
-// window, so input and reply both remain possible.
+// is unknown. An advertised output limit also bounds explicit requests, even
+// when the server allows uncapped replies if max_tokens is omitted. Otherwise
+// use the fixed fallback. Half the window remains available for input.
 export function replyTokenCap(
   effort: string | undefined,
   model: unknown,
@@ -98,7 +99,7 @@ export function replyTokenCap(
   return Math.max(
     1,
     Math.min(
-      Math.max(XHIGH_OUTPUT_TOKENS, outputAllowance(model) ?? 0),
+      outputAllowance(model) ?? XHIGH_OUTPUT_TOKENS,
       Math.floor(window.data / 2),
     ),
   );
