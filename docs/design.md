@@ -226,7 +226,7 @@ Shapes that exist only there are deferred.
 ## Context and verification
 
 Stable v1 `usage_update` reports validated latest-call counts (prompt plus
-visible completion; reasoning excluded) against advertised
+visible completion, plus reasoning when replay is declared) against advertised
 `context_window`, falling back to `max_input_tokens`. Missing data produces no
 invented percentage. `PromptResponse.usage` is not sent: it is unstable in ACP v1
 and its per-turn or cumulative meaning is unsettled upstream
@@ -344,10 +344,13 @@ website examples can describe different protocol or server versions.
 
 The client retains string `reasoning_content` (or the response alias `reasoning`)
 separately from assistant `content`. It never renders structured reasoning as
-assistant text. Conflicting aliases and non-string fields reject the reply before
-any tool executes. Reasoning retention is limited to 1,000,000 characters per
+assistant text. For declared replay providers, conflicting aliases and non-string
+fields reject the reply before any tool executes. Reasoning retention is limited
+to 1,000,000 characters per
 reply, independently of the visible-output limit. Exceeding that limit rejects
-the reply; the client does not replay a partial reasoning prefix.
+a declared replay reply. Undeclared providers retain tolerance of ignored shapes
+and aliases; overflow drops the whole private field without rejecting the reply.
+The client never replays a partial reasoning prefix.
 
 An `api/models` entry must declare
 `provider_capabilities: { "reasoning_replay": "reasoning_content" }` to enable
@@ -369,3 +372,15 @@ shortening visible history. Structured reasoning does not appear in ACP
 updates, tool diagnostics or telemetry. Providers that embed reasoning directly
 in `content` remain responsible for their content format; this contract covers
 separate structured fields only.
+
+Request construction, token-ratio calibration, masking and compaction estimates
+use the same capability-filtered messages. Retained but unsent reasoning does not
+consume the outgoing context budget. The usage meter includes completion reasoning
+only when it is retained for declared replay. Discovery refresh replaces previous
+declarations.
+
+Current limitation: stored reasoning has no producing-model identifier. Switching
+to another replay-enabled model can send reasoning produced by the previous model.
+A provenance restriction needs a session-format and migration decision. Older
+clients with strict message schemas may reject records containing reasoning fields;
+backward downgrade compatibility is not guaranteed or tested here.

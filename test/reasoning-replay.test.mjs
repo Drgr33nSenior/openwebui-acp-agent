@@ -151,6 +151,12 @@ test("missing, unknown and revoked declarations strip private fields for strict 
 });
 test("reasoning is redacted, independently bounded and counted in outgoing context", async () => {
   const b = backend();
+  b.setModelMetadata([
+    {
+      id: config.model,
+      provider_capabilities: { reasoning_replay: "reasoning_content" },
+    },
+  ]);
   reply = sse([
     { reasoning_content: "fixture-" },
     { reasoning_content: "private-key hidden" },
@@ -176,6 +182,12 @@ test("reasoning is redacted, independently bounded and counted in outgoing conte
 });
 test("malformed reasoning, conflicting aliases, duplicate tool IDs and interrupted replies never return executable history", async () => {
   const b = backend();
+  b.setModelMetadata([
+    {
+      id: config.model,
+      provider_capabilities: { reasoning_replay: "reasoning_content" },
+    },
+  ]);
   for (const message of [
     { content: "", reasoning_content: {}, tool_calls: [call("a")] },
     {
@@ -333,3 +345,191 @@ test("ACP executes each new tool once and replays private reasoning without rend
     await agent.close();
   }
 });
+
+for (const scenario of [
+  "undeclared",
+  "large-undeclared",
+  "opt-in",
+  "declared",
+  "malformed",
+  "aliases",
+  "overflow",
+  "revoked",
+]) {
+  test(`ACP effective context and reply tolerance: ${scenario}`, async () => {
+    const { ClientApp } = await import("@agentclientprotocol/sdk");
+    const { createAgent } = await import("../dist/agent.js");
+    const workspace = join(temp, `context-${scenario}`);
+    await mkdir(workspace);
+    await writeJson("config.json", config);
+    const declared = scenario === "declared" || scenario === "revoked";
+    metadata = [
+      {
+        id: config.model,
+        context_window: 40000,
+        max_input_tokens: 30000,
+        ...(declared
+          ? { provider_capabilities: { reasoning_replay: "reasoning_content" } }
+          : {}),
+      },
+    ];
+    requests = [];
+    reply = (_req, res) => {
+      const round = requests.length - 1;
+      const prompt = Math.ceil(
+        (JSON.stringify(requests.at(-1).messages).length +
+          JSON.stringify(requests.at(-1).tools).length) /
+          4,
+      );
+      const reasoning =
+        scenario === "malformed"
+          ? { reasoning: { ignored: true } }
+          : scenario === "aliases"
+            ? { reasoning_content: "", reasoning: "ignored" }
+            : {
+                reasoning_content:
+                  "synthetic-private-" +
+                  "x".repeat(
+                    scenario === "overflow"
+                      ? MAX
+                      : scenario === "large-undeclared"
+                        ? 800000
+                        : 200000,
+                  ),
+              };
+      res.setHeader("content-type", "text/event-stream");
+      res.end(
+        `data: ${JSON.stringify({ choices: [{ delta: round === 0 ? { ...reasoning, tool_calls: [{ ...call("context-tool"), index: 0 }] } : { content: "done" }, finish_reason: round === 0 ? "tool_calls" : "stop" }], usage: { prompt_tokens: prompt, completion_tokens: 100, completion_tokens_details: { reasoning_tokens: 90 } } })}\n\ndata: [DONE]\n\n`,
+      );
+    };
+    const agent = createAgent();
+    const updates = [];
+    const connection = new ClientApp()
+      .onRequest("session/request_permission", () => ({
+        outcome: { outcome: "selected", optionId: "once" },
+      }))
+      .onNotification("session/update", ({ params }) =>
+        updates.push(params.update),
+      )
+      .connect(agent.app);
+    try {
+      await connection.agent.request("initialize", { protocolVersion: 1 });
+      const session = await connection.agent.request("session/new", {
+        cwd: workspace,
+        mcpServers: [],
+      });
+      const prompt = (text) =>
+        connection.agent.request("session/prompt", {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text }],
+        });
+      if (scenario === "revoked") {
+        metadata = [
+          { id: config.model, context_window: 40000, max_input_tokens: 30000 },
+        ];
+        await prompt(`/model ${config.model}`);
+      }
+      if (scenario === "opt-in") {
+        metadata[0].provider_capabilities = {
+          reasoning_replay: "reasoning_content",
+        };
+        await prompt(`/model ${config.model}`);
+      }
+      const sendsReasoning = scenario === "declared" || scenario === "opt-in";
+      await prompt("list files");
+      assert.equal(requests.length, sendsReasoning ? 1 : 2);
+      const visible = JSON.stringify(updates);
+      assert.equal(visible.includes("synthetic-private-"), false);
+      assert.equal(visible.includes("Context is full"), sendsReasoning);
+      assert.equal(
+        updates.filter(
+          (u) =>
+            u.sessionUpdate === "tool_call" && u.toolCallId === "context-tool",
+        ).length,
+        1,
+      );
+      if (!sendsReasoning) {
+        assert.equal(
+          requests[1].messages.some((m) => m.reasoning_content !== undefined),
+          false,
+        );
+        assert.equal(visible.includes("Compacting model context"), false);
+        assert.equal(visible.includes("context_mask"), false);
+        // A third request checks the ratio calibrated on the second request.
+        await prompt("continue");
+        assert.equal(requests.length, 3);
+      }
+      const usage = updates.find((u) => u.sessionUpdate === "usage_update");
+      const firstPrompt = Math.ceil(
+        (JSON.stringify(requests[0].messages).length +
+          JSON.stringify(requests[0].tools).length) /
+          4,
+      );
+      assert.equal(usage.used, firstPrompt + (sendsReasoning ? 100 : 10));
+      if (scenario === "declared") {
+        metadata = [
+          { id: config.model, context_window: 40000, max_input_tokens: 30000 },
+        ];
+        await prompt(`/model ${config.model}`);
+        await prompt("continue after revocation");
+        assert.equal(requests.length, 2);
+        assert.equal(
+          requests[1].messages.some((m) => m.reasoning_content !== undefined),
+          false,
+        );
+        assert.equal(
+          updates.filter(
+            (u) =>
+              u.sessionUpdate === "tool_call" &&
+              u.toolCallId === "context-tool",
+          ).length,
+          1,
+        );
+      }
+    } finally {
+      connection.close();
+      await agent.close();
+    }
+  });
+}
+
+for (const streaming of [false, true]) {
+  test(`ignored reasoning shapes remain compatible (${streaming ? "SSE" : "JSON"})`, async () => {
+    const b = backend();
+    for (const reasoning of [
+      { reasoning: {} },
+      { reasoning: 7 },
+      { reasoning_content: "", reasoning: "alias" },
+      { reasoning_content: "first", reasoning: "second" },
+    ]) {
+      const message = {
+        content: "visible",
+        ...reasoning,
+        tool_calls: [call("tolerated")],
+      };
+      reply = streaming
+        ? sse([
+            {
+              ...message,
+              tool_calls: message.tool_calls.map((c, index) => ({
+                ...c,
+                index,
+              })),
+            },
+          ])
+        : json(message);
+      assert.deepEqual((await complete(b)).tool_calls, [call("tolerated")]);
+      b.setModelMetadata([
+        {
+          id: config.model,
+          provider_capabilities: { reasoning_replay: "reasoning_content" },
+        },
+      ]);
+      await assert.rejects(
+        complete(b),
+        /Malformed reasoning|Conflicting reasoning aliases/,
+      );
+      b.setModelMetadata([{ id: config.model }]);
+    }
+  });
+}

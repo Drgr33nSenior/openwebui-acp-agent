@@ -881,7 +881,7 @@ export function createAgent(
     await text(
       client,
       s,
-      `\n\n[Older tool output was trimmed from this session's saved copy to keep it within ${SESSION_RECORD_BYTES / 1_000_000} MB. This conversation is unchanged until you reopen it; reopened history shows trimmed entries with a marker. File checkpoints for /undo and /rewind are kept exactly.]\n`,
+      `\n\n[Older tool output or private reasoning was trimmed from this session's saved copy to keep it within ${SESSION_RECORD_BYTES / 1_000_000} MB. This conversation is unchanged until you reopen it; trimmed visible entries have a marker, and removed private reasoning is omitted. File checkpoints for /undo and /rewind are kept exactly.]\n`,
     );
   };
   // Records undo history an edit cost: checkpoints evicted to make room, or an
@@ -965,8 +965,12 @@ export function createAgent(
     );
   // The transcript as the model is sent it: same messages and indexes, with
   // older tool observations masked.
-  const modelView = (s: Session) =>
-    applyMask(s.messages, s.mask, s.failedToolCalls);
+  const modelView = (s: Session) => {
+    s.backend.setModelMetadata(s.metadata);
+    return s.backend.requestMessages(
+      applyMask(s.messages, s.mask, s.failedToolCalls),
+    );
+  };
   // The session's reply cap, when its reasoning level needs an explicit one.
   const replyCap = (s: Session) =>
     replyTokenCap(
@@ -3742,7 +3746,7 @@ export function createAgent(
                 replyTokenCap: replyCap(s) ?? null,
                 contextMask: s.mask,
                 contextUsageBasis:
-                  "Latest reported prompt plus visible completion tokens (reasoning excluded) against advertised context_window, or max_input_tokens when unavailable; not a live tokenizer estimate or cumulative usage",
+                  "Latest reported prompt plus retained completion tokens (reasoning included only for declared replay) against advertised context_window, or max_input_tokens when unavailable; not a live tokenizer estimate or cumulative usage",
                 approvalReviewer: s.reviewer,
                 administratorPolicy: s.administrator,
                 reasoningChoices: s.choices,

@@ -952,7 +952,7 @@ function addSummarizedTurns(c, turns) {
   };
 }
 const trimmedNotice =
-  /Older tool output was trimmed from this session's saved copy/g;
+  /Older tool output or private reasoning was trimmed from this session's saved copy/g;
 
 test("saving trims only the stored copy, redacts excerpts and tells the user once", async () => {
   const c = await client();
@@ -1187,6 +1187,32 @@ test("without the notices capability no notice is sent", async () => {
       ),
     );
     assert(!c.updates.some((u) => u.update.sessionUpdate === "notice"));
+  } finally {
+    await c.close();
+  }
+});
+
+test("reasoning-only storage trimming uses the private-reasoning notice", async () => {
+  const c = await client();
+  try {
+    await c.prompt("start");
+    const history = Array.from({ length: 9 }, () => ({
+      role: "assistant",
+      content: "visible",
+      reasoning_content: "synthetic-private-" + "x".repeat(999000),
+    }));
+    addSummarizedTurns(c, history);
+    c.updates.length = 0;
+    await c.prompt("next");
+    const saved = await readJson(`session-${c.id}.json`);
+    assert(saved.messages.filter((m) => m.reasoning_content).length < 9);
+    assert.equal(
+      c.state().messages.filter((m) => m.reasoning_content).length,
+      9,
+    );
+    assert.equal(texts(c.updates).match(trimmedNotice)?.length, 1);
+    assert.equal(texts(c.updates).includes("synthetic-private-"), false);
+    assert(saved.messages.filter((m) => m.content === "visible").length === 9);
   } finally {
     await c.close();
   }

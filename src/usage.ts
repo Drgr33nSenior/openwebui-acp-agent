@@ -124,8 +124,7 @@ export function promptContextTokens(usage: unknown): number | undefined {
 }
 
 // Context the conversation occupies after this call: its prompt plus the
-// visible reply. Reasoning is generated once and never sent back, so it is not
-// part of the next request and must not fill the meter or trigger compaction.
+// visible reply, plus reasoning only when the provider declares replay.
 // The server's own reasoning_tokens count is used when reported. Otherwise the
 // completion is split by the characters received as reasoning and as visible
 // output (text and tool calls); with neither, the whole completion counts.
@@ -133,6 +132,7 @@ export function completionContextTokens(
   usage: unknown,
   visibleChars = 0,
   reasoningChars = 0,
+  replayReasoning = false,
 ): number | undefined {
   if (!usage || typeof usage !== "object") return undefined;
   const u = usage as Record<string, unknown>;
@@ -154,6 +154,7 @@ export function completionContextTokens(
               (reasoningChars + Math.max(0, visibleChars)),
           )
         : 0;
-  const used = prompt.data + completion.data - reasoning;
+  const used =
+    prompt.data + completion.data - (replayReasoning ? 0 : reasoning);
   return Number.isSafeInteger(used) ? used : undefined;
 }
